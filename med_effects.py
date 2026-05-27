@@ -20,11 +20,13 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib
 
+warnings.filterwarnings("ignore", message="Unable to import Axes3D.*")
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import nibabel as nib
@@ -84,7 +86,10 @@ def _resolve_path(value: object, base_dir: Path) -> Path | None:
     path = Path(text).expanduser()
     if path.is_absolute():
         return path
-    return (base_dir / path).resolve()
+    manifest_relative = (base_dir / path).resolve()
+    if manifest_relative.exists():
+        return manifest_relative
+    return path.resolve()
 
 
 def _default_region_table_for(roi_figure: Path) -> Path:
