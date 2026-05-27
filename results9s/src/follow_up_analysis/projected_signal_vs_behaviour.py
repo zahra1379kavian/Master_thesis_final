@@ -28,6 +28,7 @@ DEFAULT_WEIGHT_MAP = (
     / "voxel_weights_mean_foldavg_sub9_ses1_task0.8_bold0_beta0_smooth0_gamma1_bold_thr90_postcentral_boosted.nii.gz"
 )
 DEFAULT_OUT_DIR = ROOT / "results" / "follow_up_analysis"
+OUTLIER_MODIFIED_Z_THRESHOLD = 3.5
 
 BETA_RE = re.compile(
     r"cleaned_beta_volume_(?P<sub>sub-pd\d+)_ses-(?P<ses>\d+)_run-(?P<run>\d+)\.npy$"
@@ -86,6 +87,38 @@ def _align_trials(projected_signal: np.ndarray, behaviour_rt: np.ndarray, label:
         stacklevel=2,
     )
     return projected_signal[:n_keep], behaviour_rt[:n_keep]
+
+
+def _rt_outlier_mask(rt: pd.Series) -> np.ndarray:
+    values = rt.to_numpy(dtype=np.float64)
+    finite = np.isfinite(values)
+    outliers = np.zeros(values.shape, dtype=bool)
+    if np.count_nonzero(finite) < 3:
+        return outliers
+
+    median = np.nanmedian(values[finite])
+    mad = np.nanmedian(np.abs(values[finite] - median))
+    if not np.isfinite(mad) or mad <= 0:
+        return outliers
+
+    modified_z = 0.6745 * (values[finite] - median) / mad
+    outliers[finite] = np.abs(modified_z) > OUTLIER_MODIFIED_Z_THRESHOLD
+    return outliers
+
+
+def _remove_rt_outliers(df: pd.DataFrame) -> pd.DataFrame:
+    outlier_masks = []
+    for _, group in df.groupby(["sub", "ses", "run"], sort=False):
+        outlier_masks.append(pd.Series(_rt_outlier_mask(group["behaviour_rt"]), index=group.index))
+
+    if not outlier_masks:
+        return df
+
+    outliers = pd.concat(outlier_masks).sort_index()
+    n_outliers = int(outliers.sum())
+    if n_outliers:
+        print(f"Removed {n_outliers} RT outlier trials using per-run modified z>{OUTLIER_MODIFIED_Z_THRESHOLD}.")
+    return df.loc[~outliers].copy()
 
 
 def _project_beta(beta_path: Path, weights: np.ndarray) -> np.ndarray:
@@ -173,46 +206,49 @@ def _build_projection_table(
 def _save_subject_scatter(df: pd.DataFrame, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     subjects = sorted(df["sub"].unique())
-    n_cols = 2
-    n_rows = int(np.ceil(len(subjects) / n_cols))
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(6.2 * n_cols, 4.8 * n_rows), squeeze=False)
+    sessions = sorted(df["ses"].unique())
+    n_rows = len(subjects)
+    n_cols = len(sessions)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(6.2 * n_cols, 4.2 * n_rows), squeeze=False)
     session_colors = {1: "#4C78A8", 2: "#C23B4B"}
 
-    for ax, sub in zip(axes.ravel(), subjects):
-        sub_df = df[df["sub"] == sub]
-        for ses, ses_df in sub_df.groupby("ses", sort=True):
+    for row_idx, sub in enumerate(subjects):
+        for col_idx, ses in enumerate(sessions):
+            ax = axes[row_idx, col_idx]
+            panel_df = df[(df["sub"] == sub) & (df["ses"] == ses)]
+            if panel_df.empty:
+                ax.axis("off")
+                continue
+
             ax.scatter(
-                ses_df["projected_signal"],
-                ses_df["behaviour_rt"],
+                panel_df["projected_signal"],
+                panel_df["behaviour_rt"],
                 s=22,
                 alpha=0.68,
                 linewidths=0,
                 color=session_colors.get(int(ses), "#7A7A7A"),
-                label=f"ses-{int(ses)}",
             )
 
-        finite = np.isfinite(sub_df["projected_signal"]) & np.isfinite(sub_df["behaviour_rt"])
-        n_finite = int(finite.sum())
-        corr_text = "r=NA"
-        if n_finite >= 3:
-            corr = np.corrcoef(
-                sub_df.loc[finite, "projected_signal"].to_numpy(dtype=np.float64),
-                sub_df.loc[finite, "behaviour_rt"].to_numpy(dtype=np.float64),
-            )[0, 1]
-            corr_text = f"r={corr:.2f}"
+            finite = np.isfinite(panel_df["projected_signal"]) & np.isfinite(panel_df["behaviour_rt"])
+            n_finite = int(finite.sum())
+            corr_text = "r=NA"
+            if n_finite >= 3:
+                x = panel_df.loc[finite, "projected_signal"].to_numpy(dtype=np.float64)
+                y = panel_df.loc[finite, "behaviour_rt"].to_numpy(dtype=np.float64)
+                corr = np.corrcoef(x, y)[0, 1]
+                corr_text = f"r={corr:.2f}"
+                if np.nanmax(x) > np.nanmin(x):
+                    slope, intercept = np.polyfit(x, y, deg=1)
+                    x_fit = np.linspace(np.nanmin(x), np.nanmax(x), 100)
+                    ax.plot(x_fit, slope * x_fit + intercept, color="black", linewidth=1.8)
 
-        ax.set_title(f"{sub} ({corr_text}, n={n_finite})")
-        ax.set_xlabel("Projected signal")
-        ax.set_ylabel("Behaviour RT")
-        ax.grid(alpha=0.25)
-        ax.legend(frameon=False, fontsize=9)
+            ax.set_title(f"{sub} ses-{int(ses)} ({corr_text}, n={n_finite})")
+            ax.set_xlabel("Projected signal")
+            ax.set_ylabel("Behaviour RT")
+            ax.grid(alpha=0.25)
 
-    for ax in axes.ravel()[len(subjects) :]:
-        ax.axis("off")
-
-    fig.suptitle("Projected signal vs behaviour RT by subject", y=0.995)
+    fig.suptitle("Projected signal vs behaviour RT by subject (RT outliers removed)", y=0.995)
     fig.tight_layout()
-    fig.savefig(out_dir / "projected_signal_vs_behaviour_by_subject.pdf", bbox_inches="tight")
     fig.savefig(out_dir / "projected_signal_vs_behaviour_by_subject.png", dpi=300, bbox_inches="tight")
     plt.close(fig)
 
@@ -226,13 +262,12 @@ def main() -> None:
         weights=weights,
         behaviour_column=args.behaviour_column,
     )
+    projection_df = _remove_rt_outliers(projection_df)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    projection_df.to_csv(args.out_dir / "projected_signal_vs_behaviour_trials.csv", index=False)
     _save_subject_scatter(projection_df, args.out_dir)
 
-    print(f"Saved {len(projection_df)} paired trial rows to {args.out_dir}")
-    print(f"Saved scatter plots to {args.out_dir}")
+    print(f"Saved scatter plot PNG to {args.out_dir}")
 
 
 if __name__ == "__main__":
