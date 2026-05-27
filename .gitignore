@@ -16,3 +16,5 @@ results/
 /empca
 /GLMsingle
 /data
+*.png
+/figures
