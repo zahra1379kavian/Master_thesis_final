@@ -339,22 +339,22 @@ def _plot_robustness(summary_df: pd.DataFrame, region_df: pd.DataFrame, out_base
         .reindex(index=node_order, columns=[_pct_label(p) for p in summary_df["percentile"]])
     )
 
-    fig = plt.figure(figsize=(11.5, max(8.5, 0.31 * max(1, len(node_order)) + 3.4)), facecolor="white")
-    gs = fig.add_gridspec(2, 2, height_ratios=[1.05, max(2.2, 0.15 * max(1, len(node_order)))], hspace=0.36, wspace=0.28)
+    fig = plt.figure(figsize=(10.6, max(7.4, 0.24 * max(1, len(node_order)) + 2.5)), facecolor="white")
+    gs = fig.add_gridspec(2, 2, height_ratios=[0.9, max(2.2, 0.17 * max(1, len(node_order)))], hspace=0.22, wspace=0.28)
     ax_vox = fig.add_subplot(gs[0, 0])
     ax_stable = fig.add_subplot(gs[0, 1])
     ax_heat = fig.add_subplot(gs[1, :])
 
     ax_vox.plot(summary_df["percentile"], summary_df["n_voxels"], marker="o", color="#2563eb", linewidth=2.0)
     ax_vox.set_xlabel("Percentile threshold")
-    ax_vox.set_ylabel("Suprathreshold voxels")
+    ax_vox.set_ylabel("Voxels")
     ax_vox.grid(alpha=0.25)
     ax_vox.axvline(REFERENCE_THRESHOLD, color="#dc2626", linestyle="--", linewidth=1.3)
 
     ax_stable.plot(summary_df["percentile"], summary_df["p90_nodes_retained"], marker="o", color="#0f766e", label="p90 nodes retained")
     ax_stable.plot(summary_df["percentile"], summary_df["node_jaccard_vs_p90"], marker="s", color="#7c3aed", label="node Jaccard vs p90")
     ax_stable.set_xlabel("Percentile threshold")
-    ax_stable.set_ylabel("Region-set stability")
+    ax_stable.set_ylabel("Stability")
     ax_stable.set_ylim(-0.03, 1.03)
     ax_stable.grid(alpha=0.25)
     ax_stable.axvline(REFERENCE_THRESHOLD, color="#dc2626", linestyle="--", linewidth=1.3)
@@ -367,7 +367,6 @@ def _plot_robustness(summary_df: pd.DataFrame, region_df: pd.DataFrame, out_base
     ax_heat.set_yticks(np.arange(pivot.shape[0]))
     ax_heat.set_yticklabels(pivot.index.tolist(), fontsize=8)
     ax_heat.set_xlabel("Threshold")
-    ax_heat.set_title(f"Reportable region nodes (>= {min_report_voxels} voxels); color = log10(voxels + 1)")
     for row_idx in range(pivot.shape[0]):
         for col_idx in range(pivot.shape[1]):
             value = int(pivot.iat[row_idx, col_idx])
@@ -375,10 +374,9 @@ def _plot_robustness(summary_df: pd.DataFrame, region_df: pd.DataFrame, out_base
                 ax_heat.text(col_idx, row_idx, str(value), ha="center", va="center", fontsize=6.5, color="white" if heat[row_idx, col_idx] > 2.1 else "black")
     cbar = fig.colorbar(im, ax=ax_heat, fraction=0.018, pad=0.018)
     cbar.set_label("log10(voxels + 1)")
-    fig.suptitle("Threshold robustness of final voxel-weight network", fontsize=14, y=0.995)
     out_base.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(f"{out_base}.png", dpi=220, bbox_inches="tight")
-    fig.savefig(f"{out_base}.pdf", bbox_inches="tight")
+    fig.savefig(f"{out_base}.png", dpi=220, bbox_inches="tight", pad_inches=0.04)
+    fig.savefig(f"{out_base}.pdf", bbox_inches="tight", pad_inches=0.04)
     plt.close(fig)
 
 
