@@ -13,10 +13,11 @@ import matplotlib.pyplot as plt
 import nibabel as nib
 import numpy as np
 import pandas as pd
+from nilearn import datasets
 from scipy import stats
 from sklearn.feature_selection import mutual_info_regression
 import statsmodels.formula.api as smf
-from threshold_robustness_voxel_network import DEFAULT_AAL_VERSION, REFERENCE_THRESHOLD, UNASSIGNED_ROI, _build_roi_groups
+from threshold_robustness_voxel_network import DEFAULT_AAL_VERSION, REFERENCE_THRESHOLD, ROIGroup, UNASSIGNED_ROI, _build_roi_groups, _coarse_aal_group_name, _resample_label_img
 DEFAULT_WEIGHT_MAP = Path('data/voxel_weights_task1_bold1_beta0.75_smooth1.8_gamma1.5.nii.gz')
 DEFAULT_ROI_FIGURE = Path('figures/task1_bold1_beta0.75_smooth1.8_gamma1.5_threshold_robustness_atlas_regions.png')
 DEFAULT_ROI_REGION_TABLE = Path('figures/task1_bold1_beta0.75_smooth1.8_gamma1.5_threshold_robustness_regions.csv')
@@ -193,7 +194,66 @@ def _load_roi_names(region_table, roi_percentile, min_report_voxels):
     rows = rows.sort_values('n_voxels', ascending=False)
     return rows['roi_name'].astype(str).tolist()
 
-def _build_weighted_rois(weight_values, roi_names, groups, roi_percentile, min_report_voxels):
+def _build_lateralized_roi_groups(reference_img, aal_version, cache_dir, roi_names):
+    data_dir = str(cache_dir) if cache_dir is not None else None
+    atlas = datasets.fetch_atlas_aal(version=aal_version, data_dir=data_dir, verbose=0)
+    atlas_img = atlas.maps if isinstance(atlas.maps, nib.Nifti1Image) else nib.load(atlas.maps)
+    atlas_data = _resample_label_img(atlas_img, reference_img)
+    atlas_source = f'AAL3v2 ({Path(str(atlas.maps)).name})' if aal_version == '3v2' else f'AAL {aal_version}'
+    keep = set(roi_names)
+    group_masks = {}
+    group_labels = {}
+    for (label_value, label_name) in zip(atlas.indices, atlas.labels):
+        label_value = int(label_value)
+        label_name = str(label_name)
+        if label_value == 0 or label_name.lower() == 'background':
+            continue
+        if label_name.endswith('_L'):
+            hemisphere = 'L'
+        elif label_name.endswith('_R'):
+            hemisphere = 'R'
+        else:
+            continue
+        group_name = _coarse_aal_group_name(label_name)
+        if group_name not in keep:
+            continue
+        roi_name = f'{group_name}_{hemisphere}'
+        mask = atlas_data == label_value
+        if not np.any(mask):
+            continue
+        if roi_name in group_masks:
+            group_masks[roi_name] |= mask
+            group_labels[roi_name].append(label_name)
+        else:
+            group_masks[roi_name] = mask.copy()
+            group_labels[roi_name] = [label_name]
+    ordered_names = [f'{name}_{hemisphere}' for name in roi_names for hemisphere in ('L', 'R')]
+    missing = [name for name in ordered_names if name not in group_masks]
+    if missing:
+        raise RuntimeError('Missing lateralized AAL ROI masks: ' + ', '.join(missing))
+    groups = [ROIGroup(name=name, source=atlas_source, mask=group_masks[name], matched_labels=tuple(group_labels[name])) for name in ordered_names]
+    metadata = {'roi_definition': 'aal3_left_right_coarse_anatomical_groups', 'priority_order': ordered_names + [UNASSIGNED_ROI], 'atlas_info': {'name': 'AAL3v2 (Automated Anatomical Labeling 3)' if aal_version == '3v2' else f'AAL {aal_version}', 'description': atlas_source, 'version': aal_version, 'map': str(atlas.maps), 'n_labels': len([label for label in atlas.indices if int(label) != 0]), 'n_regions': len(groups), 'grouping': 'Original AAL left/right labels merged into coarse anatomical groups within hemisphere; midline labels excluded.'}, 'roi_sources': {group.name: group.source for group in groups}, 'roi_matched_labels': {group.name: group.matched_labels for group in groups}}
+    return (groups, metadata)
+
+def _analysis_roi_setup(args, reference_img):
+    roi_names = _load_roi_names(args.roi_region_table, args.roi_percentile, args.min_report_voxels)
+    excluded_rois = {str(name).strip() for name in args.exclude_rois if str(name).strip()}
+    if excluded_rois:
+        roi_names = [name for name in roi_names if name not in excluded_rois]
+    if args.split_hemispheres:
+        (groups, metadata) = _build_lateralized_roi_groups(reference_img, args.aal_version, args.atlas_cache_dir, roi_names)
+        weighted_roi_names = [group.name for group in groups]
+        min_roi_voxels = int(args.min_lateralized_voxels)
+    else:
+        (groups, metadata) = _build_roi_groups(reference_img, args.aal_version, args.atlas_cache_dir)
+        weighted_roi_names = roi_names
+        min_roi_voxels = int(args.min_report_voxels)
+    metadata.update({'split_hemispheres': bool(args.split_hemispheres), 'source_roi_names': roi_names, 'excluded_rois': sorted(excluded_rois), 'min_roi_voxels': int(min_roi_voxels)})
+    return (groups, metadata, weighted_roi_names, min_roi_voxels)
+
+def _build_weighted_rois(weight_values, roi_names, groups, roi_percentile, min_report_voxels, min_roi_voxels=None):
+    if min_roi_voxels is None:
+        min_roi_voxels = min_report_voxels
     finite_nonzero = np.isfinite(weight_values) & (weight_values != 0)
     if not np.any(finite_nonzero):
         raise RuntimeError('No finite nonzero voxels found in the weight map')
@@ -207,7 +267,7 @@ def _build_weighted_rois(weight_values, roi_names, groups, roi_percentile, min_r
     for name in roi_names:
         mask = selected & group_lookup[name].mask
         n_voxels = int(np.count_nonzero(mask))
-        if n_voxels < min_report_voxels:
+        if n_voxels < min_roi_voxels:
             continue
         roi_weights = np.asarray(weight_values[mask], dtype=np.float64)
         roi_weights = np.where(np.isfinite(roi_weights) & (roi_weights > 0), roi_weights, 0.0)
@@ -499,6 +559,9 @@ def build_parser():
     parser.add_argument('--subjects', nargs='+', default=None)
     parser.add_argument('--complete-subjects-only', action='store_true')
     parser.add_argument('--out-dir', type=Path, default=DEFAULT_OUT_DIR)
+    parser.add_argument('--split-hemispheres', action='store_true')
+    parser.add_argument('--exclude-rois', nargs='*', default=())
+    parser.add_argument('--min-lateralized-voxels', type=int, default=1)
     parser.add_argument('--aal-version', default=DEFAULT_AAL_VERSION)
     parser.add_argument('--atlas-cache-dir', type=Path, default=DEFAULT_ATLAS_CACHE_DIR)
     parser.add_argument('--mi-neighbors', type=int, default=DEFAULT_MI_NEIGHBORS)
@@ -510,9 +573,8 @@ def build_parser():
 def _print_dry_run(args):
     weight_img = nib.load(str(args.weight_map))
     weight_values = np.asarray(weight_img.get_fdata(), dtype=np.float64)
-    (groups, _) = _build_roi_groups(weight_img, args.aal_version, args.atlas_cache_dir)
-    roi_names = _load_roi_names(args.roi_region_table, args.roi_percentile, args.min_report_voxels)
-    (rois, roi_threshold) = _build_weighted_rois(weight_values=weight_values, roi_names=roi_names, groups=groups, roi_percentile=args.roi_percentile, min_report_voxels=args.min_report_voxels)
+    (groups, _, roi_names, min_roi_voxels) = _analysis_roi_setup(args, weight_img)
+    (rois, roi_threshold) = _build_weighted_rois(weight_values=weight_values, roi_names=roi_names, groups=groups, roi_percentile=args.roi_percentile, min_report_voxels=args.min_report_voxels, min_roi_voxels=min_roi_voxels)
     specs = _load_session_specs(args)
     session_df = _session_summary(specs)
     beta_shape_counts = _beta_shape_counts(specs)
@@ -521,6 +583,8 @@ def _print_dry_run(args):
     print('Planned steps:')
     print(f'1. Load weight map: {args.weight_map}')
     print(f'2. Rebuild p{args.roi_percentile:g} weighted AAL ROI masks from: {args.roi_region_table}')
+    if args.split_hemispheres:
+        print('   Split selected AAL groups into left/right hemisphere ROI masks.')
     print(f'3. Extract weighted mean beta trial series per ROI from {len(specs)} subject/session inputs.')
     print('4. Concatenate runs within each subject/session.')
     print(f'5. Compute {CONNECTIVITY_METRIC} ROI-edge matrices for each subject/session.')
@@ -529,6 +593,7 @@ def _print_dry_run(args):
     print()
     print(f'ROI count: {len(rois)}')
     print(f'Weight threshold: {roi_threshold:.8g}')
+    print(f'Minimum selected voxels per ROI: {min_roi_voxels}')
     print('Top ROI masks: ' + ', '.join((f'{roi.name} ({roi.n_voxels})' for roi in rois[:8])))
     print()
     print('Input sessions by state:')
@@ -560,9 +625,8 @@ def main():
         return 0
     weight_img = nib.load(str(args.weight_map))
     weight_values = np.asarray(weight_img.get_fdata(), dtype=np.float64)
-    (groups, metadata) = _build_roi_groups(weight_img, args.aal_version, args.atlas_cache_dir)
-    roi_names = _load_roi_names(args.roi_region_table, args.roi_percentile, args.min_report_voxels)
-    (rois, roi_threshold) = _build_weighted_rois(weight_values=weight_values, roi_names=roi_names, groups=groups, roi_percentile=args.roi_percentile, min_report_voxels=args.min_report_voxels)
+    (groups, metadata, roi_names, min_roi_voxels) = _analysis_roi_setup(args, weight_img)
+    (rois, roi_threshold) = _build_weighted_rois(weight_values=weight_values, roi_names=roi_names, groups=groups, roi_percentile=args.roi_percentile, min_report_voxels=args.min_report_voxels, min_roi_voxels=min_roi_voxels)
     specs = _load_session_specs(args)
     out_dir = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -582,7 +646,7 @@ def main():
     pairwise_path = out_dir / 'pairwise_metric_values.csv'
     pairwise.to_csv(pairwise_path, index=False)
     figure_path = _plot_cross_subject_distribution(pairwise, out_dir)
-    metadata.update({'weight_map': str(args.weight_map), 'roi_definition_figure': str(args.roi_definition_figure), 'roi_region_table': str(args.roi_region_table), 'session_manifest': str(args.session_manifest) if args.session_manifest.exists() else None, 'beta_root': str(args.beta_root), 'roi_percentile': float(args.roi_percentile), 'weight_threshold': roi_threshold, 'min_report_voxels': int(args.min_report_voxels), 'connectivity_metric': CONNECTIVITY_METRIC, 'comparison_metric': COMPARISON_METRIC, 'mi_neighbors': int(args.mi_neighbors), 'sessions': [{'label': spec.label, 'subject': spec.subject, 'session': spec.session, 'state': spec.state, 'bold_path': str(spec.bold_path) if spec.bold_path else None, 'timeseries_path': str(spec.timeseries_path) if spec.timeseries_path else None, 'beta_paths': [str(path) for path in spec.beta_paths]} for spec in specs]})
+    metadata.update({'weight_map': str(args.weight_map), 'roi_definition_figure': str(args.roi_definition_figure), 'roi_region_table': str(args.roi_region_table), 'session_manifest': str(args.session_manifest) if args.session_manifest.exists() else None, 'beta_root': str(args.beta_root), 'roi_percentile': float(args.roi_percentile), 'weight_threshold': roi_threshold, 'min_report_voxels': int(args.min_report_voxels), 'min_roi_voxels': int(min_roi_voxels), 'connectivity_metric': CONNECTIVITY_METRIC, 'comparison_metric': COMPARISON_METRIC, 'mi_neighbors': int(args.mi_neighbors), 'sessions': [{'label': spec.label, 'subject': spec.subject, 'session': spec.session, 'state': spec.state, 'bold_path': str(spec.bold_path) if spec.bold_path else None, 'timeseries_path': str(spec.timeseries_path) if spec.timeseries_path else None, 'beta_paths': [str(path) for path in spec.beta_paths]} for spec in specs]})
     (out_dir / 'metadata.json').write_text(json.dumps(metadata, indent=2), encoding='utf-8')
     print(f'Saved {pairwise_path}')
     print(f'Saved {figure_path}')
