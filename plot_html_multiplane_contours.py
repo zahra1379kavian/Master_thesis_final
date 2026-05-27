@@ -56,18 +56,21 @@ def crop(a, m):
     y0, y1, x0, x1 = max(y.min() - 4, 0), min(y.max() + 5, a.shape[0]), max(x.min() - 4, 0), min(x.max() + 5, a.shape[1])
     return pad(a[y0:y1, x0:x1]), pad(m[y0:y1, x0:x1])
 def anat(a):
-    r = plt.cm.gray(np.clip(a / mx, 0, 1))[..., :3]
-    r[~binary_fill_holes(a > 0)] = 1
+    brain = binary_fill_holes(a > 0)
+    r = plt.cm.gray(np.clip(a / mx, 0, 1))
+    r[~brain, 3] = 0
     return r
 base.parent.mkdir(exist_ok=True)
 fig, axes = plt.subplots(6, 5, figsize=(12.6, 14.8), facecolor="white")
 items = [(mode, cut) for mode in "xyz" for cut in cuts[mode]]
 for i, (ax, (mode, cut)) in enumerate(zip(axes.ravel(), items)):
     a, m = crop(plane(bg, mode, cut), plane(mask, mode, cut))
+    ax.set_facecolor("none")
+    ax.patch.set_alpha(0)
     ax.imshow(anat(a), interpolation="nearest")
     ax.contour(m.astype(float), levels=[0.5], colors="#dc2626", linewidths=1.8)
     ax.set_axis_off()
-fig.subplots_adjust(left=0.005, right=0.995, bottom=0.005, top=0.995, wspace=-0.35, hspace=0.01)
+fig.subplots_adjust(left=0.005, right=0.995, bottom=0.005, top=0.995, wspace=-0.04, hspace=0.01)
 for ax in axes.ravel()[:5]:
     box = ax.get_position()
     fig.text(box.x0 + box.width * 0.22, box.y1 - box.height * 0.04, "L", ha="center", va="top", fontsize=11, color="black")
