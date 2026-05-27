@@ -24,7 +24,20 @@ def volume(a):
 bg = volume(imgs[0])[..., :3].mean(-1).astype(float)
 mask = volume(imgs[2])[..., 3] > 0
 mx = np.percentile(bg[bg > 0], 99.5)
-cuts = {"x": [22, -24, -62], "y": [-64, -24, 2, 60], "z": [-42, -20, -4, 56]}
+def coord(mode, k):
+    i = "xyz".index(mode)
+    return int(round(aff[i, i] * (k + 1) + aff[i, 3]))
+def pick(mode, n=10, gap=3):
+    i = "xyz".index(mode)
+    c = mask.sum(tuple(j for j in range(3) if j != i))
+    out = []
+    for k in np.argsort(c)[::-1]:
+        if c[k] and all(abs(k - j) >= gap for j in out):
+            out.append(int(k))
+        if len(out) == n:
+            break
+    return [coord(mode, k) for k in sorted(out)]
+cuts = {mode: pick(mode) for mode in "xyz"}
 def index(mode, cut):
     i = "xyz".index(mode)
     return int(round((cut - aff[i, 3]) / aff[i, i] - 1))
@@ -36,26 +49,29 @@ def plane(v, mode, cut):
         return v[:, k, :].T[::-1]
     return v[:, :, k].T[::-1]
 def pad(a):
-    return np.pad(a, ((10, 14), (8, 8)), mode="constant")
+    return np.pad(a, ((3, 5), (2, 2)), mode="constant")
+def crop(a, m):
+    b = binary_fill_holes(a > 0) | m
+    y, x = np.where(b)
+    y0, y1, x0, x1 = max(y.min() - 4, 0), min(y.max() + 5, a.shape[0]), max(x.min() - 4, 0), min(x.max() + 5, a.shape[1])
+    return pad(a[y0:y1, x0:x1]), pad(m[y0:y1, x0:x1])
 def anat(a):
     r = plt.cm.gray(np.clip(a / mx, 0, 1))[..., :3]
     r[~binary_fill_holes(a > 0)] = 1
     return r
 base.parent.mkdir(exist_ok=True)
-fig = plt.figure(figsize=(14.4, 12), facecolor="white")
-outer = fig.add_gridspec(3, 1, hspace=0.05)
-rows = [outer[0].subgridspec(1, 3, wspace=0.06), outer[1].subgridspec(1, 4, wspace=0.06), outer[2].subgridspec(1, 4, wspace=0.06)]
-for i, mode in enumerate("xyz"):
-    for j, cut in enumerate(cuts[mode]):
-        ax = fig.add_subplot(rows[i][0, j])
-        a, m = pad(plane(bg, mode, cut)), pad(plane(mask, mode, cut))
-        ax.imshow(anat(a), interpolation="nearest")
-        ax.contour(m.astype(float), levels=[0.5], colors="#dc2626", linewidths=2.2)
-        ax.text(0.02, 0.02, f"{mode}={cut}", transform=ax.transAxes, ha="left", va="bottom", fontsize=16, color="black")
-        if mode != "x":
-            ax.text(0.08, 0.96, "L", transform=ax.transAxes, ha="center", va="top", fontsize=16, color="black")
-            ax.text(0.92, 0.96, "R", transform=ax.transAxes, ha="center", va="top", fontsize=16, color="black")
-        ax.set_axis_off()
+fig, axes = plt.subplots(6, 5, figsize=(12.6, 14.8), facecolor="white")
+items = [(mode, cut) for mode in "xyz" for cut in cuts[mode]]
+for i, (ax, (mode, cut)) in enumerate(zip(axes.ravel(), items)):
+    a, m = crop(plane(bg, mode, cut), plane(mask, mode, cut))
+    ax.imshow(anat(a), interpolation="nearest")
+    ax.contour(m.astype(float), levels=[0.5], colors="#dc2626", linewidths=1.8)
+    ax.set_axis_off()
+fig.subplots_adjust(left=0.005, right=0.995, bottom=0.005, top=0.995, wspace=-0.35, hspace=0.01)
+for ax in axes.ravel()[:5]:
+    box = ax.get_position()
+    fig.text(box.x0 + box.width * 0.22, box.y1 - box.height * 0.04, "L", ha="center", va="top", fontsize=11, color="black")
+    fig.text(box.x0 + box.width * 0.78, box.y1 - box.height * 0.04, "R", ha="center", va="top", fontsize=11, color="black")
 fig.savefig(f"{base}.png", dpi=200, bbox_inches="tight", pad_inches=0.02)
 fig.savefig(f"{base}.pdf", bbox_inches="tight", pad_inches=0.02)
 print(f"{base}.png")
