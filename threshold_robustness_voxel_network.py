@@ -279,6 +279,7 @@ def _plot_projection(
     title: str,
     cmap: ListedColormap,
     norm: BoundaryNorm,
+    square_span_mm: float | None = None,
 ) -> None:
     oriented, x, y = _orient_panel(data, x_values, y_values)
     ax.imshow(
@@ -289,14 +290,36 @@ def _plot_projection(
         norm=norm,
         interpolation="nearest",
     )
+    if square_span_mm is not None:
+        span = max(square_span_mm, abs(float(x[-1] - x[0])), abs(float(y[-1] - y[0])))
+        x_mid = float((x[0] + x[-1]) / 2.0)
+        y_mid = float((y[0] + y[-1]) / 2.0)
+        half_span = span / 2.0
+        ax.set_xlim(x_mid - half_span, x_mid + half_span)
+        ax.set_ylim(y_mid - half_span, y_mid + half_span)
     ax.set_title(title, fontsize=11, weight="bold")
-    ax.set_aspect("equal")
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_box_aspect(1.0)
+    ax.set_facecolor("#f5f7fb")
     ax.tick_params(labelsize=8)
     ax.grid(color="white", linewidth=0.3, alpha=0.35)
 
 
 def _display_region_name(name: str) -> str:
     return name.replace("_", " ")
+
+
+COMPACT_REGION_LABELS = {
+    "Supp_Motor_Area": "Supp. motor",
+    "ParaHippocampal": "Parahipp.",
+    "Paracentral_Lobule": "Paracentral",
+    "Rolandic_Oper": "Rolandic op.",
+    "Orbitofrontal": "OFC",
+}
+
+
+def _compact_region_label(name: str, _count: int) -> str:
+    return COMPACT_REGION_LABELS.get(name, _display_region_name(name))
 
 
 def _reference_region_counts(region_df: pd.DataFrame, min_report_voxels: int) -> dict[str, int]:
@@ -336,24 +359,18 @@ def _plot_atlas_regions(
         "Sagittal projection": (_mode_projection(label_data, axis=0), y_values, z_values),
     }
 
-    fig = plt.figure(figsize=(16.0, 10.0), facecolor="white")
-    gs = fig.add_gridspec(2, 4, width_ratios=[1.0, 1.0, 1.0, 1.75], height_ratios=[0.10, 1.0], wspace=0.24)
-    title_ax = fig.add_subplot(gs[0, :])
-    title_ax.axis("off")
-    atlas_info = metadata.get("atlas_info", {})
-    atlas_name = atlas_info.get("description", DEFAULT_ATLAS_NAME) if isinstance(atlas_info, dict) else DEFAULT_ATLAS_NAME
-    title_ax.text(
-        0.0,
-        0.6,
-        f"Atlas region preview: {atlas_name}; p90 reportable bilateral groups shown ({len(selected_groups)} labels)",
-        fontsize=14,
-        weight="bold",
-        va="center",
-    )
+    projection_spans = [
+        max(abs(float(x_axis[-1] - x_axis[0])), abs(float(y_axis[-1] - y_axis[0])))
+        for _, x_axis, y_axis in projections.values()
+    ]
+    square_span_mm = max(projection_spans)
 
-    axes = [fig.add_subplot(gs[1, idx]) for idx in range(3)]
+    fig = plt.figure(figsize=(10.8, 5.05), facecolor="white")
+    gs = fig.add_gridspec(2, 3, height_ratios=[1.0, 0.18], hspace=0.08, wspace=0.20)
+
+    axes = [fig.add_subplot(gs[0, idx]) for idx in range(3)]
     for ax, (title, (projection, x_axis, y_axis)) in zip(axes, projections.items()):
-        _plot_projection(ax, projection, x_axis, y_axis, title, cmap, norm)
+        _plot_projection(ax, projection, x_axis, y_axis, title, cmap, norm, square_span_mm)
 
     centers: dict[str, np.ndarray] = {}
     for group in selected_groups:
@@ -385,24 +402,23 @@ def _plot_atlas_regions(
             arrowprops={"arrowstyle": "-", "color": "#334155", "linewidth": 0.45, "alpha": 0.70},
         )
 
-    legend_ax = fig.add_subplot(gs[1, 3])
+    legend_ax = fig.add_subplot(gs[1, :])
     legend_ax.axis("off")
-    legend_ax.text(0.0, 1.0, "p90 reportable AAL3 groups (voxels)", fontsize=10.5, weight="bold", va="top")
-    n_cols = 3
+    n_cols = 6
     rows_per_col = int(np.ceil(len(selected_groups) / n_cols))
-    row_step = 0.90 / max(1, rows_per_col)
+    row_step = 0.31
     for idx, group in enumerate(selected_groups, start=1):
         col = (idx - 1) // rows_per_col
         row = (idx - 1) % rows_per_col
-        x = col / n_cols
-        y = 0.94 - row * row_step
-        label = f"{_display_region_name(group.name)} ({reference_counts.get(group.name, 0)})"
-        legend_ax.add_patch(plt.Rectangle((x, y - 0.014), 0.016, 0.016, color=colors[idx - 1], transform=legend_ax.transAxes))
-        legend_ax.text(x + 0.022, y - 0.006, label, fontsize=5.7, va="center")
+        x = (col + 0.02) / n_cols
+        y = 0.78 - row * row_step
+        label = _compact_region_label(group.name, reference_counts.get(group.name, 0))
+        legend_ax.add_patch(plt.Rectangle((x, y - 0.040), 0.010, 0.080, color=colors[idx - 1], transform=legend_ax.transAxes))
+        legend_ax.text(x + 0.014, y, label, fontsize=7.0, va="center")
 
     out_base.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(f"{out_base}_atlas_regions.png", dpi=220, bbox_inches="tight", pad_inches=0.04)
-    fig.savefig(f"{out_base}_atlas_regions.pdf", bbox_inches="tight", pad_inches=0.04)
+    fig.savefig(f"{out_base}_atlas_regions.png", dpi=220, bbox_inches="tight", pad_inches=0.01)
+    fig.savefig(f"{out_base}_atlas_regions.pdf", bbox_inches="tight", pad_inches=0.01)
     plt.close(fig)
 
 
