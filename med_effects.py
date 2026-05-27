@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import re
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,12 +52,18 @@ DEFAULT_ROI_REGION_TABLE = Path(
     "figures/task1_bold1_beta0.75_smooth1.8_gamma1.5_threshold_robustness_regions.csv"
 )
 DEFAULT_SESSION_MANIFEST = Path("data/med_effects_session_manifest.csv")
+DEFAULT_BETA_ROOT = Path(
+    "/mnt/TeamShare/Data_Masterfile/H20-00572_All-Dressed/Zahra-Thesis-Data/"
+    "fmri_opt_group/results_beta_preprocessed"
+)
 DEFAULT_OUT_DIR = Path("figures/med_effects")
 DEFAULT_ATLAS_CACHE_DIR = Path("/home/zkavian/nilearn_data")
 DEFAULT_MIN_REPORT_VOXELS = 25
 DEFAULT_MI_NEIGHBORS = 3
 CONNECTIVITY_METRIC = "mutual_information_ksg"
 COMPARISON_METRIC = "laplacian_spectral_distance_signed"
+BETA_FILE_RE = re.compile(r"cleaned_beta_volume_(?P<subject>sub-pd\d+)_ses-(?P<session>\d+)_run-(?P<run>\d+)\.npy$")
+DEFAULT_SESSION_STATES = {"1": "off", "2": "on"}
 
 
 @dataclass(frozen=True)
@@ -75,6 +82,7 @@ class SessionSpec:
     state: str
     bold_path: Path | None
     timeseries_path: Path | None
+    beta_paths: tuple[Path, ...]
 
 
 def _resolve_path(value: object, base_dir: Path) -> Path | None:
@@ -112,8 +120,11 @@ def _read_manifest(path: Path) -> list[SessionSpec]:
     missing_columns = sorted(required - set(manifest.columns))
     if missing_columns:
         raise ValueError(f"{path} is missing required columns: {', '.join(missing_columns)}")
-    if "bold_path" not in manifest.columns and "timeseries_path" not in manifest.columns:
-        raise ValueError(f"{path} must include either a bold_path column or a timeseries_path column")
+    input_columns = {"bold_path", "timeseries_path", "beta_path", "beta_paths"} & set(manifest.columns)
+    if not input_columns:
+        raise ValueError(
+            f"{path} must include one of: bold_path, timeseries_path, beta_path, beta_paths"
+        )
 
     specs: list[SessionSpec] = []
     base_dir = path.parent.resolve()
@@ -126,8 +137,18 @@ def _read_manifest(path: Path) -> list[SessionSpec]:
         label = str(row.get("label", f"{subject}_ses-{session}")).strip()
         bold_path = _resolve_path(row.get("bold_path"), base_dir)
         timeseries_path = _resolve_path(row.get("timeseries_path"), base_dir)
-        if bold_path is None and timeseries_path is None:
-            raise ValueError(f"{path} row {row_index + 2} must provide bold_path or timeseries_path")
+        beta_paths = []
+        beta_path = _resolve_path(row.get("beta_path"), base_dir)
+        if beta_path is not None:
+            beta_paths.append(beta_path)
+        beta_path_text = row.get("beta_paths")
+        if not pd.isna(beta_path_text):
+            for item in str(beta_path_text).split(";"):
+                beta_item = _resolve_path(item, base_dir)
+                if beta_item is not None:
+                    beta_paths.append(beta_item)
+        if bold_path is None and timeseries_path is None and not beta_paths:
+            raise ValueError(f"{path} row {row_index + 2} must provide bold_path, timeseries_path, or beta_path")
         specs.append(
             SessionSpec(
                 label=label,
@@ -136,9 +157,102 @@ def _read_manifest(path: Path) -> list[SessionSpec]:
                 state=state,
                 bold_path=bold_path,
                 timeseries_path=timeseries_path,
+                beta_paths=tuple(beta_paths),
             )
         )
     return specs
+
+
+def _discover_beta_sessions(beta_root: Path, session_states: dict[str, str]) -> list[SessionSpec]:
+    if not beta_root.exists():
+        raise FileNotFoundError(f"Missing beta root: {beta_root}")
+    grouped: dict[tuple[str, str], list[tuple[int, Path]]] = {}
+    for path in sorted(beta_root.glob("sub-pd*/cleaned_beta_volume_sub-pd*_ses-*_run-*.npy")):
+        match = BETA_FILE_RE.match(path.name)
+        if match is None:
+            continue
+        subject = match.group("subject")
+        session = match.group("session")
+        run = int(match.group("run"))
+        grouped.setdefault((subject, session), []).append((run, path))
+    if not grouped:
+        raise FileNotFoundError(f"No cleaned_beta_volume files found under {beta_root}")
+
+    specs: list[SessionSpec] = []
+    for (subject, session), run_paths in sorted(grouped.items()):
+        state = session_states.get(str(session))
+        if state is None:
+            raise ValueError(f"No medication state mapping was provided for session {session}")
+        paths = tuple(path for _, path in sorted(run_paths))
+        specs.append(
+            SessionSpec(
+                label=f"{subject}_ses-{session}",
+                subject=subject,
+                session=str(session),
+                state=state,
+                bold_path=None,
+                timeseries_path=None,
+                beta_paths=paths,
+            )
+        )
+    return specs
+
+
+def _normalize_subject(subject: str) -> str:
+    text = str(subject).strip()
+    return text if text.startswith("sub-") else f"sub-{text}"
+
+
+def _filter_session_specs(args: argparse.Namespace, specs: list[SessionSpec]) -> list[SessionSpec]:
+    if args.subjects:
+        keep = {_normalize_subject(subject) for subject in args.subjects}
+        specs = [spec for spec in specs if spec.subject in keep]
+    if args.complete_subjects_only:
+        states_by_subject: dict[str, set[str]] = {}
+        for spec in specs:
+            states_by_subject.setdefault(spec.subject, set()).add(spec.state)
+        complete_subjects = {
+            subject for subject, states in states_by_subject.items() if {"off", "on"}.issubset(states)
+        }
+        specs = [spec for spec in specs if spec.subject in complete_subjects]
+    if not specs:
+        raise ValueError("No sessions remain after subject/session filtering")
+    return specs
+
+
+def _load_session_specs(args: argparse.Namespace) -> list[SessionSpec]:
+    if args.session_manifest.exists():
+        specs = _read_manifest(args.session_manifest)
+    else:
+        specs = _discover_beta_sessions(args.beta_root, DEFAULT_SESSION_STATES)
+    return _filter_session_specs(args, specs)
+
+
+def _session_summary(specs: list[SessionSpec]) -> pd.DataFrame:
+    rows = []
+    for spec in specs:
+        input_kind = "timeseries" if spec.timeseries_path is not None else "bold" if spec.bold_path is not None else "beta"
+        rows.append(
+            {
+                "label": spec.label,
+                "subject": spec.subject,
+                "session": spec.session,
+                "state": spec.state,
+                "input_kind": input_kind,
+                "n_beta_runs": len(spec.beta_paths),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _beta_shape_counts(specs: list[SessionSpec]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for spec in specs:
+        for beta_path in spec.beta_paths:
+            data = np.load(beta_path, mmap_mode="r")
+            key = f"{tuple(data.shape)} {data.dtype}"
+            counts[key] = counts.get(key, 0) + 1
+    return counts
 
 
 def _missing_inputs(args: argparse.Namespace) -> list[str]:
@@ -151,14 +265,8 @@ def _missing_inputs(args: argparse.Namespace) -> list[str]:
         missing.append(
             f"{args.roi_region_table} (machine-readable ROI table; the PNG alone is not a voxel mask)"
         )
-    if not args.session_manifest.exists():
-        missing.append(
-            f"{args.session_manifest} (session manifest with subject, session, state, and bold_path or timeseries_path)"
-        )
-        return missing
-
     try:
-        specs = _read_manifest(args.session_manifest)
+        specs = _load_session_specs(args)
     except (FileNotFoundError, ValueError) as exc:
         missing.append(str(exc))
         return missing
@@ -168,6 +276,9 @@ def _missing_inputs(args: argparse.Namespace) -> list[str]:
             missing.append(f"{spec.timeseries_path} (ROI time-series CSV for {spec.label})")
         if spec.timeseries_path is None and spec.bold_path is not None and not spec.bold_path.exists():
             missing.append(f"{spec.bold_path} (4D BOLD NIfTI for {spec.label})")
+        for beta_path in spec.beta_paths:
+            if not beta_path.exists():
+                missing.append(f"{beta_path} (4D cleaned beta volume for {spec.label})")
     return missing
 
 
@@ -260,6 +371,16 @@ def _extract_roi_timeseries(
     return pd.DataFrame(roi_series)
 
 
+def _extract_roi_timeseries_from_beta(beta_path: Path, reference_img: nib.Nifti1Image, rois: list[WeightedROI]) -> pd.DataFrame:
+    data = np.load(beta_path, mmap_mode="r")
+    if data.ndim != 4:
+        raise ValueError(f"{beta_path} must be a 4D cleaned beta volume with shape (x, y, z, trials)")
+    if tuple(data.shape[:3]) != tuple(reference_img.shape[:3]):
+        raise ValueError(f"{beta_path} shape {data.shape[:3]} differs from the weight-map grid {reference_img.shape[:3]}")
+    roi_series = {roi.name: _weighted_mean_timeseries(data, roi) for roi in rois}
+    return pd.DataFrame(roi_series)
+
+
 def _read_roi_timeseries(path: Path, roi_names: list[str]) -> pd.DataFrame:
     df = pd.read_csv(path)
     missing = [name for name in roi_names if name not in df.columns]
@@ -276,8 +397,11 @@ def _load_session_timeseries(
     roi_names = [roi.name for roi in rois]
     if spec.timeseries_path is not None:
         return _read_roi_timeseries(spec.timeseries_path, roi_names)
+    if spec.beta_paths:
+        frames = [_extract_roi_timeseries_from_beta(path, reference_img, rois) for path in spec.beta_paths]
+        return pd.concat(frames, ignore_index=True)
     if spec.bold_path is None:
-        raise ValueError(f"{spec.label} has no bold_path or timeseries_path")
+        raise ValueError(f"{spec.label} has no bold_path, timeseries_path, or beta_path")
     return _extract_roi_timeseries(spec.bold_path, reference_img, rois)
 
 
@@ -490,7 +614,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--session-manifest",
         type=Path,
         default=DEFAULT_SESSION_MANIFEST,
-        help="CSV with subject, session, state, and bold_path or timeseries_path columns.",
+        help=(
+            "Optional CSV with subject, session, state, and one of bold_path, timeseries_path, "
+            "beta_path, or semicolon-separated beta_paths. If absent, --beta-root is auto-discovered."
+        ),
+    )
+    parser.add_argument(
+        "--beta-root",
+        type=Path,
+        default=DEFAULT_BETA_ROOT,
+        help="Root containing sub-pd*/cleaned_beta_volume_sub-pd*_ses-*_run-*.npy files.",
+    )
+    parser.add_argument(
+        "--subjects",
+        nargs="+",
+        default=None,
+        help="Optional subject filter, for example: sub-pd004 sub-pd007 sub-pd009.",
+    )
+    parser.add_argument(
+        "--complete-subjects-only",
+        action="store_true",
+        help="Keep only subjects with both OFF and ON sessions after state mapping.",
     )
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR, help="Output directory outside results9s.")
     parser.add_argument("--aal-version", default=DEFAULT_AAL_VERSION, help="AAL atlas version passed to nilearn.")
@@ -503,7 +647,50 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mi-neighbors", type=int, default=DEFAULT_MI_NEIGHBORS, help="KSG nearest-neighbor count.")
     parser.add_argument("--random-state", type=int, default=0, help="Random seed for mutual_info_regression.")
     parser.add_argument("--check-inputs", action="store_true", help="Report missing inputs and exit without analysis.")
+    parser.add_argument("--dry-run", action="store_true", help="Print the planned analysis steps and exit before computation.")
     return parser
+
+
+def _print_dry_run(args: argparse.Namespace) -> None:
+    weight_img = nib.load(str(args.weight_map))
+    weight_values = np.asarray(weight_img.get_fdata(), dtype=np.float64)
+    groups, _ = _build_roi_groups(weight_img, args.aal_version, args.atlas_cache_dir)
+    roi_names = _load_roi_names(args.roi_region_table, args.roi_percentile, args.min_report_voxels)
+    rois, roi_threshold = _build_weighted_rois(
+        weight_values=weight_values,
+        roi_names=roi_names,
+        groups=groups,
+        roi_percentile=args.roi_percentile,
+        min_report_voxels=args.min_report_voxels,
+    )
+    specs = _load_session_specs(args)
+    session_df = _session_summary(specs)
+    beta_shape_counts = _beta_shape_counts(specs)
+    print("Dry run only; no connectivity matrices, pairwise distances, or figures were computed.")
+    print()
+    print("Planned steps:")
+    print(f"1. Load weight map: {args.weight_map}")
+    print(f"2. Rebuild p{args.roi_percentile:g} weighted AAL ROI masks from: {args.roi_region_table}")
+    print(f"3. Extract weighted mean beta trial series per ROI from {len(specs)} subject/session inputs.")
+    print("4. Concatenate runs within each subject/session.")
+    print(f"5. Compute {CONNECTIVITY_METRIC} ROI-edge matrices for each subject/session.")
+    print(f"6. Compute {COMPARISON_METRIC} for all session pairs.")
+    print("7. Plot cross-subject-only OFF-OFF, ON-ON, and OFF-ON distance distributions.")
+    print()
+    print(f"ROI count: {len(rois)}")
+    print(f"Weight threshold: {roi_threshold:.8g}")
+    print("Top ROI masks: " + ", ".join(f"{roi.name} ({roi.n_voxels})" for roi in rois[:8]))
+    print()
+    print("Input sessions by state:")
+    print(session_df.groupby("state")["label"].count().to_string())
+    print()
+    print("Input sessions:")
+    print(session_df.to_string(index=False))
+    if beta_shape_counts:
+        print()
+        print("Beta volume shapes detected:")
+        for shape, count in beta_shape_counts.items():
+            print(f"- {shape}: {count} files")
 
 
 def main() -> int:
@@ -520,6 +707,9 @@ def main() -> int:
     if args.check_inputs:
         print("All required inputs are present.")
         return 0
+    if args.dry_run:
+        _print_dry_run(args)
+        return 0
 
     weight_img = nib.load(str(args.weight_map))
     weight_values = np.asarray(weight_img.get_fdata(), dtype=np.float64)
@@ -533,7 +723,7 @@ def main() -> int:
         min_report_voxels=args.min_report_voxels,
     )
 
-    specs = _read_manifest(args.session_manifest)
+    specs = _load_session_specs(args)
     out_dir = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     roi_names = [roi.name for roi in rois]
@@ -571,7 +761,8 @@ def main() -> int:
             "weight_map": str(args.weight_map),
             "roi_definition_figure": str(args.roi_definition_figure),
             "roi_region_table": str(args.roi_region_table),
-            "session_manifest": str(args.session_manifest),
+            "session_manifest": str(args.session_manifest) if args.session_manifest.exists() else None,
+            "beta_root": str(args.beta_root),
             "roi_percentile": float(args.roi_percentile),
             "weight_threshold": roi_threshold,
             "min_report_voxels": int(args.min_report_voxels),
@@ -579,10 +770,14 @@ def main() -> int:
             "comparison_metric": COMPARISON_METRIC,
             "mi_neighbors": int(args.mi_neighbors),
             "sessions": [
-                spec.__dict__
-                | {
+                {
+                    "label": spec.label,
+                    "subject": spec.subject,
+                    "session": spec.session,
+                    "state": spec.state,
                     "bold_path": str(spec.bold_path) if spec.bold_path else None,
                     "timeseries_path": str(spec.timeseries_path) if spec.timeseries_path else None,
+                    "beta_paths": [str(path) for path in spec.beta_paths],
                 }
                 for spec in specs
             ],
