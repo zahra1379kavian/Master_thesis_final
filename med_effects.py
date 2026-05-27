@@ -13,7 +13,9 @@ import matplotlib.pyplot as plt
 import nibabel as nib
 import numpy as np
 import pandas as pd
+from scipy import stats
 from sklearn.feature_selection import mutual_info_regression
+import statsmodels.formula.api as smf
 from threshold_robustness_voxel_network import DEFAULT_AAL_VERSION, REFERENCE_THRESHOLD, UNASSIGNED_ROI, _build_roi_groups
 DEFAULT_WEIGHT_MAP = Path('data/voxel_weights_task1_bold1_beta0.75_smooth1.8_gamma1.5.nii.gz')
 DEFAULT_ROI_FIGURE = Path('figures/task1_bold1_beta0.75_smooth1.8_gamma1.5_threshold_robustness_atlas_regions.png')
@@ -336,6 +338,110 @@ def _pairwise_network_distances(specs, networks):
         rows.append({'connectivity_metric': CONNECTIVITY_METRIC, 'label_a': left.label, 'label_b': right.label, 'subject_a': left.subject, 'subject_b': right.subject, 'session_a': left.session, 'session_b': right.session, 'state_a': left.state, 'state_b': right.state, 'pair_class': pair_class, 'pair_label': pair_label, 'same_subject': bool(left.subject == right.subject), 'comparison_metric': COMPARISON_METRIC, 'comparison_kind': 'graph_distance', 'higher_is_more_similar': False, 'raw_score': distance, 'oriented_score': -distance})
     return pd.DataFrame(rows)
 
+def _holm_adjusted_pvalues(p_values):
+    p_values = np.asarray(p_values, dtype=np.float64)
+    adjusted = np.full(p_values.shape, np.nan, dtype=np.float64)
+    finite_indices = np.flatnonzero(np.isfinite(p_values))
+    if finite_indices.size == 0:
+        return adjusted
+    ordered = finite_indices[np.argsort(p_values[finite_indices])]
+    running_max = 0.0
+    n_tests = ordered.size
+    for (rank, original_index) in enumerate(ordered):
+        adjusted_value = (n_tests - rank) * p_values[original_index]
+        running_max = max(running_max, adjusted_value)
+        adjusted[original_index] = min(running_max, 1.0)
+    return adjusted
+
+def _pvalue_stars(p_value):
+    if not np.isfinite(p_value) or p_value >= 0.05:
+        return ''
+    if p_value < 0.001:
+        return '***'
+    if p_value < 0.01:
+        return '**'
+    return '*'
+
+def _fixed_effect_vector(fe_names, pair_key, reference_key):
+    vector = np.zeros(len(fe_names), dtype=np.float64)
+    vector[list(fe_names).index('Intercept')] = 1.0
+    if pair_key == reference_key:
+        return vector
+    matches = [idx for (idx, name) in enumerate(fe_names) if name.endswith(f'[T.{pair_key}]')]
+    if not matches:
+        raise KeyError(f'Missing fixed-effect term for {pair_key}')
+    vector[matches[0]] = 1.0
+    return vector
+
+def _pairwise_group_tests(subset, class_order, groups):
+    tests = []
+    key_by_name = dict(class_order)
+    group_keys = [key_by_name[name] for (name, _, _) in groups]
+    for ((left_index, (left_name, _, _)), (right_index, (right_name, _, _))) in itertools.combinations(enumerate(groups), 2):
+        tests.append({'left': left_index, 'right': right_index, 'left_name': left_name, 'right_name': right_name, 'left_key': group_keys[left_index], 'right_key': group_keys[right_index], 'p_value': np.nan})
+    if len(group_keys) < 2:
+        return tests
+    model_data = subset.loc[subset['pair_label'].isin(group_keys), ['raw_score', 'pair_label', 'subject_a', 'subject_b']].copy()
+    model_data = model_data[np.isfinite(model_data['raw_score'].to_numpy(dtype=np.float64))]
+    model_data = model_data.dropna(subset=['pair_label', 'subject_a', 'subject_b'])
+    if model_data.empty:
+        return tests
+    model_data['pair_label'] = pd.Categorical(model_data['pair_label'], categories=group_keys, ordered=True)
+    model_data['all_pairs'] = 'all'
+    subjects = sorted(set(model_data['subject_a'].astype(str)).union(model_data['subject_b'].astype(str)))
+    subject_columns = []
+    for (subject_index, subject) in enumerate(subjects):
+        column = f'subject_member_{subject_index}'
+        model_data[column] = ((model_data['subject_a'].astype(str) == subject) | (model_data['subject_b'].astype(str) == subject)).astype(float)
+        subject_columns.append(column)
+    if not subject_columns:
+        return tests
+    reference_key = group_keys[0]
+    formula = f'raw_score ~ C(pair_label, Treatment(reference="{reference_key}"))'
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            result = smf.mixedlm(formula, data=model_data, groups=model_data['all_pairs'], re_formula='0', vc_formula={'subject': '0 + ' + ' + '.join(subject_columns)}).fit(reml=True, method='lbfgs', maxiter=1000, disp=False)
+    except (ValueError, np.linalg.LinAlgError) as exc:
+        warnings.warn(f'Mixed-effects significance model failed: {exc}', RuntimeWarning)
+        return tests
+    fe_params = result.fe_params
+    fe_names = fe_params.index
+    fe_cov = result.cov_params().loc[fe_names, fe_names].to_numpy(dtype=np.float64)
+    fe_values = fe_params.to_numpy(dtype=np.float64)
+    vectors = {pair_key: _fixed_effect_vector(fe_names, pair_key, reference_key) for pair_key in group_keys}
+    for test in tests:
+        contrast = vectors[test['left_key']] - vectors[test['right_key']]
+        estimate = float(contrast @ fe_values)
+        se_squared = float(contrast @ fe_cov @ contrast)
+        if not np.isfinite(se_squared) or se_squared <= 0:
+            continue
+        standard_error = float(np.sqrt(se_squared))
+        z_value = estimate / standard_error
+        p_value = float(2.0 * stats.norm.sf(abs(z_value)))
+        test.update({'estimate': estimate, 'standard_error': standard_error, 'z_value': z_value, 'p_value': p_value})
+    adjusted = _holm_adjusted_pvalues([test['p_value'] for test in tests])
+    for (test, p_adjusted) in zip(tests, adjusted):
+        test['p_value_holm'] = float(p_adjusted)
+        test['stars'] = _pvalue_stars(p_adjusted)
+    return tests
+
+def _add_significance_stars(ax, groups, tests, y_max, y_span):
+    significant = [test for test in tests if test['stars']]
+    significant = sorted(significant, key=lambda test: (test['right'] - test['left'], test['left']))
+    if not significant:
+        return
+    positions = [pos for (_, pos, _) in groups]
+    bracket_height = 0.025 * y_span
+    baseline = y_max + 0.08 * y_span
+    step = 0.075 * y_span
+    for (level, test) in enumerate(significant):
+        x_left = positions[test['left']]
+        x_right = positions[test['right']]
+        y = baseline + level * step
+        ax.plot([x_left, x_left, x_right, x_right], [y, y + bracket_height, y + bracket_height, y], color='#222222', linewidth=1.0, clip_on=False)
+        ax.text((x_left + x_right) / 2.0, y + bracket_height + 0.008 * y_span, test['stars'], ha='center', va='bottom', color='#222222', fontsize=11, clip_on=False)
+
 def _plot_cross_subject_distribution(pairwise, out_dir):
     subset = pairwise.loc[(pairwise['connectivity_metric'] == CONNECTIVITY_METRIC) & (pairwise['comparison_metric'] == COMPARISON_METRIC) & ~pairwise['same_subject'].astype(bool)].copy()
     class_order = [('OFF-OFF', 'off-off'), ('ON-ON', 'on-on'), ('OFF-ON', 'off-on')]
@@ -344,6 +450,7 @@ def _plot_cross_subject_distribution(pairwise, out_dir):
     groups = [(name, pos, values[np.isfinite(values)]) for (name, pos, values) in groups if np.isfinite(values).any()]
     if not groups:
         raise RuntimeError('No finite cross-subject pairwise distances were available for plotting')
+    group_tests = _pairwise_group_tests(subset, class_order, groups)
     (fig, ax) = plt.subplots(figsize=(5.2, 4.1))
     box = ax.boxplot([values for (_, _, values) in groups], positions=[pos for (_, pos, _) in groups], widths=0.56, patch_artist=True, flierprops={'markeredgecolor': '#444444', 'markerfacecolor': '#444444', 'markersize': 2.5})
     for (patch, (name, _, _)) in zip(box['boxes'], groups):
@@ -361,7 +468,10 @@ def _plot_cross_subject_distribution(pairwise, out_dir):
     y_min = float(np.min(y_values))
     y_max = float(np.max(y_values))
     y_span = max(y_max - y_min, 1e-06)
-    ax.set_ylim(y_min - 0.05 * y_span, y_max + 0.3 * y_span)
+    significant_count = sum(1 for test in group_tests if test['stars'])
+    upper_padding = 0.3 if significant_count == 0 else 0.18 + 0.095 * significant_count
+    ax.set_ylim(y_min - 0.05 * y_span, y_max + upper_padding * y_span)
+    _add_significance_stars(ax, groups, group_tests, y_max, y_span)
     fig.tight_layout()
     out_dir.mkdir(parents=True, exist_ok=True)
     png_path = out_dir / 'cross_subject_only_laplacian_spectral_distance_signed_distribution.png'
