@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 from nilearn import datasets, image
 
-from projected_signal_vs_behaviour import (
+from results9s.src.follow_up_analysis.projected_signal_vs_behaviour import (
     DEFAULT_BEHAVIOUR_DIR,
     DEFAULT_BETA_DIR,
     DEFAULT_WEIGHT_MAP,
