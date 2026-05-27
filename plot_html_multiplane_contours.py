@@ -61,7 +61,7 @@ def anat(a):
     r[~brain, 3] = 0
     return r
 base.parent.mkdir(exist_ok=True)
-fig, axes = plt.subplots(6, 5, figsize=(12.6, 14.8), facecolor="white")
+fig, axes = plt.subplots(5, 6, figsize=(15.1, 12.3), facecolor="white")
 items = [(mode, cut) for mode in "xyz" for cut in cuts[mode]]
 for i, (ax, (mode, cut)) in enumerate(zip(axes.ravel(), items)):
     a, m = crop(plane(bg, mode, cut), plane(mask, mode, cut))
@@ -71,7 +71,7 @@ for i, (ax, (mode, cut)) in enumerate(zip(axes.ravel(), items)):
     ax.contour(m.astype(float), levels=[0.5], colors="#dc2626", linewidths=1.8)
     ax.set_axis_off()
 fig.subplots_adjust(left=0.005, right=0.995, bottom=0.005, top=0.995, wspace=-0.04, hspace=0.01)
-for ax in axes.ravel()[:5]:
+for ax in axes.ravel()[:6]:
     box = ax.get_position()
     fig.text(box.x0 + box.width * 0.22, box.y1 - box.height * 0.04, "L", ha="center", va="top", fontsize=11, color="black")
     fig.text(box.x0 + box.width * 0.78, box.y1 - box.height * 0.04, "R", ha="center", va="top", fontsize=11, color="black")
