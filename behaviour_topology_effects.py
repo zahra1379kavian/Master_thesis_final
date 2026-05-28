@@ -25,6 +25,8 @@ DEFAULT_MIN_RT = 0.0
 DEFAULT_N_PERMUTATIONS = 10000
 DEFAULT_RANDOM_STATE = 0
 DEFAULT_SESSION_STATES = {'1': 'off', '2': 'on'}
+ASSOCIATION_CORRELATIONS = ('pearson', 'spearman')
+DEFAULT_ASSOCIATION_CORRELATION = 'pearson'
 
 BEHAVIOUR_FILE_RE = re.compile(r'^PSPD(?P<subject>\d+)_ses_(?P<session>\d+)_run_(?P<run>\d+)\.npy$')
 NETWORK_FILE_RE = re.compile(r'^(?P<subject>sub-pd\d+)_ses-(?P<session>\d+)\.csv$')
@@ -292,7 +294,15 @@ def _build_subject_table(behaviour, networks, network_sessions):
     return pd.DataFrame(rows).sort_values('subject').reset_index(drop=True)
 
 
-def _permutation_corr_p_value(x_values, y_values, observed_r, n_permutations, random_state):
+def _correlation_statistic(x_values, y_values, method):
+    if method == 'spearman':
+        return float(stats.spearmanr(x_values, y_values).statistic)
+    if method == 'pearson':
+        return float(np.corrcoef(x_values, y_values)[0, 1])
+    raise RuntimeError(f'Unknown association correlation: {method}')
+
+
+def _permutation_corr_p_value(x_values, y_values, observed_r, n_permutations, random_state, method):
     if not np.isfinite(observed_r):
         return float('nan')
     rng = np.random.default_rng(random_state)
@@ -302,13 +312,13 @@ def _permutation_corr_p_value(x_values, y_values, observed_r, n_permutations, ra
         permuted = rng.permutation(y_values)
         if np.std(permuted) <= 0:
             continue
-        permuted_r = float(np.corrcoef(x_values, permuted)[0, 1])
+        permuted_r = _correlation_statistic(x_values, permuted, method)
         if abs(permuted_r) >= abs(observed_r) - 1e-12:
             count += 1
     return float((count + 1) / (int(n_permutations) + 1))
 
 
-def _association_stats(subject_table, analysis, predictor, outcome, n_permutations, random_state):
+def _association_stats(subject_table, analysis, predictor, outcome, n_permutations, random_state, correlation_method):
     subset = subject_table[['subject', predictor, outcome]].replace([np.inf, -np.inf], np.nan).dropna()
     x_values = subset[predictor].to_numpy(dtype=np.float64)
     y_values = subset[outcome].to_numpy(dtype=np.float64)
@@ -317,6 +327,7 @@ def _association_stats(subject_table, analysis, predictor, outcome, n_permutatio
         'predictor': predictor,
         'outcome': outcome,
         'n_subjects': int(subset.shape[0]),
+        'association_correlation': correlation_method,
     }
     if subset.shape[0] < 3 or np.std(x_values) <= 0 or np.std(y_values) <= 0:
         result.update({
@@ -337,12 +348,14 @@ def _association_stats(subject_table, analysis, predictor, outcome, n_permutatio
     t_critical = float(stats.t.ppf(0.975, df)) if df > 0 else float('nan')
     slope_ci_low = float(linear.slope - t_critical * linear.stderr) if np.isfinite(t_critical) else float('nan')
     slope_ci_high = float(linear.slope + t_critical * linear.stderr) if np.isfinite(t_critical) else float('nan')
+    observed_r = spearman.statistic if correlation_method == 'spearman' else pearson.statistic
     permutation_p = _permutation_corr_p_value(
         x_values,
         y_values,
-        float(pearson.statistic),
+        float(observed_r),
         n_permutations=n_permutations,
         random_state=random_state,
+        method=correlation_method,
     )
     result.update({
         'pearson_r': float(pearson.statistic),
@@ -368,7 +381,7 @@ def _format_p_value(p_value):
     return f'{p_value:.3f}'.lstrip('0')
 
 
-def _plot_association(subject_table, definition, stats_row, out_dir):
+def _plot_association(subject_table, definition, stats_row, out_dir, correlation_method):
     predictor = definition['predictor']
     outcome = definition['outcome']
     subset = subject_table[['subject', predictor, outcome]].replace([np.inf, -np.inf], np.nan).dropna()
@@ -387,9 +400,12 @@ def _plot_association(subject_table, definition, stats_row, out_dir):
     ax.set_xlabel(definition['xlabel'])
     ax.set_ylabel(definition['ylabel'])
     ax.set_title(definition['title'], fontsize=11.5)
+    statistic_label = 'rho' if correlation_method == 'spearman' else 'r'
+    r_key = f'{correlation_method}_r'
+    p_key = f'{correlation_method}_p_value'
     annotation = (
-        f"r={stats_row.get('pearson_r', np.nan):.2f}\n"
-        f"p={_format_p_value(stats_row.get('pearson_p_value', np.nan))}\n"
+        f"{statistic_label}={stats_row.get(r_key, np.nan):.2f}\n"
+        f"p={_format_p_value(stats_row.get(p_key, np.nan))}\n"
         f"perm p={_format_p_value(stats_row.get('permutation_p_value_two_sided', np.nan))}\n"
         f"n={int(stats_row.get('n_subjects', 0))}"
     )
@@ -431,6 +447,8 @@ def build_parser():
     parser.add_argument('--rt-column', type=int, default=DEFAULT_RT_COLUMN_ONE_BASED, help='One-based RT column for 2D behavioural .npy matrices.')
     parser.add_argument('--min-rt', type=float, default=DEFAULT_MIN_RT)
     parser.add_argument('--max-rt', type=float, default=None)
+    parser.add_argument('--connectivity-metric', default=CONNECTIVITY_METRIC)
+    parser.add_argument('--association-correlation', choices=ASSOCIATION_CORRELATIONS, default=DEFAULT_ASSOCIATION_CORRELATION)
     parser.add_argument('--n-permutations', type=int, default=DEFAULT_N_PERMUTATIONS)
     parser.add_argument('--random-state', type=int, default=DEFAULT_RANDOM_STATE)
     parser.add_argument('--check-inputs', action='store_true')
@@ -485,9 +503,10 @@ def main():
             outcome=definition['outcome'],
             n_permutations=args.n_permutations,
             random_state=args.random_state,
+            correlation_method=args.association_correlation,
         )
         stats_rows.append(stats_row)
-        figure_paths.append(_plot_association(subject_table, definition, stats_row, args.out_dir))
+        figure_paths.append(_plot_association(subject_table, definition, stats_row, args.out_dir, args.association_correlation))
     stats_df = pd.DataFrame(stats_rows)
     stats_df.to_csv(stats_path, index=False)
     summary = {
@@ -498,8 +517,9 @@ def main():
             'rt_column_one_based_for_2d_matrices': int(args.rt_column),
             'min_rt': args.min_rt,
             'max_rt': args.max_rt,
-            'connectivity_metric': CONNECTIVITY_METRIC,
+            'connectivity_metric': args.connectivity_metric,
             'comparison_metric': COMPARISON_METRIC,
+            'association_correlation': args.association_correlation,
             'n_permutations': int(args.n_permutations),
             'random_state': int(args.random_state),
         },

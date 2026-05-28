@@ -32,6 +32,7 @@ DEFAULT_BOOTSTRAP_ITERATIONS = 10000
 DEFAULT_BOOTSTRAP_RANDOM_STATE = 0
 DEFAULT_NODE_STRENGTH_TOP_N = 16
 CONNECTIVITY_METRIC = 'mutual_information_ksg'
+CONNECTIVITY_METRICS = ('mutual_information_ksg', 'spearman_correlation')
 COMPARISON_METRIC = 'laplacian_spectral_distance_signed'
 INTRA_BETWEEN_FC_METRIC = 'pearson_fisher_z'
 BETA_FILE_RE = re.compile('cleaned_beta_volume_(?P<subject>sub-pd\\d+)_ses-(?P<session>\\d+)_run-(?P<run>\\d+)\\.npy$')
@@ -368,6 +369,54 @@ def _mutual_information_matrix(timeseries, n_neighbors, random_state):
         matrix[i, j] = score
         matrix[j, i] = score
     return matrix
+
+def _spearman_correlation_matrix(timeseries):
+    (n_timepoints, n_rois) = timeseries.shape
+    matrix = np.zeros((n_rois, n_rois), dtype=np.float64)
+    if n_rois < 2:
+        return matrix
+    ranks = np.apply_along_axis(stats.rankdata, 0, timeseries)
+    centered = ranks - np.mean(ranks, axis=0, keepdims=True)
+    scale = np.std(centered, axis=0, ddof=1)
+    valid = np.isfinite(scale) & (scale > 0)
+    centered[:, valid] /= scale[valid]
+    centered[:, ~valid] = 0.0
+    matrix = (centered.T @ centered) / float(n_timepoints - 1)
+    matrix = np.clip(matrix, -1.0, 1.0)
+    matrix[~np.isfinite(matrix)] = 0.0
+    np.fill_diagonal(matrix, 0.0)
+    return matrix
+
+def _connectivity_matrix(timeseries, n_neighbors, random_state):
+    if CONNECTIVITY_METRIC == 'mutual_information_ksg':
+        return _mutual_information_matrix(timeseries, n_neighbors=n_neighbors, random_state=random_state)
+    if CONNECTIVITY_METRIC == 'spearman_correlation':
+        return _spearman_correlation_matrix(timeseries)
+    raise RuntimeError(f'Unknown connectivity metric: {CONNECTIVITY_METRIC}')
+
+def _connectivity_metric_label(metric=None):
+    metric = CONNECTIVITY_METRIC if metric is None else metric
+    if metric == 'mutual_information_ksg':
+        return 'MI connectivity'
+    if metric == 'spearman_correlation':
+        return 'Spearman correlation connectivity'
+    return str(metric).replace('_', ' ')
+
+def _edge_weight_label(metric=None):
+    metric = CONNECTIVITY_METRIC if metric is None else metric
+    if metric == 'mutual_information_ksg':
+        return 'MI edge weight'
+    if metric == 'spearman_correlation':
+        return 'Spearman r edge weight'
+    return 'edge weight'
+
+def _edge_weight_description(metric=None):
+    metric = CONNECTIVITY_METRIC if metric is None else metric
+    if metric == 'mutual_information_ksg':
+        return 'mutual-information edge weights'
+    if metric == 'spearman_correlation':
+        return 'Spearman rank-correlation edge weights'
+    return 'edge weights'
 
 def _signed_laplacian_spectrum(adjacency):
     matrix = np.asarray(adjacency, dtype=np.float64)
@@ -959,7 +1008,7 @@ def _plot_node_strength_boxplots(values, summary, out_dir, top_n=DEFAULT_NODE_ST
         ax.axis('off')
     for row_index in range(n_rows):
         axes[row_index, 0].set_ylabel('Node strength', fontsize=8.5)
-    fig.suptitle('Node strength by medication state (MI connectivity)', fontsize=12.5, y=0.995)
+    fig.suptitle(f'Node strength by medication state ({_connectivity_metric_label()})', fontsize=12.5, y=0.995)
     fig.tight_layout(rect=[0, 0, 1, 0.975])
     out_dir.mkdir(parents=True, exist_ok=True)
     png_path = out_dir / 'node_strength_mi_boxplot.png'
@@ -1129,7 +1178,7 @@ def _plot_hemisphere_fc(subject_deltas, results, out_dir):
         axes[0].scatter(rng.normal(offset + 0.32, 0.018, on_values.size), on_values, s=20, color=colors['on'], edgecolor='white', linewidth=0.35, zorder=2, label='ON' if offset == 0.0 else None)
     axes[0].set_xticks([0.16, 1.26])
     axes[0].set_xticklabels([item[0] for item in paired_specs])
-    axes[0].set_ylabel('Mean MI edge weight')
+    axes[0].set_ylabel(f'Mean {_edge_weight_label()}')
     axes[0].set_title('Medication State', fontsize=10)
     axes[0].legend(frameon=False, fontsize=8, loc='best')
 
@@ -1169,13 +1218,14 @@ def _plot_hemisphere_fc(subject_deltas, results, out_dir):
     return png_path
 
 def _write_hemisphere_fc_method(path):
+    edge_description = _edge_weight_description()
     text = (
         '# Within-Hemisphere vs Between-Hemisphere FC Method\n\n'
         'This analysis uses the lateralized ROI network matrices produced by the medication-effects pipeline. '
         'ROIs must have names ending in `_L` or `_R`. For each subject/session, upper-triangle ROI edges were '
         'classified as within-hemisphere when both ROIs had the same hemisphere suffix, and between-hemisphere '
         'when one ROI was left-lateralized and the other was right-lateralized. The session-level within- and '
-        'between-hemisphere values are unweighted means of the mutual-information edge weights in each class.\n\n'
+        f'between-hemisphere values are unweighted means of the {edge_description} in each class.\n\n'
         'Medication effects were evaluated within complete subjects as ON minus OFF separately for within- and '
         'between-hemisphere edges. The primary comparison was the paired subject-level contrast '
         '(ON - OFF within-hemisphere FC) - (ON - OFF between-hemisphere FC). Positive values mean medication '
@@ -1192,7 +1242,7 @@ def _save_hemisphere_fc_analysis(specs, networks, roi_names, out_dir):
     (results_table, results) = _hemisphere_fc_test_rows(subject_deltas)
     result_summary = {
         'connectivity_metric': CONNECTIVITY_METRIC,
-        'method': 'Mean mutual-information ROI edge weights are summarized separately for within-hemisphere and between-hemisphere ROI pairs.',
+        'method': f'Mean {_edge_weight_description()} are summarized separately for within-hemisphere and between-hemisphere ROI pairs.',
         'n_sessions': int(session_values.shape[0]),
         'n_complete_subjects': int(subject_deltas.shape[0]),
         'tests': results,
@@ -1611,6 +1661,7 @@ def build_parser():
     parser.add_argument('--min-lateralized-voxels', type=int, default=1)
     parser.add_argument('--aal-version', default=DEFAULT_AAL_VERSION)
     parser.add_argument('--atlas-cache-dir', type=Path, default=DEFAULT_ATLAS_CACHE_DIR)
+    parser.add_argument('--connectivity-metric', choices=CONNECTIVITY_METRICS, default=CONNECTIVITY_METRIC)
     parser.add_argument('--mi-neighbors', type=int, default=DEFAULT_MI_NEIGHBORS)
     parser.add_argument('--node-strength-top-n', type=int, default=DEFAULT_NODE_STRENGTH_TOP_N)
     parser.add_argument('--random-state', type=int, default=0)
@@ -1639,8 +1690,8 @@ def _print_dry_run(args):
     print(f'6. Compute {COMPARISON_METRIC} for all session pairs.')
     print('7. Compute paired OFF/ON subject-level, bootstrap, label-swap, and Mantel-style similarity tests.')
     print('8. Plot cross-subject-only OFF-OFF, ON-ON, and OFF-ON distance distributions.')
-    print(f'9. Compute paired MI node-strength summaries and plot the top {args.node_strength_top_n} ROI panels.')
-    print('10. Compute within-hemisphere vs between-hemisphere MI edge-change summaries.')
+    print(f'9. Compute paired {_connectivity_metric_label()} node-strength summaries and plot the top {args.node_strength_top_n} ROI panels.')
+    print(f'10. Compute within-hemisphere vs between-hemisphere {_connectivity_metric_label()} edge-change summaries.')
     print('11. Compute intra-ROI voxel FC vs between-ROI FC medication-change summaries.')
     print()
     print(f'ROI count: {len(rois)}')
@@ -1660,7 +1711,9 @@ def _print_dry_run(args):
             print(f'- {shape}: {count} files')
 
 def main():
+    global CONNECTIVITY_METRIC
     args = build_parser().parse_args()
+    CONNECTIVITY_METRIC = args.connectivity_metric
     if args.roi_region_table is None:
         args.roi_region_table = _default_region_table_for(args.roi_definition_figure)
     missing = _missing_inputs(args)
@@ -1695,7 +1748,7 @@ def main():
         session_df = _load_session_timeseries(spec, weight_img, rois)
         session_df.to_csv(timeseries_dir / f'{spec.label}.csv', index=False)
         cleaned = _clean_timeseries(session_df)
-        networks[spec.label] = _mutual_information_matrix(cleaned, n_neighbors=args.mi_neighbors, random_state=args.random_state)
+        networks[spec.label] = _connectivity_matrix(cleaned, n_neighbors=args.mi_neighbors, random_state=args.random_state)
         session_fc_row = {'label': spec.label, 'subject': spec.subject, 'session': spec.session, 'state': spec.state, 'connectivity_metric': INTRA_BETWEEN_FC_METRIC}
         session_fc_row.update(_between_roi_fc_summary(cleaned))
         try:
