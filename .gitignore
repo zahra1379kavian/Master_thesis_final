@@ -18,3 +18,5 @@ results/
 /data
 *.png
 /figures
+.claude
+/Claude_results

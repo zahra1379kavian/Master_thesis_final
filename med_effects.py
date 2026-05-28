@@ -398,6 +398,139 @@ def _pairwise_network_distances(specs, networks):
         rows.append({'connectivity_metric': CONNECTIVITY_METRIC, 'label_a': left.label, 'label_b': right.label, 'subject_a': left.subject, 'subject_b': right.subject, 'session_a': left.session, 'session_b': right.session, 'state_a': left.state, 'state_b': right.state, 'pair_class': pair_class, 'pair_label': pair_label, 'same_subject': bool(left.subject == right.subject), 'comparison_metric': COMPARISON_METRIC, 'comparison_kind': 'graph_distance', 'higher_is_more_similar': False, 'raw_score': distance, 'oriented_score': -distance})
     return pd.DataFrame(rows)
 
+def _metric_pairwise_rows(pairwise):
+    return pairwise.loc[(pairwise['connectivity_metric'] == CONNECTIVITY_METRIC) & (pairwise['comparison_metric'] == COMPARISON_METRIC)].copy()
+
+def _session_rows_from_pairwise(pairwise):
+    left = pairwise[['label_a', 'subject_a', 'state_a']].rename(columns={'label_a': 'label', 'subject_a': 'subject', 'state_a': 'state'})
+    right = pairwise[['label_b', 'subject_b', 'state_b']].rename(columns={'label_b': 'label', 'subject_b': 'subject', 'state_b': 'state'})
+    sessions = pd.concat([left, right], ignore_index=True).drop_duplicates()
+    sessions['state'] = sessions['state'].astype(str).str.lower()
+    return sessions.sort_values(['subject', 'state', 'label']).reset_index(drop=True)
+
+def _complete_off_on_subjects(pairwise):
+    sessions = _session_rows_from_pairwise(pairwise)
+    complete = []
+    incomplete = []
+    for (subject, rows) in sessions.groupby('subject', sort=True):
+        off_labels = rows.loc[rows['state'] == 'off', 'label'].astype(str).tolist()
+        on_labels = rows.loc[rows['state'] == 'on', 'label'].astype(str).tolist()
+        if len(off_labels) == 1 and len(on_labels) == 1:
+            complete.append({'subject': str(subject), 'off_label': off_labels[0], 'on_label': on_labels[0]})
+        else:
+            incomplete.append({'subject': str(subject), 'n_off': int(len(off_labels)), 'n_on': int(len(on_labels))})
+    return (complete, incomplete)
+
+def _distance_lookup(pairwise):
+    lookup = {}
+    for row in pairwise.itertuples(index=False):
+        if not np.isfinite(float(row.raw_score)):
+            continue
+        key = tuple(sorted([str(row.label_a), str(row.label_b)]))
+        lookup[key] = float(row.raw_score)
+    return lookup
+
+def _lookup_distance(lookup, left_label, right_label):
+    key = tuple(sorted([str(left_label), str(right_label)]))
+    if key not in lookup:
+        raise RuntimeError(f'Missing pairwise distance for {left_label} and {right_label}')
+    return lookup[key]
+
+def _paired_assignment_group_means(assignments, lookup):
+    values = {'off-off': [], 'on-on': [], 'off-on': []}
+    for (left, right) in itertools.combinations(assignments, 2):
+        if left['subject'] == right['subject']:
+            continue
+        if left['state'] == right['state'] == 'off':
+            key = 'off-off'
+        elif left['state'] == right['state'] == 'on':
+            key = 'on-on'
+        else:
+            key = 'off-on'
+        values[key].append(_lookup_distance(lookup, left['label'], right['label']))
+    means = {key: float(np.mean(group_values)) if group_values else np.nan for (key, group_values) in values.items()}
+    counts = {key: int(len(group_values)) for (key, group_values) in values.items()}
+    return (means, counts)
+
+def _observed_paired_assignments(complete_subjects):
+    assignments = []
+    for subject in complete_subjects:
+        assignments.append({'subject': subject['subject'], 'label': subject['off_label'], 'state': 'off'})
+        assignments.append({'subject': subject['subject'], 'label': subject['on_label'], 'state': 'on'})
+    return assignments
+
+def _swapped_paired_assignments(complete_subjects, mask):
+    assignments = []
+    for (subject_index, subject) in enumerate(complete_subjects):
+        swapped = bool((mask >> subject_index) & 1)
+        assignments.append({'subject': subject['subject'], 'label': subject['off_label'], 'state': 'on' if swapped else 'off'})
+        assignments.append({'subject': subject['subject'], 'label': subject['on_label'], 'state': 'off' if swapped else 'on'})
+    return assignments
+
+def _exact_paired_permutation_test(complete_subjects, lookup):
+    observed_assignments = _observed_paired_assignments(complete_subjects)
+    (observed_means, observed_counts) = _paired_assignment_group_means(observed_assignments, lookup)
+    observed_contrast = float(observed_means['off-off'] - observed_means['on-on'])
+    n_subjects = len(complete_subjects)
+    n_permutations = 1 << n_subjects
+    permutation_contrasts = np.empty(n_permutations, dtype=np.float64)
+    for mask in range(n_permutations):
+        assignments = _swapped_paired_assignments(complete_subjects, mask)
+        (means, _) = _paired_assignment_group_means(assignments, lookup)
+        permutation_contrasts[mask] = means['off-off'] - means['on-on']
+    tolerance = 1e-12
+    return {'observed_off_off_mean': float(observed_means['off-off']), 'observed_on_on_mean': float(observed_means['on-on']), 'observed_off_minus_on': observed_contrast, 'pair_counts': observed_counts, 'n_permutations': int(n_permutations), 'permutation_p_value_two_sided': float(np.mean(np.abs(permutation_contrasts) >= abs(observed_contrast) - tolerance)), 'permutation_p_value_greater': float(np.mean(permutation_contrasts >= observed_contrast - tolerance))}
+
+def _subject_level_similarity_values(complete_subjects, lookup):
+    rows = []
+    for subject in complete_subjects:
+        other_subjects = [other for other in complete_subjects if other['subject'] != subject['subject']]
+        off_distances = [_lookup_distance(lookup, subject['off_label'], other['off_label']) for other in other_subjects]
+        on_distances = [_lookup_distance(lookup, subject['on_label'], other['on_label']) for other in other_subjects]
+        off_mean = float(np.mean(off_distances))
+        on_mean = float(np.mean(on_distances))
+        rows.append({'subject': subject['subject'], 'off_label': subject['off_label'], 'on_label': subject['on_label'], 'off_mean_to_other_off': off_mean, 'on_mean_to_other_on': on_mean, 'off_minus_on': off_mean - on_mean})
+    return pd.DataFrame(rows)
+
+def _subject_level_similarity_tests(subject_values):
+    differences = subject_values['off_minus_on'].to_numpy(dtype=np.float64)
+    differences = differences[np.isfinite(differences)]
+    if differences.size < 2:
+        return {'n_subjects': int(differences.size), 'mean_off_minus_on': float(np.mean(differences)) if differences.size else float('nan'), 'paired_t_p_value_two_sided': float('nan'), 'wilcoxon_p_value_two_sided': float('nan')}
+    mean_difference = float(np.mean(differences))
+    sd_difference = float(np.std(differences, ddof=1))
+    sem_difference = float(stats.sem(differences))
+    t_result = stats.ttest_1samp(differences, 0.0)
+    ci_low, ci_high = stats.t.interval(0.95, differences.size - 1, loc=mean_difference, scale=sem_difference)
+    try:
+        wilcoxon_result = stats.wilcoxon(differences, alternative='two-sided')
+        wilcoxon_statistic = float(wilcoxon_result.statistic)
+        wilcoxon_p_value = float(wilcoxon_result.pvalue)
+    except ValueError:
+        wilcoxon_statistic = float('nan')
+        wilcoxon_p_value = float('nan')
+    return {'n_subjects': int(differences.size), 'mean_off_minus_on': mean_difference, 'sd_off_minus_on': sd_difference, 'sem_off_minus_on': sem_difference, 'ci95_low': float(ci_low), 'ci95_high': float(ci_high), 'cohen_dz': float(mean_difference / sd_difference) if sd_difference > 0 else np.nan, 'paired_t_statistic': float(t_result.statistic), 'paired_t_p_value_two_sided': float(t_result.pvalue), 'wilcoxon_statistic': wilcoxon_statistic, 'wilcoxon_p_value_two_sided': wilcoxon_p_value}
+
+def _paired_similarity_tests(pairwise):
+    metric_rows = _metric_pairwise_rows(pairwise)
+    (complete_subjects, incomplete_subjects) = _complete_off_on_subjects(metric_rows)
+    if len(complete_subjects) < 2:
+        raise RuntimeError('At least two complete OFF/ON subjects are required for paired medication similarity tests')
+    lookup = _distance_lookup(metric_rows)
+    permutation = _exact_paired_permutation_test(complete_subjects, lookup)
+    subject_values = _subject_level_similarity_values(complete_subjects, lookup)
+    subject_tests = _subject_level_similarity_tests(subject_values)
+    stats_summary = {'test_scope': 'complete subjects with one OFF and one ON session; cross-subject distances only', 'hypothesis': 'OFF-OFF distances are greater than ON-ON distances when medication makes networks more similar across subjects', 'complete_subjects': complete_subjects, 'incomplete_subjects': incomplete_subjects, 'permutation': permutation, 'subject_level': subject_tests}
+    return (stats_summary, subject_values)
+
+def _save_paired_similarity_tests(pairwise, out_dir):
+    (stats_summary, subject_values) = _paired_similarity_tests(pairwise)
+    subject_path = out_dir / 'paired_subject_similarity_values.csv'
+    stats_path = out_dir / 'paired_subject_similarity_stats.json'
+    subject_values.to_csv(subject_path, index=False)
+    stats_path.write_text(json.dumps(stats_summary, indent=2), encoding='utf-8')
+    return (stats_summary, subject_path, stats_path)
+
 def _holm_adjusted_pvalues(p_values):
     p_values = np.asarray(p_values, dtype=np.float64)
     adjusted = np.full(p_values.shape, np.nan, dtype=np.float64)
@@ -502,15 +635,39 @@ def _add_significance_stars(ax, groups, tests, y_max, y_span):
         ax.plot([x_left, x_left, x_right, x_right], [y, y + bracket_height, y + bracket_height, y], color='#222222', linewidth=1.0, clip_on=False)
         ax.text((x_left + x_right) / 2.0, y + bracket_height + 0.008 * y_span, test['stars'], ha='center', va='bottom', color='#222222', fontsize=11, clip_on=False)
 
-def _plot_cross_subject_distribution(pairwise, out_dir):
-    subset = pairwise.loc[(pairwise['connectivity_metric'] == CONNECTIVITY_METRIC) & (pairwise['comparison_metric'] == COMPARISON_METRIC) & ~pairwise['same_subject'].astype(bool)].copy()
+def _paired_permutation_plot_tests(groups, paired_stats):
+    if paired_stats is None:
+        return []
+    p_value = paired_stats.get('permutation', {}).get('permutation_p_value_two_sided', np.nan)
+    if not np.isfinite(p_value):
+        return []
+    group_index = {name: index for (index, (name, _, _)) in enumerate(groups)}
+    if 'OFF-OFF' not in group_index or 'ON-ON' not in group_index:
+        return []
+    return [{'left': group_index['OFF-OFF'], 'right': group_index['ON-ON'], 'left_name': 'OFF-OFF', 'right_name': 'ON-ON', 'p_value': float(p_value), 'stars': _pvalue_stars(float(p_value))}]
+
+def _complete_subject_labels_from_stats(paired_stats):
+    if paired_stats is None:
+        return None
+    labels = set()
+    for subject in paired_stats.get('complete_subjects', []):
+        labels.add(subject['off_label'])
+        labels.add(subject['on_label'])
+    return labels if labels else None
+
+def _plot_cross_subject_distribution(pairwise, out_dir, paired_stats=None):
+    subset = _metric_pairwise_rows(pairwise)
+    subset = subset.loc[~subset['same_subject'].astype(bool)].copy()
+    complete_labels = _complete_subject_labels_from_stats(paired_stats)
+    if complete_labels is not None:
+        subset = subset.loc[subset['label_a'].isin(complete_labels) & subset['label_b'].isin(complete_labels)].copy()
     class_order = [('OFF-OFF', 'off-off'), ('ON-ON', 'on-on'), ('OFF-ON', 'off-on')]
     colors_by_name = {'OFF-OFF': '#4c78a8', 'ON-ON': '#e9a3a3', 'OFF-ON': '#54a24b'}
     groups = [(name, idx * 1.15, subset.loc[subset['pair_label'] == key, 'raw_score'].to_numpy(dtype=np.float64)) for (idx, (name, key)) in enumerate(class_order)]
     groups = [(name, pos, values[np.isfinite(values)]) for (name, pos, values) in groups if np.isfinite(values).any()]
     if not groups:
         raise RuntimeError('No finite cross-subject pairwise distances were available for plotting')
-    group_tests = _pairwise_group_tests(subset, class_order, groups)
+    group_tests = _paired_permutation_plot_tests(groups, paired_stats)
     (fig, ax) = plt.subplots(figsize=(5.2, 4.1))
     box = ax.boxplot([values for (_, _, values) in groups], positions=[pos for (_, pos, _) in groups], widths=0.56, patch_artist=True, flierprops={'markeredgecolor': '#444444', 'markerfacecolor': '#444444', 'markersize': 2.5})
     for (patch, (name, _, _)) in zip(box['boxes'], groups):
@@ -589,7 +746,8 @@ def _print_dry_run(args):
     print('4. Concatenate runs within each subject/session.')
     print(f'5. Compute {CONNECTIVITY_METRIC} ROI-edge matrices for each subject/session.')
     print(f'6. Compute {COMPARISON_METRIC} for all session pairs.')
-    print('7. Plot cross-subject-only OFF-OFF, ON-ON, and OFF-ON distance distributions.')
+    print('7. Compute paired OFF/ON subject-level and exact label-swap similarity tests.')
+    print('8. Plot cross-subject-only OFF-OFF, ON-ON, and OFF-ON distance distributions.')
     print()
     print(f'ROI count: {len(rois)}')
     print(f'Weight threshold: {roi_threshold:.8g}')
@@ -645,13 +803,16 @@ def main():
     pairwise = _pairwise_network_distances(specs, networks)
     pairwise_path = out_dir / 'pairwise_metric_values.csv'
     pairwise.to_csv(pairwise_path, index=False)
-    figure_path = _plot_cross_subject_distribution(pairwise, out_dir)
-    metadata.update({'weight_map': str(args.weight_map), 'roi_definition_figure': str(args.roi_definition_figure), 'roi_region_table': str(args.roi_region_table), 'session_manifest': str(args.session_manifest) if args.session_manifest.exists() else None, 'beta_root': str(args.beta_root), 'roi_percentile': float(args.roi_percentile), 'weight_threshold': roi_threshold, 'min_report_voxels': int(args.min_report_voxels), 'min_roi_voxels': int(min_roi_voxels), 'connectivity_metric': CONNECTIVITY_METRIC, 'comparison_metric': COMPARISON_METRIC, 'mi_neighbors': int(args.mi_neighbors), 'sessions': [{'label': spec.label, 'subject': spec.subject, 'session': spec.session, 'state': spec.state, 'bold_path': str(spec.bold_path) if spec.bold_path else None, 'timeseries_path': str(spec.timeseries_path) if spec.timeseries_path else None, 'beta_paths': [str(path) for path in spec.beta_paths]} for spec in specs]})
+    (paired_stats, paired_subject_path, paired_stats_path) = _save_paired_similarity_tests(pairwise, out_dir)
+    figure_path = _plot_cross_subject_distribution(pairwise, out_dir, paired_stats=paired_stats)
+    metadata.update({'weight_map': str(args.weight_map), 'roi_definition_figure': str(args.roi_definition_figure), 'roi_region_table': str(args.roi_region_table), 'session_manifest': str(args.session_manifest) if args.session_manifest.exists() else None, 'beta_root': str(args.beta_root), 'roi_percentile': float(args.roi_percentile), 'weight_threshold': roi_threshold, 'min_report_voxels': int(args.min_report_voxels), 'min_roi_voxels': int(min_roi_voxels), 'connectivity_metric': CONNECTIVITY_METRIC, 'comparison_metric': COMPARISON_METRIC, 'mi_neighbors': int(args.mi_neighbors), 'paired_subject_similarity_values': str(paired_subject_path), 'paired_subject_similarity_stats': str(paired_stats_path), 'paired_subject_similarity_primary_p': paired_stats['permutation']['permutation_p_value_two_sided'], 'sessions': [{'label': spec.label, 'subject': spec.subject, 'session': spec.session, 'state': spec.state, 'bold_path': str(spec.bold_path) if spec.bold_path else None, 'timeseries_path': str(spec.timeseries_path) if spec.timeseries_path else None, 'beta_paths': [str(path) for path in spec.beta_paths]} for spec in specs]})
     (out_dir / 'metadata.json').write_text(json.dumps(metadata, indent=2), encoding='utf-8')
     print(f'Saved {pairwise_path}')
     print(f'Saved {figure_path}')
     print(f"Saved {figure_path.with_suffix('.pdf')}")
     print(f"Saved {out_dir / 'weighted_roi_definition.csv'}")
+    print(f'Saved {paired_subject_path}')
+    print(f'Saved {paired_stats_path}')
     print(f"Saved {out_dir / 'metadata.json'}")
     return 0
 if __name__ == '__main__':
