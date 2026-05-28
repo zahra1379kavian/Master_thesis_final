@@ -646,6 +646,153 @@ def _write_burden_heatmaps(stats_by_prefix: dict[str, pd.DataFrame], plots_dir: 
     return paths
 
 
+def _compact_roi_label(value: str) -> str:
+    labels = [label.strip() for label in str(value).split(";") if label.strip()]
+    return "\n".join(labels)
+
+
+def _write_compact_burden_plot(stats_by_prefix: dict[str, pd.DataFrame], plots_dir: Path) -> tuple[Path, Path, Path]:
+    specs = {
+        "off_condition_minus_sham_off_roi_mean_delta": {
+            "label": "OFF - sham OFF",
+            "color": "#2F6FAE",
+            "marker": "o",
+            "boxstyle": "round,pad=0.25,rounding_size=0.18",
+            "x_offset": -0.18,
+        },
+        "on_condition_minus_sham_on_roi_mean_delta": {
+            "label": "ON - sham ON",
+            "color": "#D87924",
+            "marker": "s",
+            "boxstyle": "square,pad=0.25",
+            "x_offset": 0.18,
+        },
+    }
+    rows: list[dict[str, Any]] = []
+    for prefix, spec in specs.items():
+        stats_df = stats_by_prefix.get(prefix, pd.DataFrame())
+        if stats_df.empty:
+            continue
+        significant = stats_df.loc[_as_bool(stats_df["significant_fdr"])].copy()
+        significant = significant.loc[significant["target_condition_label"].astype(str).str.casefold() != "sham"]
+        if significant.empty:
+            continue
+        for (subject, condition_label), cell_df in significant.groupby(
+            ["subject", "target_condition_label"],
+            dropna=False,
+            observed=False,
+            sort=False,
+        ):
+            roi_labels = sorted(cell_df["roi_label"].astype(str).unique().tolist())
+            rows.append(
+                {
+                    "comparison": str(spec["label"]),
+                    "file_prefix": prefix,
+                    "subject": str(subject),
+                    "target_condition_label": str(condition_label),
+                    "n_significant_rois": int(len(roi_labels)),
+                    "significant_roi_labels": "; ".join(roi_labels),
+                }
+            )
+
+    nonzero_df = pd.DataFrame(rows)
+    csv_path = plots_dir / "off_on_condition_minus_sham_subject_session_roi_burden_compact_nonzero.csv"
+    if not nonzero_df.empty:
+        nonzero_df = nonzero_df.sort_values(
+            ["subject", "target_condition_label", "comparison"],
+            key=lambda col: col.map(_subject_sort_key) if col.name == "subject" else col.map(_session_sort_key)
+            if col.name == "target_condition_label"
+            else col,
+        ).reset_index(drop=True)
+    nonzero_df.to_csv(csv_path, index=False)
+
+    if nonzero_df.empty:
+        fig, ax = plt.subplots(figsize=(6.0, 2.8))
+        ax.text(0.5, 0.5, "No FDR-significant ROI burden cells", ha="center", va="center", fontsize=11)
+        ax.axis("off")
+        paths = _save_pdf_and_png(fig, plots_dir / "off_on_condition_minus_sham_subject_session_roi_burden_compact.pdf")
+        plt.close(fig)
+        return (*paths, csv_path)
+
+    sessions = sorted(nonzero_df["target_condition_label"].astype(str).unique().tolist(), key=_session_sort_key)
+    subjects = sorted(nonzero_df["subject"].astype(str).unique().tolist(), key=_subject_sort_key)
+    x_lookup = {label: index for index, label in enumerate(sessions)}
+    y_lookup = {subject: index for index, subject in enumerate(subjects)}
+
+    fig_width = max(9.2, 1.12 * len(sessions) + 3.0)
+    fig_height = max(4.0, 0.62 * len(subjects) + 2.0)
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height), facecolor="white")
+    ax.set_axisbelow(True)
+    ax.grid(axis="both", color="#E1E1E1", linewidth=0.8)
+
+    for prefix, spec in specs.items():
+        subset = nonzero_df.loc[nonzero_df["file_prefix"].eq(prefix)]
+        if subset.empty:
+            continue
+        x_values = np.asarray(
+            [x_lookup[str(label)] + float(spec["x_offset"]) for label in subset["target_condition_label"]],
+            dtype=np.float64,
+        )
+        y_values = np.asarray([y_lookup[str(subject)] for subject in subset["subject"]], dtype=np.float64)
+        ax.scatter(
+            [],
+            [],
+            s=150.0,
+            marker=str(spec["marker"]),
+            color=str(spec["color"]),
+            edgecolor="#202020",
+            linewidth=0.7,
+            alpha=0.92,
+            label=str(spec["label"]),
+        )
+        for x_value, y_value, roi_text in zip(
+            x_values,
+            y_values,
+            subset["significant_roi_labels"].astype(str),
+            strict=True,
+        ):
+            ax.text(
+                x_value,
+                y_value,
+                _compact_roi_label(roi_text),
+                ha="center",
+                va="center",
+                color="white",
+                fontsize=7.2,
+                fontweight="bold",
+                linespacing=1.0,
+                bbox={
+                    "boxstyle": str(spec["boxstyle"]),
+                    "facecolor": str(spec["color"]),
+                    "edgecolor": "#202020",
+                    "linewidth": 0.75,
+                    "alpha": 0.94,
+                },
+                zorder=4,
+            )
+
+    ax.set_xticks(np.arange(len(sessions)))
+    ax.set_xticklabels(sessions, fontsize=10)
+    ax.set_yticks(np.arange(len(subjects)))
+    ax.set_yticklabels(subjects, fontsize=10)
+    ax.set_xlim(-0.55, len(sessions) - 0.45)
+    ax.set_ylim(len(subjects) - 0.55, -0.55)
+    ax.set_xlabel("GVS condition", fontsize=10.5)
+    ax.set_ylabel("Subject with at least one significant ROI", fontsize=10.5)
+    ax.set_title("FDR-significant ROI burden by subject and GVS condition", fontsize=12.5, pad=10)
+    ax.legend(frameon=False, loc="upper right", fontsize=9.5)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    fig.tight_layout()
+    pdf_png = _save_pdf_and_png(
+        fig,
+        plots_dir / "off_on_condition_minus_sham_subject_session_roi_burden_compact.pdf",
+        dpi=300,
+    )
+    plt.close(fig)
+    return (*pdf_png, csv_path)
+
+
 def _missing_inputs(args: argparse.Namespace) -> list[str]:
     missing: list[str] = []
     for path, label in (
@@ -839,6 +986,7 @@ def main() -> int:
         )
 
     pdf_path, png_path = _write_burden_heatmaps(stats_by_prefix, plots_dir)
+    compact_pdf_path, compact_png_path, compact_csv_path = _write_compact_burden_plot(stats_by_prefix, plots_dir)
 
     manifest = {
         "inputs": {
@@ -856,6 +1004,9 @@ def main() -> int:
             "plots_dir": plots_dir,
             "burden_heatmap_png": png_path,
             "burden_heatmap_pdf": pdf_path,
+            "compact_burden_png": compact_png_path,
+            "compact_burden_pdf": compact_pdf_path,
+            "compact_burden_nonzero_csv": compact_csv_path,
         },
         "roi_definition": {
             "source": "new_weight_map_p90_aal_region_table",
@@ -888,6 +1039,9 @@ def main() -> int:
 
     print(f"Saved {png_path}")
     print(f"Saved {pdf_path}")
+    print(f"Saved {compact_png_path}")
+    print(f"Saved {compact_pdf_path}")
+    print(f"Saved {compact_csv_path}")
     print(f"Saved {common_dir / 'weighted_roi_definition.csv'}")
     print(f"Saved {common_dir / 'run_condition_inventory.csv'}")
     print(f"Saved {tables_dir}")
