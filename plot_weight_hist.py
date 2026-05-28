@@ -18,7 +18,7 @@ ax.axvline(thr, color="#dc2626", lw=2, label=f"90th percentile = ${thr / 1e-4:.2
 fmt = ScalarFormatter(useMathText=True)
 fmt.set_powerlimits((-4, -4))
 ax.xaxis.set_major_formatter(fmt)
-ax.set(title="Voxel weight probability histogram", xlabel="Weight", ylabel="Probability density")
+ax.set(xlabel="Weight", ylabel="Probability density")
 ax.legend(frameon=False)
 fig.tight_layout()
 fig.savefig(png, dpi=200)

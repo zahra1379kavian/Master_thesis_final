@@ -159,7 +159,8 @@ def _overlap_table(masks, groups, min_report_voxels):
 
 def _wide_region_table(region_df, mask_names, value_col='percent_of_map'):
     rows = region_df[region_df['mask_name'].isin(mask_names) & ~region_df['roi_name'].eq(UNASSIGNED_ROI)].copy()
-    return rows.pivot_table(index='roi_name', columns='mask_name', values=value_col, aggfunc='sum', fill_value=0.0)
+    wide = rows.pivot_table(index='roi_name', columns='mask_name', values=value_col, aggfunc='sum', fill_value=0.0)
+    return wide.reindex(columns=[name for name in mask_names if name in wide.columns])
 
 def _plot_region_heatmap(region_df, mask_names, out_base, min_row_percent=DEFAULT_HEATMAP_MIN_ROW_PERCENT):
     wide = _wide_region_table(region_df, mask_names, value_col='percent_of_map')
@@ -174,22 +175,19 @@ def _plot_region_heatmap(region_df, mask_names, out_base, min_row_percent=DEFAUL
     fig_height = max(5.8, 0.28 * len(wide) + 2.0)
     (fig, ax) = plt.subplots(figsize=(11.8, fig_height), facecolor='white')
     values = wide.to_numpy(dtype=float) * 100.0
-    im = ax.imshow(values, aspect='auto', cmap='magma', vmin=0.0)
+    im = ax.imshow(values, aspect='auto', cmap='Blues', vmin=0.0)
     ax.set_xticks(np.arange(len(wide.columns)))
     ax.set_xticklabels([_short_mask_label(name) for name in wide.columns], rotation=30, ha='right')
     ax.set_yticks(np.arange(len(wide.index)))
     ax.set_yticklabels([_display_region_name(name) for name in wide.index], fontsize=8)
-    title = 'Atlas-region share of each highlighted map'
-    if min_row_fraction > 0:
-        title += f' (rows >= {min_row_percent:g}% in any map)'
-    ax.set_title(title, fontsize=12, weight='bold')
     for row in range(values.shape[0]):
         for col in range(values.shape[1]):
             value = values[row, col]
             if value >= 2.0:
-                ax.text(col, row, f'{value:.1f}', ha='center', va='center', fontsize=6.5, color='white' if value > np.nanmax(values) * 0.45 else 'black')
+                (r, g, b, _) = im.cmap(im.norm(value))
+                luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+                ax.text(col, row, f'{value:.1f}', ha='center', va='center', fontsize=6.5, color='black' if luminance > 0.55 else 'white')
     cbar = fig.colorbar(im, ax=ax, fraction=0.025, pad=0.02)
-    cbar.set_label('% of highlighted voxels')
     fig.tight_layout()
     fig.savefig(f'{out_base}_region_heatmap.png', dpi=220, bbox_inches='tight', pad_inches=0.04)
     fig.savefig(f'{out_base}_region_heatmap.pdf', bbox_inches='tight', pad_inches=0.04)
@@ -212,7 +210,6 @@ def _plot_overlap_heatmap(overlap_df, mask_names, out_base):
     ax.set_xticklabels([_short_mask_label(name) for name in mask_names], rotation=35, ha='right')
     ax.set_yticks(np.arange(len(mask_names)))
     ax.set_yticklabels([_short_mask_label(name) for name in mask_names])
-    ax.set_title('Pairwise Dice overlap', fontsize=12, weight='bold')
     for row in range(values.shape[0]):
         for col in range(values.shape[1]):
             ax.text(col, row, f'{values[row, col]:.2f}', ha='center', va='center', fontsize=8, color='white' if values[row, col] >= 0.55 else 'black')
@@ -283,6 +280,7 @@ def main():
     region_df = pd.concat([_assign_regions(mask_spec=mask, affine=reference_img.affine, groups=groups, region_sizes=region_sizes, min_report_voxels=args.min_report_voxels) for mask in masks], ignore_index=True)
     summary_df = _summarize_masks(masks, region_df)
     primary_mask_names = [f'Standard GLM positive z', f'GLMsingle Type A positive z', f'GLMsingle Type D positive z'] + [f'Optimization p{percentile:g}' for percentile in weight_percentiles]
+    heatmap_mask_names = [name for name in primary_mask_names if name != 'Optimization p80']
     primary_masks = [mask for mask in masks if mask.mask_name in primary_mask_names]
     overlap_df = _overlap_table(primary_masks, groups, args.min_report_voxels)
     matched_mask_names = primary_mask_names + [mask.mask_name for mask in masks if mask.family == 'weight_matched_positive_z']
@@ -295,8 +293,8 @@ def main():
     region_df.to_csv(f'{out_base}_regions.csv', index=False)
     overlap_df.to_csv(f'{out_base}_overlaps.csv', index=False)
     _wide_region_table(region_df, primary_mask_names).to_csv(f'{out_base}_region_by_method.csv')
-    _plot_region_heatmap(region_df, primary_mask_names, out_base, args.heatmap_min_row_percent)
-    _plot_overlap_heatmap(overlap_df[overlap_df['overlap_set'].eq('primary')], primary_mask_names, out_base)
+    _plot_region_heatmap(region_df, heatmap_mask_names, out_base, args.heatmap_min_row_percent)
+    _plot_overlap_heatmap(overlap_df[overlap_df['overlap_set'].eq('primary')], heatmap_mask_names, out_base)
     _write_report(out_base=out_base, map_specs=map_specs, summary_df=summary_df, region_df=region_df, overlap_df=overlap_df[overlap_df['overlap_set'].eq('primary')], primary_mask_names=primary_mask_names, metadata=metadata, z_thresholds=z_thresholds, weight_percentiles=weight_percentiles, analysis_mask=analysis_mask)
     _write_json(out_base=out_base, map_specs=map_specs, metadata=metadata, z_thresholds=z_thresholds, weight_percentiles=weight_percentiles, min_report_voxels=args.min_report_voxels, analysis_mask=analysis_mask)
     print(summary_df[summary_df['mask_name'].isin(primary_mask_names)].to_string(index=False))
