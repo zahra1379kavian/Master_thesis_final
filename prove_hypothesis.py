@@ -452,7 +452,6 @@ def _prevalence_ratios(
 def _style_axis(ax) -> None:
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    ax.grid(axis="y", color="#d9d9d9", linewidth=0.6, alpha=0.8)
     ax.set_axisbelow(True)
     ax.tick_params(labelsize=9)
 
@@ -468,10 +467,10 @@ def _plot_norm_diff_figure(
     resample_mean = float(np.mean(resampled_means))
     ci_low, ci_high = np.percentile(resampled_means, [2.5, 97.5])
 
-    fig, axes = plt.subplots(1, 2, figsize=(9.0, 3.4))
+    fig, axes = plt.subplots(1, 2, figsize=(11.35, 4.3))
 
-    axes[0].plot(percentiles, ratios, marker="o", markersize=4.5, linewidth=1.8, color="#2b6cb0")
-    axes[0].axhline(1.0, color="#555555", linestyle="--", linewidth=0.9)
+    axes[0].bar(percentiles, ratios, width=7.6, color="#c43b4d", edgecolor="#c43b4d", linewidth=0.5)
+    axes[0].axhline(1.0, color="#777777", linestyle="--", linewidth=1.4)
     axes[0].set_xticks(percentiles)
     axes[0].set_xticklabels([f"{int(p)}%" for p in percentiles])
     axes[0].set_xlabel("Variability Percentile Threshold", fontsize=10)
@@ -479,6 +478,7 @@ def _plot_norm_diff_figure(
     finite_ratios = ratios[np.isfinite(ratios)]
     ratio_top = max(1.1, float(np.max(finite_ratios)) * 1.12) if finite_ratios.size else 1.1
     axes[0].set_ylim(0, ratio_top)
+    axes[0].set_xlim(1.5, 98.5)
     _style_axis(axes[0])
 
     bins = min(40, max(16, int(np.sqrt(resampled_means.size))))
@@ -486,21 +486,35 @@ def _plot_norm_diff_figure(
         resampled_means,
         bins=bins,
         density=True,
-        color="#b9c2cf",
+        color="#9ecae1",
         edgecolor="white",
         linewidth=0.4,
     )
-    axes[1].axvline(selected_mean, color="#c0392b", linewidth=2.0)
-    axes[1].axvline(ci_low, color="#555555", linestyle=":", linewidth=1.1)
-    axes[1].axvline(ci_high, color="#555555", linestyle=":", linewidth=1.1)
-    axes[1].set_xlabel("Normalized |Delta| (consecutive diff / |voxel_mean|)", fontsize=10)
-    axes[1].set_ylabel("Density", fontsize=10)
-    annotation = (
-        f"Selected mean = {selected_mean:.3f}\n"
-        f"Resample mean = {resample_mean:.3f}\n"
-        f"95% CI = [{ci_low:.3f}, {ci_high:.3f}]"
+    axes[1].axvline(
+        selected_mean,
+        color="#c43b4d",
+        linestyle="--",
+        linewidth=1.7,
+        label=f"Selected mean = {selected_mean:.3f}",
     )
-    axes[1].text(0.03, 0.95, annotation, transform=axes[1].transAxes, ha="left", va="top", fontsize=8.8)
+    axes[1].axvline(
+        resample_mean,
+        color="#777777",
+        linestyle="--",
+        linewidth=1.4,
+        label=f"Resample mean = {resample_mean:.3f}",
+    )
+    axes[1].axvline(
+        ci_low,
+        color="#777777",
+        linestyle="--",
+        linewidth=1.4,
+        label=f"95% CI = [{ci_low:.3f}, {ci_high:.3f}]",
+    )
+    axes[1].axvline(ci_high, color="#777777", linestyle="--", linewidth=1.4)
+    axes[1].set_xlabel("Normalized |consecutive trial beta difference|", fontsize=10)
+    axes[1].set_ylabel("Density", fontsize=10)
+    axes[1].legend(frameon=True, fontsize=9, loc="upper center", bbox_to_anchor=(0.58, 0.98))
     _style_axis(axes[1])
 
     fig.tight_layout(w_pad=2.0)
