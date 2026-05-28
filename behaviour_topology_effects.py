@@ -43,9 +43,9 @@ ASSOCIATIONS = (
     {
         'analysis': 'topology_change_predicts_rt_variability_change',
         'predictor': 'topology_change_distance',
-        'outcome': 'delta_rt_sd_on_minus_off',
+        'outcome': 'delta_rt_variability_on_minus_off',
         'xlabel': 'OFF-to-ON topology change\n(Laplacian spectral distance)',
-        'ylabel': 'RT variability change (ON - OFF SD, s)',
+        'ylabel': 'RT variability change (ON - OFF,\nconsecutive-trial index)',
         'title': 'Topology Change vs RT Variability Change',
         'figure_stem': 'behaviour_topology_change_rt_variability_change',
     },
@@ -59,6 +59,15 @@ ASSOCIATIONS = (
         'figure_stem': 'behaviour_on_centroid_distance_mean_rt_improvement',
     },
     {
+        'analysis': 'off_distance_to_on_centroid_predicts_rt_variability_improvement',
+        'predictor': 'off_distance_to_loo_on_centroid',
+        'outcome': 'rt_variability_improvement_off_minus_on',
+        'xlabel': 'OFF distance to leave-one-out ON centroid',
+        'ylabel': 'RT variability improvement (OFF - ON,\nconsecutive-trial index)',
+        'title': 'ON Centroid Distance vs RT Variability Improvement',
+        'figure_stem': 'behaviour_on_centroid_distance_rt_variability_improvement',
+    },
+    {
         'analysis': 'movement_toward_on_centroid_predicts_mean_rt_improvement',
         'predictor': 'movement_toward_loo_on_centroid',
         'outcome': 'mean_rt_improvement_off_minus_on',
@@ -66,6 +75,15 @@ ASSOCIATIONS = (
         'ylabel': 'Mean RT improvement (OFF - ON, s)',
         'title': 'Centroid Movement vs Mean RT Improvement',
         'figure_stem': 'behaviour_on_centroid_movement_mean_rt_improvement',
+    },
+    {
+        'analysis': 'movement_toward_on_centroid_predicts_rt_variability_improvement',
+        'predictor': 'movement_toward_loo_on_centroid',
+        'outcome': 'rt_variability_improvement_off_minus_on',
+        'xlabel': 'Movement toward leave-one-out ON centroid',
+        'ylabel': 'RT variability improvement (OFF - ON,\nconsecutive-trial index)',
+        'title': 'Centroid Movement vs RT Variability Improvement',
+        'figure_stem': 'behaviour_on_centroid_movement_rt_variability_improvement',
     },
 )
 
@@ -109,6 +127,7 @@ def _session_summary(subject, session, values, source_files, source_kinds):
     q25, q75 = np.percentile(values, [25, 75])
     state = _state_for_session(session)
     label = f'{subject}_ses-{session}'
+    rt_variability = _consecutive_rt_variability(values)
     return {
         'subject': subject,
         'session': str(session),
@@ -117,11 +136,24 @@ def _session_summary(subject, session, values, source_files, source_kinds):
         'n_rt': int(values.size),
         'mean_rt': float(np.mean(values)),
         'sd_rt': float(np.std(values, ddof=1)) if values.size > 1 else float('nan'),
+        'rt_variability': float(rt_variability),
         'median_rt': float(np.median(values)),
         'iqr_rt': float(q75 - q25),
         'source_files': ';'.join(source_files),
         'source_kinds': ';'.join(sorted(set(source_kinds))),
     }
+
+
+def _consecutive_rt_variability(values):
+    if values.size < 2:
+        return float('nan')
+    previous = values[:-1]
+    following = values[1:]
+    denominator = previous ** 2 + following ** 2
+    valid = denominator > 0
+    if not np.any(valid):
+        return float('nan')
+    return float(np.sum(((previous[valid] - following[valid]) ** 2) / denominator[valid]))
 
 
 def _load_behaviour_sessions(root, rt_column_index, min_rt=None, max_rt=None):
@@ -234,14 +266,17 @@ def _build_subject_table(behaviour, networks, network_sessions):
             'mean_rt_on': float(on_behaviour['mean_rt']),
             'sd_rt_off': float(off_behaviour['sd_rt']),
             'sd_rt_on': float(on_behaviour['sd_rt']),
+            'rt_variability_off': float(off_behaviour['rt_variability']),
+            'rt_variability_on': float(on_behaviour['rt_variability']),
             'median_rt_off': float(off_behaviour['median_rt']),
             'median_rt_on': float(on_behaviour['median_rt']),
             'iqr_rt_off': float(off_behaviour['iqr_rt']),
             'iqr_rt_on': float(on_behaviour['iqr_rt']),
             'delta_mean_rt_on_minus_off': float(on_behaviour['mean_rt'] - off_behaviour['mean_rt']),
             'delta_rt_sd_on_minus_off': float(on_behaviour['sd_rt'] - off_behaviour['sd_rt']),
+            'delta_rt_variability_on_minus_off': float(on_behaviour['rt_variability'] - off_behaviour['rt_variability']),
             'mean_rt_improvement_off_minus_on': float(off_behaviour['mean_rt'] - on_behaviour['mean_rt']),
-            'rt_variability_improvement_off_minus_on': float(off_behaviour['sd_rt'] - on_behaviour['sd_rt']),
+            'rt_variability_improvement_off_minus_on': float(off_behaviour['rt_variability'] - on_behaviour['rt_variability']),
             'topology_change_distance': _laplacian_spectral_distance_signed(off_matrix, on_matrix),
             'off_distance_to_loo_on_centroid': off_distance_to_centroid,
             'on_distance_to_loo_on_centroid': on_distance_to_centroid,
@@ -472,6 +507,8 @@ def main():
             '2D behavioural .npy files use the requested second column as RT.',
             '1D behavioural .npy files are treated as already-extracted RT vectors.',
             'RT change is ON minus OFF; RT improvement is OFF minus ON.',
+            'RT variability is the sum across consecutive trial pairs of (x_i - x_{i+1})^2 / (x_i^2 + x_{i+1}^2).',
+            'Runs within each session are concatenated before RT variability is computed, so the run-boundary jump is included.',
             'ON centroid distances use a leave-one-subject-out ON centroid.',
         ],
         'n_behaviour_sessions': int(behaviour.shape[0]),

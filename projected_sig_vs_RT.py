@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot trial-wise weighted beta projection against behaviour RT."""
+"""Compare adjacent-trial variability in weighted projection and behaviour RT."""
 
 from __future__ import annotations
 
@@ -10,15 +10,18 @@ from pathlib import Path
 
 import matplotlib
 
+warnings.filterwarnings("ignore", message="Unable to import Axes3D.*")
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import nibabel as nib
 import numpy as np
 import pandas as pd
+import statsmodels.formula.api as smf
 
 
 ROOT = Path(__file__).resolve().parent
-DEFAULT_BETA_DIR = Path(
+DEFAULT_DATA_DIR = Path(
     "/mnt/TeamShare/Data_Masterfile/H20-00572_All-Dressed/Zahra-Thesis-Data/fmri_opt_group/results_beta_preprocessed"
 )
 DEFAULT_BEHAVIOUR_DIR = Path(
@@ -26,22 +29,41 @@ DEFAULT_BEHAVIOUR_DIR = Path(
 )
 DEFAULT_WEIGHT_MAP = ROOT / "data" / "voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5.nii.gz"
 DEFAULT_OUT_DIR = ROOT / "figures" / "projected_RT"
-OUTLIER_MODIFIED_Z_THRESHOLD = 3.5
 PROJECTION_TRIAL_CHUNK_SIZE = 8
+PROJECTION_VOXEL_CHUNK_SIZE = 4096
 
 BETA_RE = re.compile(
     r"cleaned_beta_volume_(?P<sub>sub-pd\d+)_ses-(?P<ses>\d+)_run-(?P<run>\d+)\.npy$"
 )
+ACTIVE_BOLD_RE = re.compile(
+    r"active_bold_(?P<sub>sub-pd\d+)_ses-(?P<ses>\d+)_run-(?P<run>\d+)\.npy\.npy$"
+)
+BEHAVIOUR_RE = re.compile(r"PSPD(?P<digits>\d+)_ses_(?P<ses>\d+)_run_(?P<run>\d+)\.npy$")
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Project clean beta volumes through a voxel-weight map and scatter against RT."
+        description=(
+            "Project BOLD or beta data through a voxel-weight map, then compare "
+            "adjacent-trial variability with behaviour RT."
+        )
     )
-    parser.add_argument("--beta-dir", type=Path, default=DEFAULT_BETA_DIR)
+    parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--behaviour-dir", type=Path, default=DEFAULT_BEHAVIOUR_DIR)
     parser.add_argument("--weight-map", type=Path, default=DEFAULT_WEIGHT_MAP)
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
+    parser.add_argument(
+        "--projection-source",
+        choices=("bold", "beta"),
+        default="bold",
+        help="Use active BOLD trial time series or cleaned beta volumes for the weighted projection.",
+    )
+    parser.add_argument(
+        "--bold-trial-reducer",
+        choices=("median", "mean"),
+        default="median",
+        help="Reducer applied across each trial's BOLD time points after projection.",
+    )
     parser.add_argument(
         "--behaviour-column",
         type=int,
@@ -58,6 +80,11 @@ def _subject_digits(sub_tag: str) -> str:
     return match.group(1)
 
 
+def _category_sort_key(value: str) -> tuple[int, int | str]:
+    digits = _subject_digits(str(value))
+    return (0, int(digits)) if digits.isdigit() else (1, str(value))
+
+
 def _load_weights(weight_map: Path) -> np.ndarray:
     weights = nib.load(str(weight_map)).get_fdata(dtype=np.float32)
     mask = np.isfinite(weights) & (weights != 0)
@@ -67,7 +94,7 @@ def _load_weights(weight_map: Path) -> np.ndarray:
 
 
 def _load_behaviour_rt(path: Path, column: int) -> np.ndarray:
-    behaviour = np.asarray(np.load(path), dtype=np.float64)
+    behaviour = np.asarray(np.load(path, allow_pickle=False), dtype=np.float64)
     if behaviour.ndim == 1:
         return behaviour
     if behaviour.ndim != 2:
@@ -92,36 +119,23 @@ def _align_trials(projected_signal: np.ndarray, behaviour_rt: np.ndarray, label:
     return projected_signal[:n_keep], behaviour_rt[:n_keep]
 
 
-def _rt_outlier_mask(rt: pd.Series) -> np.ndarray:
-    values = rt.to_numpy(dtype=np.float64)
-    finite = np.isfinite(values)
-    outliers = np.zeros(values.shape, dtype=bool)
-    if np.count_nonzero(finite) < 3:
-        return outliers
-
-    median = np.nanmedian(values[finite])
-    mad = np.nanmedian(np.abs(values[finite] - median))
-    if not np.isfinite(mad) or mad <= 0:
-        return outliers
-
-    modified_z = 0.6745 * (values[finite] - median) / mad
-    outliers[finite] = np.abs(modified_z) > OUTLIER_MODIFIED_Z_THRESHOLD
-    return outliers
-
-
-def _remove_rt_outliers(df: pd.DataFrame) -> pd.DataFrame:
-    outlier_masks = []
-    for _, group in df.groupby(["sub", "ses", "run"], sort=False):
-        outlier_masks.append(pd.Series(_rt_outlier_mask(group["behaviour_rt"]), index=group.index))
-
-    if not outlier_masks:
-        return df
-
-    outliers = pd.concat(outlier_masks).sort_index()
-    n_outliers = int(outliers.sum())
-    if n_outliers:
-        print(f"Removed {n_outliers} RT outlier trials using per-run modified z>{OUTLIER_MODIFIED_Z_THRESHOLD}.")
-    return df.loc[~outliers].copy()
+def _adjacent_diff_ratio_sum(values: np.ndarray) -> tuple[float, int]:
+    values = np.asarray(values, dtype=np.float64)
+    if values.size < 2:
+        return np.nan, 0
+    finite_values = np.isfinite(values)
+    if not np.any(finite_values):
+        return np.nan, 0
+    values = values.copy()
+    values[finite_values] -= np.nanmean(values[finite_values])
+    x0 = values[:-1]
+    x1 = values[1:]
+    denominator = x0 * x0 + x1 * x1
+    keep = np.isfinite(x0) & np.isfinite(x1) & np.isfinite(denominator) & (denominator > 0)
+    if not np.any(keep):
+        return np.nan, 0
+    score = np.sum(((x0[keep] - x1[keep]) ** 2) / denominator[keep])
+    return float(score), int(np.count_nonzero(keep))
 
 
 def _project_beta(beta_path: Path, weights: np.ndarray) -> np.ndarray:
@@ -129,9 +143,7 @@ def _project_beta(beta_path: Path, weights: np.ndarray) -> np.ndarray:
     if beta.ndim != 4:
         raise ValueError(f"Expected 4D beta volume in {beta_path}, got shape {beta.shape}")
     if beta.shape[:3] != weights.shape:
-        raise ValueError(
-            f"Spatial shape mismatch for {beta_path}: beta {beta.shape[:3]} vs weights {weights.shape}"
-        )
+        raise ValueError(f"Spatial shape mismatch for {beta_path}: beta {beta.shape[:3]} vs weights {weights.shape}")
 
     weight_mask = np.isfinite(weights) & (weights != 0)
     selected_weights = weights[weight_mask].astype(np.float64)
@@ -141,152 +153,387 @@ def _project_beta(beta_path: Path, weights: np.ndarray) -> np.ndarray:
         stop = min(start + PROJECTION_TRIAL_CHUNK_SIZE, beta.shape[3])
         selected_beta = np.asarray(beta[weight_mask, start:stop], dtype=np.float64)
         finite_beta = np.isfinite(selected_beta)
-        numerator = np.nansum(selected_beta * selected_weights[:, None], axis=0)
-        denominator = np.sum(finite_beta * selected_weights[:, None], axis=0)
-        chunk_projection = np.full(stop - start, np.nan, dtype=np.float64)
-        valid = denominator != 0
-        chunk_projection[valid] = numerator[valid] / denominator[valid]
+        filled_beta = np.nan_to_num(selected_beta, nan=0.0, posinf=0.0, neginf=0.0)
+        chunk_projection = selected_weights @ filled_beta
+        chunk_projection[~np.any(finite_beta, axis=0)] = np.nan
         projected_signal[start:stop] = chunk_projection
 
     return projected_signal
 
 
-def _discover_beta_runs(beta_dir: Path) -> list[dict[str, object]]:
-    runs = []
-    for path in sorted(beta_dir.glob("sub-*/cleaned_beta_volume_sub-pd*_ses-*_run-*.npy")):
-        match = BETA_RE.match(path.name)
-        if not match:
-            warnings.warn(f"Skipping unrecognized beta filename: {path}", stacklevel=2)
-            continue
-        runs.append(
-            {
-                "path": path,
-                "sub": match.group("sub"),
-                "ses": int(match.group("ses")),
-                "run": int(match.group("run")),
-            }
+def _active_flat_indices_path(data_dir: Path, sub: str, ses: int, run: int) -> Path:
+    return data_dir / sub / f"active_flat_indices__{sub}_ses-{ses}_run-{run}.npy"
+
+
+def _reduce_bold_trials(projected_timepoints: np.ndarray, reducer: str) -> np.ndarray:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        if reducer == "median":
+            return np.nanmedian(projected_timepoints, axis=1)
+        if reducer == "mean":
+            return np.nanmean(projected_timepoints, axis=1)
+    raise ValueError(f"Unknown BOLD trial reducer: {reducer}")
+
+
+def _project_bold(active_bold_path: Path, active_flat_indices_path: Path, weights: np.ndarray, reducer: str) -> np.ndarray:
+    active_bold = np.load(active_bold_path, mmap_mode="r")
+    if active_bold.ndim != 3:
+        raise ValueError(f"Expected 3D active BOLD array in {active_bold_path}, got shape {active_bold.shape}")
+
+    flat_indices = np.asarray(np.load(active_flat_indices_path, allow_pickle=False), dtype=np.int64).ravel()
+    if flat_indices.size != active_bold.shape[0]:
+        raise ValueError(
+            f"Active index count mismatch for {active_bold_path}: "
+            f"{flat_indices.size} indices vs {active_bold.shape[0]} BOLD voxels"
         )
-    if not runs:
-        raise FileNotFoundError(f"No clean beta files found under {beta_dir}")
+
+    flat_weights = weights.ravel()[flat_indices].astype(np.float64)
+    n_voxels, n_trials, trial_length = active_bold.shape
+    n_timepoints = n_trials * trial_length
+    projection = np.zeros(n_timepoints, dtype=np.float64)
+    any_finite = np.zeros(n_timepoints, dtype=bool)
+
+    for start in range(0, n_voxels, PROJECTION_VOXEL_CHUNK_SIZE):
+        stop = min(start + PROJECTION_VOXEL_CHUNK_SIZE, n_voxels)
+        chunk_weights = flat_weights[start:stop]
+        weight_keep = np.isfinite(chunk_weights) & (chunk_weights != 0)
+        if not np.any(weight_keep):
+            continue
+
+        chunk = np.asarray(active_bold[start:stop][weight_keep].reshape(np.count_nonzero(weight_keep), -1), dtype=np.float64)
+        finite = np.isfinite(chunk)
+        finite_counts = np.count_nonzero(finite, axis=1, keepdims=True)
+        sums = np.sum(np.where(finite, chunk, 0.0), axis=1, keepdims=True)
+        means = np.divide(sums, finite_counts, out=np.zeros_like(sums), where=finite_counts > 0)
+        centered = np.where(finite, chunk - means, 0.0)
+
+        projection += chunk_weights[weight_keep] @ centered
+        any_finite |= np.any(finite, axis=0)
+
+    projection[~any_finite] = np.nan
+    projected_trials = projection.reshape(n_trials, trial_length)
+    return _reduce_bold_trials(projected_trials, reducer)
+
+
+def _discover_beta_runs(data_dir: Path) -> list[dict[str, object]]:
+    runs = []
+    for path in sorted(data_dir.glob("sub-*/cleaned_beta_volume_sub-pd*_ses-*_run-*.npy")):
+        match = BETA_RE.match(path.name)
+        if match:
+            runs.append({"path": path, "sub": match.group("sub"), "ses": int(match.group("ses")), "run": int(match.group("run"))})
     return runs
 
 
-def _build_projection_table(
-    beta_dir: Path,
+def _discover_bold_runs(data_dir: Path) -> list[dict[str, object]]:
+    runs = []
+    for path in sorted(data_dir.glob("sub-*/active_bold_sub-pd*_ses-*_run-*.npy.npy")):
+        match = ACTIVE_BOLD_RE.match(path.name)
+        if match:
+            runs.append({"path": path, "sub": match.group("sub"), "ses": int(match.group("ses")), "run": int(match.group("run"))})
+    return runs
+
+
+def _discover_runs(data_dir: Path, projection_source: str) -> list[dict[str, object]]:
+    if projection_source == "bold":
+        runs = _discover_bold_runs(data_dir)
+        label = "active BOLD"
+    elif projection_source == "beta":
+        runs = _discover_beta_runs(data_dir)
+        label = "clean beta"
+    else:
+        raise ValueError(f"Unknown projection source: {projection_source}")
+    if not runs:
+        raise FileNotFoundError(f"No {label} files found under {data_dir}")
+    return runs
+
+
+def _behaviour_path(behaviour_dir: Path, sub: str, ses: int, run: int) -> Path:
+    return behaviour_dir / f"PSPD{_subject_digits(sub)}_ses_{ses}_run_{run}.npy"
+
+
+def _warn_unmatched_behaviour_runs(behaviour_dir: Path, projection_runs: list[dict[str, object]]) -> None:
+    projection_keys = {
+        (_subject_digits(str(item["sub"])), int(item["ses"]), int(item["run"]))
+        for item in projection_runs
+    }
+    projection_subjects = {key[0] for key in projection_keys}
+    unmatched = []
+    for path in sorted(behaviour_dir.glob("PSPD*_ses_*_run_*.npy")):
+        match = BEHAVIOUR_RE.match(path.name)
+        if not match:
+            continue
+        key = (match.group("digits"), int(match.group("ses")), int(match.group("run")))
+        if key[0] in projection_subjects and key not in projection_keys:
+            unmatched.append(path.name)
+    if unmatched:
+        print("Behaviour files without matching projection data:")
+        for name in unmatched:
+            print(f"- {name}")
+
+
+def _build_run_metric_table(
+    data_dir: Path,
     behaviour_dir: Path,
     weights: np.ndarray,
+    projection_source: str,
     behaviour_column: int,
+    bold_trial_reducer: str,
 ) -> pd.DataFrame:
-    beta_runs = _discover_beta_runs(beta_dir)
-    missing_behaviour = []
-    for beta_run in beta_runs:
-        sub = str(beta_run["sub"])
-        ses = int(beta_run["ses"])
-        run = int(beta_run["run"])
-        behaviour_path = behaviour_dir / f"PSPD{_subject_digits(sub)}_ses_{ses}_run_{run}.npy"
-        if not behaviour_path.exists():
-            missing_behaviour.append(f"{sub} ses-{ses} run-{run}: {behaviour_path}")
+    runs = _discover_runs(data_dir, projection_source)
+    _warn_unmatched_behaviour_runs(behaviour_dir, runs)
 
-    if missing_behaviour:
-        missing_lines = "\n".join(f"- {item}" for item in missing_behaviour)
-        raise FileNotFoundError(f"Missing behaviour files:\n{missing_lines}")
+    missing = []
+    for item in runs:
+        sub = str(item["sub"])
+        ses = int(item["ses"])
+        run = int(item["run"])
+        behaviour_path = _behaviour_path(behaviour_dir, sub, ses, run)
+        if not behaviour_path.exists():
+            missing.append(f"{sub} ses-{ses} run-{run}: {behaviour_path}")
+        if projection_source == "bold":
+            active_flat_path = _active_flat_indices_path(data_dir, sub, ses, run)
+            if not active_flat_path.exists():
+                missing.append(f"{sub} ses-{ses} run-{run}: {active_flat_path}")
+    if missing:
+        missing_lines = "\n".join(f"- {item}" for item in missing)
+        raise FileNotFoundError(f"Missing datasets:\n{missing_lines}")
 
     rows = []
-    for beta_run in beta_runs:
-        sub = str(beta_run["sub"])
-        ses = int(beta_run["ses"])
-        run = int(beta_run["run"])
-        beta_path = Path(beta_run["path"])
+    for item in runs:
+        sub = str(item["sub"])
+        ses = int(item["ses"])
+        run = int(item["run"])
+        projection_path = Path(item["path"])
+        label = f"{sub} ses-{ses} run-{run}"
 
-        behaviour_path = behaviour_dir / f"PSPD{_subject_digits(sub)}_ses_{ses}_run_{run}.npy"
-        projected_signal = _project_beta(beta_path, weights)
-        behaviour_rt = _load_behaviour_rt(behaviour_path, behaviour_column)
-        projected_signal, behaviour_rt = _align_trials(
-            projected_signal, behaviour_rt, f"{sub} ses-{ses} run-{run}"
+        if projection_source == "bold":
+            active_flat_path = _active_flat_indices_path(data_dir, sub, ses, run)
+            projected_signal = _project_bold(projection_path, active_flat_path, weights, bold_trial_reducer)
+        else:
+            projected_signal = _project_beta(projection_path, weights)
+
+        behaviour_rt = _load_behaviour_rt(_behaviour_path(behaviour_dir, sub, ses, run), behaviour_column)
+        projected_signal, behaviour_rt = _align_trials(projected_signal, behaviour_rt, label)
+        paired_finite = np.isfinite(projected_signal) & np.isfinite(behaviour_rt)
+        projection_values = projected_signal[paired_finite]
+        behaviour_values = behaviour_rt[paired_finite]
+        projection_score, projection_pair_count = _adjacent_diff_ratio_sum(projection_values)
+        behaviour_score, behaviour_pair_count = _adjacent_diff_ratio_sum(behaviour_values)
+
+        rows.append(
+            {
+                "sub_tag": sub,
+                "ses": ses,
+                "run": run,
+                "n_trials_paired_finite": int(np.count_nonzero(paired_finite)),
+                "adjacent_diff_ratio_sum_projection": projection_score,
+                "adjacent_diff_ratio_sum_behavior_col2": behaviour_score,
+                "n_adjacent_pairs_projection": projection_pair_count,
+                "n_adjacent_pairs_behavior_col2": behaviour_pair_count,
+                "variability_preprocessing": "demean_paired_finite_run_values",
+                "projection_source": projection_source,
+                "projection_path": str(projection_path),
+                "behaviour_path": str(_behaviour_path(behaviour_dir, sub, ses, run)),
+            }
         )
 
-        for trial_idx, (projection, rt) in enumerate(zip(projected_signal, behaviour_rt), start=1):
-            rows.append(
-                {
-                    "sub": sub,
-                    "ses": ses,
-                    "run": run,
-                    "trial": trial_idx,
-                    "projected_signal": projection,
-                    "behaviour_rt": rt,
-                }
-            )
-
     if not rows:
-        raise ValueError("No projection/behaviour rows were created.")
-    return pd.DataFrame(rows)
+        raise ValueError("No projection/behaviour metric rows were created.")
+    return pd.DataFrame(rows).sort_values(["sub_tag", "ses", "run"]).reset_index(drop=True)
 
 
-def _save_subject_scatter(df: pd.DataFrame, out_dir: Path) -> None:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    subjects = sorted(df["sub"].unique())
-    sessions = sorted(df["ses"].unique())
-    n_rows = len(subjects)
-    n_cols = len(sessions)
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(6.2 * n_cols, 4.2 * n_rows), squeeze=False)
-    session_colors = {1: "#4C78A8", 2: "#C23B4B"}
+def _build_subject_color_map(values: list[str]) -> tuple[dict[str, object], list[str]]:
+    unique_values = sorted({str(value) for value in values}, key=_category_sort_key)
+    palette = list(plt.get_cmap("tab20").colors) + list(plt.get_cmap("tab20b").colors) + list(plt.get_cmap("tab20c").colors)
+    step = 11
+    spread = [palette[(idx * step) % len(palette)] for idx in range(len(palette))]
+    return {value: spread[idx % len(spread)] for idx, value in enumerate(unique_values)}, unique_values
 
-    for row_idx, sub in enumerate(subjects):
-        for col_idx, ses in enumerate(sessions):
-            ax = axes[row_idx, col_idx]
-            panel_df = df[(df["sub"] == sub) & (df["ses"] == ses)]
-            if panel_df.empty:
-                ax.axis("off")
-                continue
 
-            ax.scatter(
-                panel_df["projected_signal"],
-                panel_df["behaviour_rt"],
-                s=22,
-                alpha=0.68,
-                linewidths=0,
-                color=session_colors.get(int(ses), "#7A7A7A"),
-            )
+def _mixedlm_projection_effect(paired_df: pd.DataFrame) -> dict[str, float]:
+    row = {
+        "lme_coef_projection_minus_behavior": np.nan,
+        "lme_z_projection_minus_behavior": np.nan,
+        "lme_p_two_sided": np.nan,
+    }
+    if paired_df["sub_tag"].nunique() < 2:
+        return row
 
-            finite = np.isfinite(panel_df["projected_signal"]) & np.isfinite(panel_df["behaviour_rt"])
-            n_finite = int(finite.sum())
-            corr_text = "r=NA"
-            if n_finite >= 3:
-                x = panel_df.loc[finite, "projected_signal"].to_numpy(dtype=np.float64)
-                y = panel_df.loc[finite, "behaviour_rt"].to_numpy(dtype=np.float64)
-                corr = np.corrcoef(x, y)[0, 1]
-                corr_text = f"r={corr:.2f}"
-                if np.nanmax(x) > np.nanmin(x):
-                    slope, intercept = np.polyfit(x, y, deg=1)
-                    x_fit = np.linspace(np.nanmin(x), np.nanmax(x), 100)
-                    ax.plot(x_fit, slope * x_fit + intercept, color="black", linewidth=1.8)
+    model_df = paired_df.loc[:, ["sub_tag", "behavior_raw", "projection_raw"]].rename(columns={"sub_tag": "subject_id"})
+    behavior_long = model_df.loc[:, ["subject_id", "behavior_raw"]].copy()
+    behavior_long["signal"] = "Behaviour"
+    behavior_long["value"] = behavior_long.pop("behavior_raw")
+    projection_long = model_df.loc[:, ["subject_id", "projection_raw"]].copy()
+    projection_long["signal"] = "Projection"
+    projection_long["value"] = projection_long.pop("projection_raw")
+    long_df = pd.concat([behavior_long, projection_long], axis=0, ignore_index=True)
+    long_df["signal"] = pd.Categorical(long_df["signal"], categories=["Behaviour", "Projection"], ordered=True)
 
-            ax.set_title(f"{sub} ses-{int(ses)} ({corr_text}, n={n_finite})")
-            ax.set_xlabel("Projected signal")
-            ax.set_ylabel("Behaviour RT")
-            ax.grid(alpha=0.25)
+    fit = None
+    for method in ("lbfgs", "powell", "bfgs", "cg", "nm"):
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                fit = smf.mixedlm("value ~ signal", data=long_df, groups=long_df["subject_id"], re_formula="1").fit(
+                    reml=False, method=method, disp=False
+                )
+            break
+        except Exception:
+            fit = None
+    if fit is not None:
+        coef = "signal[T.Projection]"
+        row["lme_coef_projection_minus_behavior"] = float(fit.params.get(coef, np.nan))
+        row["lme_z_projection_minus_behavior"] = float(fit.tvalues.get(coef, np.nan))
+        row["lme_p_two_sided"] = float(fit.pvalues.get(coef, np.nan))
+    return row
 
-    fig.suptitle("Projected signal vs behaviour RT by subject (RT outliers removed)", y=0.995)
-    fig.tight_layout()
-    fig.savefig(out_dir / "projected_signal_vs_behaviour_by_subject.png", dpi=300, bbox_inches="tight")
+
+def _plot_paired_box_with_connections(
+    ax: plt.Axes,
+    paired_df: pd.DataFrame,
+    color_map: dict[str, object],
+    y_limits: tuple[float, float],
+) -> None:
+    behavior_values = paired_df["behavior_raw"].to_numpy(dtype=np.float64)
+    projection_values = paired_df["projection_raw"].to_numpy(dtype=np.float64)
+    box = ax.boxplot(
+        [behavior_values, projection_values],
+        positions=[0.0, 1.0],
+        widths=0.5,
+        patch_artist=True,
+        showfliers=False,
+        showmeans=True,
+        meanprops={"marker": "D", "markerfacecolor": "black", "markeredgecolor": "black", "markersize": 4.0},
+        zorder=1,
+    )
+    for patch in box["boxes"]:
+        patch.set(facecolor="0.94", edgecolor="0.35", linewidth=1.15)
+    for item in box["whiskers"] + box["caps"]:
+        item.set(color="0.4", linewidth=1.0)
+    for median in box["medians"]:
+        median.set(color="0.1", linewidth=1.6)
+
+    rng = np.random.default_rng(140)
+    jitter_base = rng.uniform(-0.12, 0.12, size=behavior_values.size)
+    x_behavior = jitter_base + rng.uniform(-0.03, 0.03, size=behavior_values.size)
+    x_projection = 1.0 + jitter_base + rng.uniform(-0.03, 0.03, size=behavior_values.size)
+    y_min, y_max = y_limits
+    for x0, x1, y0, y1, group_value in zip(
+        x_behavior,
+        x_projection,
+        behavior_values,
+        projection_values,
+        paired_df["sub_tag"].astype(str),
+    ):
+        color = color_map[group_value]
+        y0_plot = float(np.clip(y0, y_min, y_max))
+        y1_plot = float(np.clip(y1, y_min, y_max))
+        marker0 = "^" if y0 > y_max else "v" if y0 < y_min else "o"
+        marker1 = "^" if y1 > y_max else "v" if y1 < y_min else "o"
+        ax.plot([x0, x1], [y0_plot, y1_plot], color=color, linewidth=0.85, alpha=0.28, zorder=2)
+        ax.scatter([x0], [y0_plot], s=34 if marker0 != "o" else 30, color=color, alpha=0.9, edgecolors="0.15", linewidths=0.3, marker=marker0, zorder=3)
+        ax.scatter([x1], [y1_plot], s=34 if marker1 != "o" else 30, color=color, alpha=0.9, edgecolors="0.15", linewidths=0.3, marker=marker1, zorder=3)
+
+    ax.set_xlim(-0.45, 1.45)
+    ax.axhline(0.0, color="0.55", linestyle=":", linewidth=0.9, zorder=0)
+    ax.set_xticks([0.0, 1.0])
+    ax.set_xticklabels(["Behaviour", "Projection"])
+    ax.grid(axis="y", linestyle=":", linewidth=0.8, alpha=0.5)
+
+
+def _save_pdf_and_png(fig: plt.Figure, pdf_path: Path, dpi: int) -> tuple[Path, Path]:
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    png_path = pdf_path.with_suffix(".png")
+    fig.savefig(pdf_path, bbox_inches="tight")
+    fig.savefig(png_path, dpi=dpi, bbox_inches="tight")
+    return pdf_path, png_path
+
+
+def _save_behavior_projection_figure(metric_df: pd.DataFrame, out_dir: Path) -> tuple[Path, Path]:
+    projection_col = "adjacent_diff_ratio_sum_projection"
+    behavior_col = "adjacent_diff_ratio_sum_behavior_col2"
+    paired_df = metric_df.loc[np.isfinite(metric_df[projection_col]) & np.isfinite(metric_df[behavior_col])].copy()
+    if paired_df.empty:
+        raise ValueError("No finite projection/behaviour variability pairs available for plotting.")
+
+    paired_df["projection_raw"] = paired_df[projection_col].to_numpy(dtype=np.float64)
+    paired_df["behavior_raw"] = paired_df[behavior_col].to_numpy(dtype=np.float64)
+    finite_values = np.concatenate(
+        [paired_df["behavior_raw"].to_numpy(dtype=np.float64), paired_df["projection_raw"].to_numpy(dtype=np.float64)]
+    )
+    q_low, q_high = np.percentile(finite_values[np.isfinite(finite_values)], [2.0, 98.0])
+    pad = 0.18 * (q_high - q_low) if q_high > q_low else 0.55
+    y_limits = (float(q_low - pad), float(q_high + pad))
+    color_map, category_values = _build_subject_color_map(paired_df["sub_tag"].astype(str).tolist())
+    lme = _mixedlm_projection_effect(paired_df)
+
+    fig, ax = plt.subplots(figsize=(9.2, 4.8))
+    _plot_paired_box_with_connections(ax, paired_df, color_map, y_limits)
+    ax.set_ylim(y_limits)
+    ax.set_ylabel("Variability")
+    if np.isfinite(lme["lme_p_two_sided"]) and np.isfinite(lme["lme_z_projection_minus_behavior"]):
+        lme_text = (
+            "LME (Projection-Behaviour)\n"
+            f"p={lme['lme_p_two_sided']:.3g}, "
+            f"z={lme['lme_z_projection_minus_behavior']:.3g}, "
+            f"beta={lme['lme_coef_projection_minus_behavior']:.3g}"
+        )
+    else:
+        lme_text = "LME (Projection-Behaviour)\nfit unavailable"
+    ax.text(
+        0.70,
+        0.98,
+        lme_text,
+        transform=ax.transAxes,
+        ha="center",
+        va="top",
+        fontsize=8.3,
+        bbox={"boxstyle": "round,pad=0.22", "facecolor": "white", "alpha": 0.8, "edgecolor": "0.75"},
+    )
+    handles = [
+        Line2D([0], [0], marker="o", linestyle="", markerfacecolor=color_map[value], markeredgecolor="0.25", markersize=5.5, label=str(value))
+        for value in category_values
+    ]
+    ax.legend(
+        handles=handles,
+        title="Subject",
+        loc="center left",
+        bbox_to_anchor=(1.02, 0.42),
+        fontsize=7.5,
+        title_fontsize=8.5,
+        frameon=True,
+        ncol=2,
+        borderaxespad=0.4,
+        handletextpad=0.35,
+        columnspacing=0.8,
+        labelspacing=0.25,
+    )
+    fig.tight_layout(rect=(0.0, 0.0, 0.74, 1.0))
+    paths = _save_pdf_and_png(fig, out_dir / "projection_behavior_subject_panel(main).pdf", dpi=220)
     plt.close(fig)
+    return paths
 
 
 def main() -> None:
     args = _parse_args()
     weights = _load_weights(args.weight_map)
-    projection_df = _build_projection_table(
-        beta_dir=args.beta_dir,
+    metric_df = _build_run_metric_table(
+        data_dir=args.data_dir,
         behaviour_dir=args.behaviour_dir,
         weights=weights,
+        projection_source=args.projection_source,
         behaviour_column=args.behaviour_column,
+        bold_trial_reducer=args.bold_trial_reducer,
     )
-    projection_df = _remove_rt_outliers(projection_df)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    _save_subject_scatter(projection_df, args.out_dir)
+    metrics_path = args.out_dir / "projection_behavior_run_metrics.csv"
+    metric_df.to_csv(metrics_path, index=False)
+    pdf_path, png_path = _save_behavior_projection_figure(metric_df, args.out_dir)
 
-    print(f"Saved scatter plot PNG to {args.out_dir}")
+    print(f"Saved run metrics to {metrics_path}")
+    print(f"Saved paired variability figure to {png_path}")
+    print(f"Saved paired variability PDF to {pdf_path}")
 
 
 if __name__ == "__main__":
