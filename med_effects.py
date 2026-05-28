@@ -1221,6 +1221,11 @@ def _save_hemisphere_fc_analysis(specs, networks, roi_names, out_dir):
         'figure': figure_path,
     }
 
+def _remove_hemisphere_fc_outputs(out_dir):
+    for path in out_dir.glob('within_vs_between_hemisphere_fc_*'):
+        if path.is_file():
+            path.unlink()
+
 def _extract_roi_voxel_timeseries(bold_path, reference_img, rois):
     img = nib.load(str(bold_path))
     _check_image_grid(reference_img, img, str(bold_path))
@@ -1714,6 +1719,7 @@ def main():
         hemisphere_fc_paths = _save_hemisphere_fc_analysis(specs, networks, roi_names, out_dir)
     except RuntimeError as exc:
         hemisphere_fc_skipped = str(exc)
+        _remove_hemisphere_fc_outputs(out_dir)
         warnings.warn(f'Skipped within-vs-between hemisphere FC analysis: {exc}', RuntimeWarning)
     intra_between_paths = None
     if intra_between_session_rows:

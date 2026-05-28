@@ -17,17 +17,15 @@ import numpy as np
 import pandas as pd
 
 
-ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_BETA_DIR = ROOT / "data" / "clean_beta_values"
-DEFAULT_BEHAVIOUR_DIR = Path("/home/zkavian/fsl_glm/data/behaviour")
-DEFAULT_WEIGHT_MAP = (
-    ROOT
-    / "data"
-    / "ablation"
-    / "maps"
-    / "voxel_weights_mean_foldavg_sub9_ses1_task0.8_bold0_beta0_smooth0_gamma1_bold_thr90_postcentral_boosted.nii.gz"
+ROOT = Path(__file__).resolve().parent
+DEFAULT_BETA_DIR = Path(
+    "/mnt/TeamShare/Data_Masterfile/H20-00572_All-Dressed/Zahra-Thesis-Data/fmri_opt_group/results_beta_preprocessed"
 )
-DEFAULT_OUT_DIR = ROOT / "results" / "follow_up_analysis"
+DEFAULT_BEHAVIOUR_DIR = Path(
+    "/mnt/TeamShare/Data_Masterfile/H20-00572_All-Dressed/Zahra-Thesis-Data/fmri_opt_group/behaviour"
+)
+DEFAULT_WEIGHT_MAP = ROOT / "data" / "voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5.nii.gz"
+DEFAULT_OUT_DIR = ROOT / "figures" / "projected_signal_vs_rt"
 OUTLIER_MODIFIED_Z_THRESHOLD = 3.5
 
 BETA_RE = re.compile(
