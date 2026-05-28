@@ -19,9 +19,9 @@ from scipy import stats
 from sklearn.feature_selection import mutual_info_regression
 import statsmodels.formula.api as smf
 from threshold_robustness_voxel_network import DEFAULT_AAL_VERSION, REFERENCE_THRESHOLD, ROIGroup, UNASSIGNED_ROI, _build_roi_groups, _coarse_aal_group_name, _resample_label_img
-DEFAULT_WEIGHT_MAP = Path('data/voxel_weights_task1_bold1_beta0.75_smooth1.8_gamma1.5.nii.gz')
-DEFAULT_ROI_FIGURE = Path('figures/task1_bold1_beta0.75_smooth1.8_gamma1.5_threshold_robustness_atlas_regions.png')
-DEFAULT_ROI_REGION_TABLE = Path('figures/task1_bold1_beta0.75_smooth1.8_gamma1.5_threshold_robustness_regions.csv')
+DEFAULT_WEIGHT_MAP = Path('data/voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5.nii.gz')
+DEFAULT_ROI_FIGURE = Path('figures/voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5_threshold_robustness_atlas_regions.png')
+DEFAULT_ROI_REGION_TABLE = Path('figures/voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5_threshold_robustness_regions.csv')
 DEFAULT_SESSION_MANIFEST = Path('data/med_effects_session_manifest.csv')
 DEFAULT_BETA_ROOT = Path('/mnt/TeamShare/Data_Masterfile/H20-00572_All-Dressed/Zahra-Thesis-Data/fmri_opt_group/results_beta_preprocessed')
 DEFAULT_OUT_DIR = Path('figures/med_effects')

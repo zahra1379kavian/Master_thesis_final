@@ -8,8 +8,8 @@ import matplotlib.pyplot as plt
 from PIL import Image
 from scipy.ndimage import binary_fill_holes
 
-src = Path("data/voxel_weights_mean_foldavg_sub9_ses1_task1_bold0.6_beta0.6_smooth1.25_gamma1.5_bold_thr90.html")
-base = Path("figures") / "voxel_weights_mean_foldavg_sub9_ses1_task1_bold0.6_beta0.6_smooth1.25_gamma1.5_bold_thr90_multiplane_contour_all_regions"
+src = Path("data/voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5_bold_thr90.html")
+base = Path("figures") / "voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5_bold_thr90_multiplane_contour_all_regions"
 s = src.read_text()
 imgs = [np.asarray(Image.open(BytesIO(base64.b64decode(x))).convert("RGBA")) for x in re.findall(r'src="data:image/png;base64,([^"]+)"', s)]
 cfg = json.loads(re.search(r"brainsprite\((\{.*?\})\);", s).group(1))

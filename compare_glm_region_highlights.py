@@ -15,7 +15,7 @@ from threshold_robustness_voxel_network import BILATERAL_HEMISPHERE_LABEL, DEFAU
 DEFAULT_STANDARD_GLM = Path('data/z_valu_standard_glm.nii.gz')
 DEFAULT_GLM_SINGLE_A = Path('data/z_value_typaA.nii.gz')
 DEFAULT_GLM_SINGLE_D = Path('data/z_value_typeD.nii.gz')
-DEFAULT_WEIGHT_MAP = Path('data/voxel_weights_task1_bold1_beta0.75_smooth1.8_gamma1.5.nii.gz')
+DEFAULT_WEIGHT_MAP = Path('data/voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5.nii.gz')
 DEFAULT_OUT_BASE = Path('figures/glm_glmsingle_optimization_region_comparison')
 DEFAULT_STANDARD_Z_THRESHOLD = 3.1
 DEFAULT_GLM_SINGLE_Z_THRESHOLD = 1.96

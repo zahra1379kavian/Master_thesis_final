@@ -23,10 +23,10 @@ from scipy import ndimage
 
 
 DEFAULT_MAP = Path(
-    "data/voxel_weights_mean_foldavg_sub9_ses1_task1_bold1_beta0.75_smooth1.8_gamma1.5.nii.gz"
+    "data/voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5.nii.gz"
 )
 DEFAULT_OUT_BASE = Path(
-    "figures/voxel_weights_mean_foldavg_sub9_ses1_task1_bold1_beta0.75_smooth1.8_gamma1.5_threshold_robustness"
+    "figures/voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5_threshold_robustness"
 )
 DEFAULT_THRESHOLDS = (80.0, 85.0, 90.0, 95.0, 97.5)
 MAIN_THRESHOLDS = (85.0, 90.0, 95.0)

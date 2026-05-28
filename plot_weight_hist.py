@@ -4,8 +4,8 @@ import nibabel as nib
 import matplotlib.pyplot as plt
 from matplotlib.ticker import ScalarFormatter
 
-src = Path("data/voxel_weights_mean_foldavg_sub9_ses1_task1_bold1_beta0.75_smooth1.8_gamma1.5.nii.gz")
-base = Path("figures") / "voxel_weights_mean_foldavg_sub9_ses1_task1_bold1_beta0.75_smooth1.8_gamma1.5_hist_p90"
+src = Path("data/voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5.nii.gz")
+base = Path("figures") / "voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5_hist_p90"
 png = Path(f"{base}.png")
 pdf = Path(f"{base}.pdf")
 w = np.asarray(nib.load(src).get_fdata(), float)
