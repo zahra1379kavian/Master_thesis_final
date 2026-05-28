@@ -25,8 +25,9 @@ DEFAULT_BEHAVIOUR_DIR = Path(
     "/mnt/TeamShare/Data_Masterfile/H20-00572_All-Dressed/Zahra-Thesis-Data/fmri_opt_group/behaviour"
 )
 DEFAULT_WEIGHT_MAP = ROOT / "data" / "voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5.nii.gz"
-DEFAULT_OUT_DIR = ROOT / "figures" / "projected_signal_vs_rt"
+DEFAULT_OUT_DIR = ROOT / "figures" / "projected_RT"
 OUTLIER_MODIFIED_Z_THRESHOLD = 3.5
+PROJECTION_TRIAL_CHUNK_SIZE = 8
 
 BETA_RE = re.compile(
     r"cleaned_beta_volume_(?P<sub>sub-pd\d+)_ses-(?P<ses>\d+)_run-(?P<run>\d+)\.npy$"
@@ -41,7 +42,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--behaviour-dir", type=Path, default=DEFAULT_BEHAVIOUR_DIR)
     parser.add_argument("--weight-map", type=Path, default=DEFAULT_WEIGHT_MAP)
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
-    parser.add_argument("--behaviour-column", type=int, default=1, help="Zero-based RT column for 2D behaviour arrays.")
+    parser.add_argument(
+        "--behaviour-column",
+        type=int,
+        default=1,
+        help="Zero-based RT column for 2D behaviour arrays; default 1 uses the second column.",
+    )
     return parser.parse_args()
 
 
@@ -63,7 +69,6 @@ def _load_weights(weight_map: Path) -> np.ndarray:
 def _load_behaviour_rt(path: Path, column: int) -> np.ndarray:
     behaviour = np.asarray(np.load(path), dtype=np.float64)
     if behaviour.ndim == 1:
-        warnings.warn(f"{path.name} is 1D; using it directly as the RT vector.", stacklevel=2)
         return behaviour
     if behaviour.ndim != 2:
         raise ValueError(f"Expected 1D or 2D behaviour array in {path}, got shape {behaviour.shape}")
@@ -130,14 +135,19 @@ def _project_beta(beta_path: Path, weights: np.ndarray) -> np.ndarray:
 
     weight_mask = np.isfinite(weights) & (weights != 0)
     selected_weights = weights[weight_mask].astype(np.float64)
-    selected_beta = np.asarray(beta[weight_mask, :], dtype=np.float64)
-
-    finite_beta = np.isfinite(selected_beta)
-    numerator = np.nansum(selected_beta * selected_weights[:, None], axis=0)
-    denominator = np.sum(finite_beta * selected_weights[:, None], axis=0)
     projected_signal = np.full(beta.shape[3], np.nan, dtype=np.float64)
-    valid = denominator != 0
-    projected_signal[valid] = numerator[valid] / denominator[valid]
+
+    for start in range(0, beta.shape[3], PROJECTION_TRIAL_CHUNK_SIZE):
+        stop = min(start + PROJECTION_TRIAL_CHUNK_SIZE, beta.shape[3])
+        selected_beta = np.asarray(beta[weight_mask, start:stop], dtype=np.float64)
+        finite_beta = np.isfinite(selected_beta)
+        numerator = np.nansum(selected_beta * selected_weights[:, None], axis=0)
+        denominator = np.sum(finite_beta * selected_weights[:, None], axis=0)
+        chunk_projection = np.full(stop - start, np.nan, dtype=np.float64)
+        valid = denominator != 0
+        chunk_projection[valid] = numerator[valid] / denominator[valid]
+        projected_signal[start:stop] = chunk_projection
+
     return projected_signal
 
 
@@ -167,17 +177,28 @@ def _build_projection_table(
     weights: np.ndarray,
     behaviour_column: int,
 ) -> pd.DataFrame:
+    beta_runs = _discover_beta_runs(beta_dir)
+    missing_behaviour = []
+    for beta_run in beta_runs:
+        sub = str(beta_run["sub"])
+        ses = int(beta_run["ses"])
+        run = int(beta_run["run"])
+        behaviour_path = behaviour_dir / f"PSPD{_subject_digits(sub)}_ses_{ses}_run_{run}.npy"
+        if not behaviour_path.exists():
+            missing_behaviour.append(f"{sub} ses-{ses} run-{run}: {behaviour_path}")
+
+    if missing_behaviour:
+        missing_lines = "\n".join(f"- {item}" for item in missing_behaviour)
+        raise FileNotFoundError(f"Missing behaviour files:\n{missing_lines}")
+
     rows = []
-    for beta_run in _discover_beta_runs(beta_dir):
+    for beta_run in beta_runs:
         sub = str(beta_run["sub"])
         ses = int(beta_run["ses"])
         run = int(beta_run["run"])
         beta_path = Path(beta_run["path"])
 
         behaviour_path = behaviour_dir / f"PSPD{_subject_digits(sub)}_ses_{ses}_run_{run}.npy"
-        if not behaviour_path.exists():
-            raise FileNotFoundError(f"Missing behaviour file for {sub} ses-{ses} run-{run}: {behaviour_path}")
-
         projected_signal = _project_beta(beta_path, weights)
         behaviour_rt = _load_behaviour_rt(behaviour_path, behaviour_column)
         projected_signal, behaviour_rt = _align_trials(
