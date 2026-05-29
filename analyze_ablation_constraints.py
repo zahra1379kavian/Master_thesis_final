@@ -9,9 +9,11 @@ publication-oriented figures under ``figures/ablation``.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import math
 import re
+from io import BytesIO
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +21,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import nibabel as nib
 import numpy as np
 import pandas as pd
@@ -35,6 +38,10 @@ from threshold_robustness_voxel_network import (
 
 
 DEFAULT_MAIN_MAP = Path("data/voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5.nii.gz")
+DEFAULT_FULL_MODEL_HTML = Path("data/voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5_bold_thr90.html")
+DEFAULT_TASK_ONLY_HTML = Path(
+    "data/ablation/voxel_weights_mean_foldavg_sub9_ses1_task1_bold0_beta0_smooth0_gamma1.5_bold_thr90.html"
+)
 DEFAULT_ABLATION_DIR = Path("data/ablation")
 DEFAULT_OUT_DIR = Path("figures/ablation")
 DEFAULT_LOGS = (
@@ -920,6 +927,236 @@ def plot_publication_summary(metrics: pd.DataFrame, summary: pd.DataFrame, overl
     plt.close(fig)
 
 
+def _html_sprite_volumes(html_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise RuntimeError("Pillow is required to read embedded PNG overlays from HTML maps.") from exc
+
+    html = html_path.read_text(encoding="utf-8", errors="replace")
+    encoded_images = re.findall(r'src="data:image/png;base64,([^"]+)"', html)
+    if len(encoded_images) < 3:
+        raise RuntimeError(f"Could not find the overlay PNG in {html_path}.")
+    cfg_match = re.search(r"brainsprite\((\{.*?\})\);", html, flags=re.S)
+    if cfg_match is None:
+        raise RuntimeError(f"Could not find the brainsprite config in {html_path}.")
+
+    cfg = json.loads(cfg_match.group(1))
+    nx, ny, nz = [int(cfg["nbSlice"][axis]) for axis in "XYZ"]
+
+    def sprite_to_volume(sprite: np.ndarray) -> np.ndarray:
+        tiles_per_row = sprite.shape[1] // ny
+        if tiles_per_row <= 0:
+            raise RuntimeError(f"Unexpected sprite dimensions in {html_path}.")
+        volume = np.zeros((nx, ny, nz, sprite.shape[2]), dtype=sprite.dtype)
+        for x_idx in range(nx):
+            tile_col = x_idx % tiles_per_row
+            tile_row = x_idx // tiles_per_row
+            tile = sprite[tile_row * nz : (tile_row + 1) * nz, tile_col * ny : (tile_col + 1) * ny]
+            volume[x_idx] = tile[::-1].transpose(1, 0, 2)
+        return volume
+
+    background_sprite = np.asarray(Image.open(BytesIO(base64.b64decode(encoded_images[0]))).convert("RGBA"))
+    overlay_sprite = np.asarray(Image.open(BytesIO(base64.b64decode(encoded_images[2]))).convert("RGBA"))
+    background = sprite_to_volume(background_sprite)[..., :3].mean(axis=-1).astype(float)
+    mask = sprite_to_volume(overlay_sprite)[..., 3] > 0
+    return background, mask, np.asarray(cfg["affine"], dtype=float)
+
+
+def _html_overlay_mask(html_path: Path, reference_img: nib.Nifti1Image) -> np.ndarray:
+    _, mask, html_affine = _html_sprite_volumes(html_path)
+    if mask.shape != reference_img.shape[:3]:
+        raise RuntimeError(
+            f"{html_path} overlay shape {mask.shape} does not match reference shape {reference_img.shape[:3]}."
+        )
+    for axis in range(3):
+        html_step = float(html_affine[axis, axis])
+        ref_step = float(reference_img.affine[axis, axis])
+        if html_step != 0.0 and ref_step != 0.0 and np.sign(html_step) != np.sign(ref_step):
+            mask = np.flip(mask, axis=axis)
+    return mask
+
+
+def _cut_indices_for_mask(mask: np.ndarray, axis: int, n_cuts: int = 6, min_gap: int = 5) -> list[int]:
+    counts = mask.sum(axis=tuple(dim for dim in range(3) if dim != axis))
+    selected: list[int] = []
+    for idx in np.argsort(counts)[::-1]:
+        if counts[idx] <= 0:
+            break
+        idx = int(idx)
+        if all(abs(idx - previous) >= min_gap for previous in selected):
+            selected.append(idx)
+        if len(selected) == n_cuts:
+            break
+    if len(selected) < n_cuts:
+        occupied = np.flatnonzero(counts > 0)
+        for idx in np.linspace(int(occupied.min()), int(occupied.max()), n_cuts, dtype=int):
+            if idx not in selected:
+                selected.append(int(idx))
+            if len(selected) == n_cuts:
+                break
+    return sorted(selected)
+
+
+def _plane_slice(volume: np.ndarray, axis: int, index: int) -> np.ndarray:
+    if axis == 0:
+        return volume[index].T[::-1]
+    if axis == 1:
+        return volume[:, index, :].T[::-1]
+    return volume[:, :, index].T[::-1]
+
+
+def _pad_slice(values: np.ndarray, pad_y: int = 3, pad_x: int = 2) -> np.ndarray:
+    return np.pad(values, ((pad_y, pad_y), (pad_x, pad_x)), mode="constant")
+
+
+def _crop_slices(background: np.ndarray, masks: list[np.ndarray]) -> tuple[np.ndarray, list[np.ndarray]]:
+    crop_mask = ndimage.binary_fill_holes(background > 0)
+    for mask in masks:
+        crop_mask |= mask
+    y, x = np.where(crop_mask)
+    if y.size == 0:
+        return _pad_slice(background), [_pad_slice(mask) for mask in masks]
+    y0, y1 = max(int(y.min()) - 4, 0), min(int(y.max()) + 5, background.shape[0])
+    x0, x1 = max(int(x.min()) - 4, 0), min(int(x.max()) + 5, background.shape[1])
+    return (
+        _pad_slice(background[y0:y1, x0:x1]),
+        [_pad_slice(mask[y0:y1, x0:x1]) for mask in masks],
+    )
+
+
+def _anatomy_rgba(background: np.ndarray, vmax: float) -> np.ndarray:
+    brain = ndimage.binary_fill_holes(background > 0)
+    rgba = plt.cm.gray(np.clip(background / vmax, 0, 1))
+    rgba[~brain, 3] = 0
+    return rgba
+
+
+def _coord_mm(affine: np.ndarray, axis: int, index: int) -> float:
+    return float(affine[axis, axis] * (index + 1) + affine[axis, 3])
+
+
+def _add_contour(ax: plt.Axes, mask: np.ndarray, color: str, linewidth: float) -> None:
+    if np.any(mask):
+        ax.contour(mask.astype(float), levels=[0.5], colors=color, linewidths=linewidth)
+
+
+def plot_full_vs_task_only_anatomy(
+    reference_map: Path,
+    full_html: Path,
+    task_only_html: Path,
+    out_base: Path,
+) -> pd.DataFrame:
+    if not full_html.exists() or not task_only_html.exists():
+        return pd.DataFrame()
+
+    reference_img, _ = _load_data(reference_map)
+    full_mask = _html_overlay_mask(full_html, reference_img)
+    task_mask = _html_overlay_mask(task_only_html, reference_img)
+    union_mask = full_mask | task_mask
+    if not np.any(union_mask):
+        return pd.DataFrame()
+
+    shared_mask = full_mask & task_mask
+    full_only_mask = full_mask & ~task_mask
+    task_only_unique_mask = task_mask & ~full_mask
+
+    cuts = _cut_indices_for_mask(union_mask, axis=2)
+    cut_labels = [float(reference_img.affine[2, 2] * k + reference_img.affine[2, 3]) for k in cuts]
+
+    n_full = int(np.count_nonzero(full_mask))
+    n_task = int(np.count_nonzero(task_mask))
+    n_shared = int(np.count_nonzero(shared_mask))
+    n_union = int(np.count_nonzero(union_mask))
+    summary = pd.DataFrame(
+        [
+            {
+                "full_model_html": str(full_html),
+                "task_only_html": str(task_only_html),
+                "full_model_voxels": n_full,
+                "task_only_voxels": n_task,
+                "shared_voxels": n_shared,
+                "full_only_voxels": int(np.count_nonzero(full_only_mask)),
+                "task_only_unique_voxels": int(np.count_nonzero(task_only_unique_mask)),
+                "union_voxels": n_union,
+                "dice": float(2 * n_shared / (n_full + n_task)),
+                "jaccard": float(n_shared / n_union),
+                "axial_cuts_mm": ";".join(f"{value:g}" for value in cut_labels),
+            }
+        ]
+    )
+    summary.to_csv(f"{out_base}_summary.csv", index=False)
+
+    template = datasets.load_mni152_template(resolution=2)
+    bg_img = image.resample_to_img(template, reference_img, interpolation="continuous", force_resample=True, copy_header=True)
+    bg = np.nan_to_num(np.asarray(bg_img.get_fdata(), dtype=float), nan=0.0)
+    vmax = float(np.percentile(bg[bg > 0], 99.2)) if np.any(bg > 0) else 1.0
+
+    colors = {
+        "full": "#2563eb",
+        "task": "#f97316",
+        "shared": "#7c3aed",
+    }
+    rows = [
+        ("Full model", full_mask, colors["full"]),
+        ("Task-only", task_mask, colors["task"]),
+    ]
+    fig, axes = plt.subplots(3, len(cuts), figsize=(11.7, 5.9), facecolor="white")
+    for col, (k, z_mm) in enumerate(zip(cuts, cut_labels)):
+        bg_slice = _axial_slice(bg, k)
+        for row, (label, mask, color) in enumerate(rows):
+            ax = axes[row, col]
+            ax.imshow(bg_slice, cmap="gray", vmin=0, vmax=vmax, interpolation="nearest")
+            ax.imshow(_rgba_overlay(_axial_slice(mask, k), color), interpolation="nearest")
+            if col == 0:
+                ax.text(
+                    -0.08,
+                    0.5,
+                    f"{label}\n{int(np.count_nonzero(mask)):,} voxels",
+                    transform=ax.transAxes,
+                    ha="right",
+                    va="center",
+                    fontsize=9,
+                    weight="bold",
+                )
+            if row == 0:
+                ax.set_title(f"z={z_mm:g} mm", fontsize=8, pad=2)
+            ax.set_axis_off()
+
+        ax = axes[2, col]
+        ax.imshow(bg_slice, cmap="gray", vmin=0, vmax=vmax, interpolation="nearest")
+        comparison = np.zeros(bg_slice.shape + (4,), dtype=float)
+        comparison[_axial_slice(full_only_mask, k)] = matplotlib.colors.to_rgba(colors["full"], 0.82)
+        comparison[_axial_slice(shared_mask, k)] = matplotlib.colors.to_rgba(colors["shared"], 0.9)
+        comparison[_axial_slice(task_only_unique_mask, k)] = matplotlib.colors.to_rgba(colors["task"], 0.82)
+        ax.imshow(comparison, interpolation="nearest")
+        if col == 0:
+            ax.text(
+                -0.08,
+                0.5,
+                "Comparison",
+                transform=ax.transAxes,
+                ha="right",
+                va="center",
+                fontsize=9,
+                weight="bold",
+            )
+        ax.set_axis_off()
+
+    handles = [
+        Patch(facecolor=colors["full"], label=f"Full-only: {int(np.count_nonzero(full_only_mask)):,}"),
+        Patch(facecolor=colors["shared"], label=f"Shared: {n_shared:,}"),
+        Patch(facecolor=colors["task"], label=f"Task-only unique: {int(np.count_nonzero(task_only_unique_mask)):,}"),
+    ]
+    fig.suptitle("Full model vs task-only selected voxels", fontsize=13, weight="bold", y=0.98)
+    fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False, bbox_to_anchor=(0.58, 0.01))
+    fig.subplots_adjust(left=0.17, right=0.995, top=0.89, bottom=0.12, wspace=0.02, hspace=0.06)
+    fig.savefig(f"{out_base}.png", dpi=300, bbox_inches="tight")
+    fig.savefig(f"{out_base}.pdf", bbox_inches="tight")
+    plt.close(fig)
+    return summary
+
+
 def plot_map_montage(map_specs: list[MapSpec], out_base: Path) -> None:
     labels = ["Full model", "Full ablation map", "No task", "No BOLD stability", "No beta stability", "Task-only reference"]
     specs = [spec for spec in map_specs if spec.label in labels and spec.path and spec.path.exists()]
@@ -1029,12 +1266,15 @@ def write_report(
         "- `ablation_roi_regions.csv`: AAL coarse ROI composition by map.",
         "- `ablation_publication_summary.{png,pdf}`: compact multi-panel publication figure.",
         "- `ablation_map_montage.{png,pdf}`: axial slice overview of available maps.",
+        "- `ablation_full_vs_task_only_anatomy.{png,pdf}`: focused anatomy slices for the supplied full-model and task-only thresholded HTML maps.",
+        "- `ablation_full_vs_task_only_anatomy_summary.csv`: voxel counts and overlap for the focused full-vs-task-only anatomy figure.",
         "",
         "## Notes",
         "",
         "- The final-weight SLURM log contains the `task=1, bold=0.6, beta=0.6, smooth=1.25, gamma=1.5` full model plus no-task/no-BOLD/no-beta and single-term baselines, but no final-weight no-smooth metrics.",
         "- `slurm-11445550.out` is mixed; only the parameter-independent task-only and no-objective baselines were retained. The unrelated `task=1, bold=1, beta=0.75, smooth=1.8` sweep was excluded.",
         "- Balanced scores were computed within the final-weight analysis group using inverse ranges of candidate-mean score components.",
+        "- The focused full-vs-task-only anatomy figure uses the selected-voxel overlays embedded in the two thresholded HTML maps.",
         "",
         "## Balanced-Score Weights",
         "",
@@ -1109,6 +1349,12 @@ def main() -> None:
     plot_spatial_similarity(overlap_df, args.out_dir / "ablation_spatial_similarity")
     plot_roi_heatmaps(region_df, args.out_dir / "ablation_roi_heatmap")
     plot_publication_summary(metrics, metric_summary, overlap_df, region_df, args.out_dir / "ablation_publication_summary")
+    plot_full_vs_task_only_anatomy(
+        args.main_map,
+        DEFAULT_FULL_MODEL_HTML,
+        DEFAULT_TASK_ONLY_HTML,
+        args.out_dir / "ablation_full_vs_task_only_anatomy",
+    )
     plot_map_montage(map_specs, args.out_dir / "ablation_map_montage")
 
     write_report(args.out_dir, metric_summary, overlap_df, missing_maps, balanced_weights)

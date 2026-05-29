@@ -1,6 +1,7 @@
 numpy
 pandas
 matplotlib
+Pillow
 scipy
 statsmodels
 nibabel
