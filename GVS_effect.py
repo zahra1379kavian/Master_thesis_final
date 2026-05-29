@@ -45,9 +45,37 @@ DEFAULT_BETA_ROOT = Path(
     "/mnt/TeamShare/Data_Masterfile/H20-00572_All-Dressed/Zahra-Thesis-Data/fmri_opt_group/results_beta_preprocessed"
 )
 DEFAULT_OUT_DIR = ROOT / "figures" / "GVS_effects" / "gvs_similarity_hemi"
+DEFAULT_PROJECTED_SIGNAL_OUT_DIR = ROOT / "figures" / "GVS_effects"
 DEFAULT_ROI_PERCENTILE = 90.0
+DEFAULT_PROJECTED_SIGNAL_WEIGHT_PERCENTILE = 90.0
 DEFAULT_TRIALS_PER_CONDITION = 10
 DEFAULT_ALPHA = 0.05
+PROJECTED_SIGNAL_MED_COLORS = {"OFF": "#2F6FAE", "ON": "#D87924"}
+PROJECTED_SIGNAL_STIM_SHORT = {
+    1: "Sham",
+    2: "Pink\nnoise",
+    3: "DC+1",
+    4: "DC-1",
+    5: "Delta",
+    6: "Theta",
+    7: "Alpha",
+    8: "Beta",
+    9: "Gamma",
+}
+ROI_CELL_COLORS = (
+    "#D7E9F7",
+    "#F8E3D0",
+    "#DDECCB",
+    "#E6DDF3",
+    "#F7D9E5",
+    "#D8EFE8",
+    "#FFF0B8",
+    "#E2E2E2",
+    "#D7ECF2",
+    "#F1D9C7",
+    "#DFE4FA",
+    "#EADBCB",
+)
 
 BETA_FILE_RE = re.compile(r"^cleaned_beta_volume_(sub-pd\d+)_ses-(\d+)_run-(\d+)\.npy$")
 SUBJECT_RE = re.compile(r"^sub-pd(\d+)$", re.IGNORECASE)
@@ -373,6 +401,286 @@ def _add_groupwise_fdr(
     return out
 
 
+def _stim_id_from_condition_code(condition_code: str) -> int:
+    match = re.match(r"^gvs-(\d+)$", str(condition_code))
+    if match is None:
+        raise ValueError(f"Could not parse GVS condition code {condition_code!r}.")
+    return int(match.group(1))
+
+
+def _projected_signal_stim_label(stim_id: int) -> str:
+    return PROJECTED_SIGNAL_STIM_SHORT.get(int(stim_id), str(stim_id))
+
+
+def _projected_signal_weight_mask(
+    weight_values: np.ndarray,
+    weight_percentile: float | None,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    weight_flat = np.asarray(weight_values, dtype=np.float32).ravel()
+    positive = np.isfinite(weight_flat) & (weight_flat > 0)
+    if not np.any(positive):
+        raise RuntimeError("Projected-signal analysis requires at least one positive finite weight.")
+
+    threshold = float("nan")
+    if weight_percentile is None:
+        mask = positive
+    else:
+        threshold = float(np.percentile(weight_flat[positive], float(weight_percentile)))
+        mask = positive & (weight_flat >= threshold)
+    if not np.any(mask):
+        raise RuntimeError("Projected-signal analysis selected zero weight-map voxels.")
+
+    metadata = {
+        "weight_percentile": weight_percentile,
+        "weight_threshold": threshold,
+        "n_positive_weight_voxels": int(np.sum(positive)),
+        "n_projected_signal_voxels": int(np.sum(mask)),
+    }
+    return mask, weight_flat[mask], metadata
+
+
+def _load_projected_signal_condition_means(
+    run_specs: list[RunSpec],
+    weight_values: np.ndarray,
+    reference_shape: tuple[int, int, int],
+    *,
+    trials_per_condition: int,
+    weight_percentile: float | None,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    mask, masked_weights, metadata = _projected_signal_weight_mask(weight_values, weight_percentile)
+    rows: list[dict[str, Any]] = []
+
+    for run_index, spec in enumerate(run_specs, start=1):
+        print(
+            f"Projecting beta trials {run_index}/{len(run_specs)}: "
+            f"{spec.subject} ses-{spec.session} run-{spec.run}",
+            flush=True,
+        )
+        beta = np.load(spec.beta_path, mmap_mode="r")
+        if beta.ndim != 4:
+            raise RuntimeError(f"{spec.beta_path} must be a 4D beta volume, got shape {beta.shape}.")
+        if tuple(beta.shape[:3]) != tuple(reference_shape):
+            raise RuntimeError(f"{spec.beta_path} shape {beta.shape[:3]} differs from weight-map shape {reference_shape}.")
+
+        n_trials = int(beta.shape[-1])
+        flat_view = beta.reshape(-1, n_trials)
+        projected = np.nansum(masked_weights[:, None] * flat_view[mask, :], axis=0).astype(np.float32)
+
+        for condition_code, start, stop in _iter_condition_slices(
+            n_trials,
+            spec.stim_order,
+            int(trials_per_condition),
+        ):
+            stim_id = _stim_id_from_condition_code(condition_code)
+            condition_values = projected[start:stop]
+            finite = condition_values[np.isfinite(condition_values)]
+            rows.append(
+                {
+                    "subject": spec.subject,
+                    "session": int(spec.session),
+                    "medication": _medication_from_session(spec.session),
+                    "run": int(spec.run),
+                    "stim_id": int(stim_id),
+                    "stim_short": _projected_signal_stim_label(stim_id),
+                    "n_proj": int(finite.size),
+                    "mean_proj": float(np.mean(finite)) if finite.size else float("nan"),
+                }
+            )
+
+    projected_df = pd.DataFrame(rows)
+    if not projected_df.empty:
+        projected_df = projected_df.sort_values(["subject", "session", "run", "stim_id"]).reset_index(drop=True)
+    return projected_df, metadata
+
+
+def _analyze_projected_signal(projected_df: pd.DataFrame, *, alpha: float) -> pd.DataFrame:
+    if projected_df.empty:
+        return pd.DataFrame()
+
+    subject_condition_df = (
+        projected_df.groupby(["subject", "session", "medication", "stim_id", "stim_short"], dropna=False)
+        .agg(mean_proj=("mean_proj", "mean"))
+        .reset_index()
+    )
+    sham = (
+        subject_condition_df.loc[subject_condition_df["stim_id"].astype(int).eq(1)]
+        .set_index(["subject", "session"])["mean_proj"]
+        .rename("sham_proj")
+    )
+    subject_condition_df = subject_condition_df.join(sham, on=["subject", "session"])
+    subject_condition_df["delta_proj"] = subject_condition_df["mean_proj"] - subject_condition_df["sham_proj"]
+
+    rows: list[dict[str, Any]] = []
+    active = subject_condition_df.loc[~subject_condition_df["stim_id"].astype(int).eq(1)].copy()
+    for (stim_id, medication), group_df in active.groupby(["stim_id", "medication"], dropna=False, sort=True):
+        deltas = group_df["delta_proj"].dropna().to_numpy(dtype=np.float64)
+        n_subjects = int(deltas.size)
+        if n_subjects < 3:
+            continue
+
+        test_result = stats.ttest_1samp(deltas, 0.0, nan_policy="omit")
+        sem = float(stats.sem(deltas))
+        ci_low, ci_high = stats.t.interval(
+            0.95,
+            df=n_subjects - 1,
+            loc=float(np.mean(deltas)),
+            scale=sem,
+        )
+        std = float(np.std(deltas, ddof=1))
+        rows.append(
+            {
+                "stim_id": int(stim_id),
+                "stim_short": _projected_signal_stim_label(int(stim_id)),
+                "medication": str(medication),
+                "n_subjects": n_subjects,
+                "mean_delta_proj": float(np.mean(deltas)),
+                "se_delta_proj": sem,
+                "ci95_lo": float(ci_low),
+                "ci95_hi": float(ci_high),
+                "cohens_d": float(np.mean(deltas) / std) if std > 0 else float("nan"),
+                "t_stat": float(test_result.statistic) if np.isfinite(test_result.statistic) else float("nan"),
+                "p_value": float(test_result.pvalue) if np.isfinite(test_result.pvalue) else float("nan"),
+            }
+        )
+
+    projected_stats = pd.DataFrame(rows)
+    if projected_stats.empty:
+        return projected_stats
+
+    projected_stats["q_fdr"] = np.nan
+    projected_stats["sig_fdr"] = False
+    for medication, group_index in projected_stats.groupby("medication", dropna=False, sort=False).groups.items():
+        p_values = projected_stats.loc[group_index, "p_value"].to_numpy(dtype=np.float64)
+        finite = np.isfinite(p_values)
+        if not np.any(finite):
+            continue
+        rejected, q_values = fdrcorrection(p_values[finite], alpha=float(alpha))
+        finite_indices = np.asarray(group_index)[finite]
+        projected_stats.loc[finite_indices, "q_fdr"] = q_values
+        projected_stats.loc[finite_indices, "sig_fdr"] = rejected
+
+    return projected_stats.sort_values(["medication", "stim_id"]).reset_index(drop=True)
+
+
+def _add_projected_signal_sig_stars(ax: plt.Axes, x_value: float, y_value: float, p_value: float) -> None:
+    if not np.isfinite(p_value):
+        return
+    if p_value < 0.001:
+        label = "***"
+    elif p_value < 0.01:
+        label = "**"
+    elif p_value < 0.05:
+        label = "*"
+    else:
+        return
+    ax.text(
+        x_value,
+        y_value,
+        label,
+        ha="center",
+        va="bottom",
+        fontsize=11,
+        color="#c0392b",
+        fontweight="bold",
+    )
+
+
+def _write_projected_signal_profile(
+    projected_stats: pd.DataFrame,
+    out_dir: Path,
+) -> tuple[Path, Path]:
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5), sharey=True)
+    for ax, medication in zip(np.atleast_1d(axes), ["OFF", "ON"], strict=True):
+        subset = projected_stats.loc[projected_stats["medication"].astype(str).eq(medication)].sort_values("stim_id")
+        if subset.empty:
+            ax.text(0.5, 0.5, f"No {medication} projected-signal data", ha="center", va="center", fontsize=11)
+            ax.axis("off")
+            continue
+
+        x_values = np.arange(len(subset))
+        bar_colors = [
+            PROJECTED_SIGNAL_MED_COLORS[medication] if float(row.p_value) < 0.05 else "#cccccc"
+            for row in subset.itertuples(index=False)
+        ]
+        ax.bar(
+            x_values,
+            subset["mean_delta_proj"],
+            yerr=subset["se_delta_proj"],
+            color=bar_colors,
+            edgecolor="k",
+            linewidth=0.7,
+            error_kw={"elinewidth": 1.2, "capsize": 4},
+            alpha=0.85,
+        )
+        ax.axhline(0, color="k", linewidth=0.9)
+        ax.set_xticks(x_values)
+        ax.set_xticklabels(subset["stim_short"], fontsize=9)
+        ax.set_xlabel("GVS condition", fontsize=11)
+        ax.set_title(
+            f"Medication {medication}",
+            fontsize=12,
+            fontweight="bold",
+            color=PROJECTED_SIGNAL_MED_COLORS[medication],
+        )
+        ax.set_ylabel("Projected signal delta vs sham (a.u.)" if medication == "OFF" else "", fontsize=10)
+        for x_value, row in zip(x_values, subset.itertuples(index=False), strict=True):
+            y_value = max(float(row.mean_delta_proj) + float(row.se_delta_proj) + 0.005, 0.005)
+            _add_projected_signal_sig_stars(ax, float(x_value), y_value, float(row.p_value))
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+        ax.grid(axis="y", alpha=0.3, linestyle="--")
+
+    fig.suptitle(
+        "Projected signal delta vs sham per GVS condition\n"
+        "(P = <weight, beta> using top-10% weight voxels [bold_thr90])",
+        fontsize=12,
+    )
+    fig.tight_layout()
+    paths = _save_pdf_and_png(fig, out_dir / "B_projected_signal_profile.pdf", dpi=200)
+    plt.close(fig)
+    return paths
+
+
+def _write_projected_signal_outputs(
+    run_specs: list[RunSpec],
+    weight_values: np.ndarray,
+    reference_shape: tuple[int, int, int],
+    out_dir: Path,
+    *,
+    trials_per_condition: int,
+    weight_percentile: float | None,
+    alpha: float,
+) -> dict[str, Any]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    projected_df, mask_metadata = _load_projected_signal_condition_means(
+        run_specs,
+        weight_values,
+        reference_shape,
+        trials_per_condition=int(trials_per_condition),
+        weight_percentile=weight_percentile,
+    )
+    if projected_df.empty:
+        raise RuntimeError("Projected-signal analysis produced no condition rows.")
+
+    projected_stats = _analyze_projected_signal(projected_df, alpha=float(alpha))
+    if projected_stats.empty:
+        raise RuntimeError("Projected-signal analysis produced no active-condition statistics.")
+
+    raw_csv_path = out_dir / "B_projected_signal_raw.csv"
+    stats_csv_path = out_dir / "B_projected_signal_results.csv"
+    projected_df.to_csv(raw_csv_path, index=False)
+    projected_stats.to_csv(stats_csv_path, index=False)
+    pdf_path, png_path = _write_projected_signal_profile(projected_stats, out_dir)
+
+    return {
+        "projected_signal_raw_csv": raw_csv_path,
+        "projected_signal_results_csv": stats_csv_path,
+        "projected_signal_profile_pdf": pdf_path,
+        "projected_signal_profile_png": png_path,
+        "projected_signal_mask": mask_metadata,
+    }
+
+
 def compute_condition_roi_reference_stats(
     matrices: dict[tuple[str, int, str], np.ndarray],
     roi_labels: list[str],
@@ -533,15 +841,20 @@ def _write_reference_tables(
     count_pivot.to_csv(tables_dir / f"{file_prefix}_n_subjects_wide.csv")
 
 
-def _gvs_counts(stats_df: pd.DataFrame, subjects: list[str], sessions: list[str]) -> np.ndarray:
-    significant = stats_df.loc[_as_bool(stats_df["significant_fdr"])].copy()
-    if significant.empty:
+def _gvs_counts_from_mask(
+    stats_df: pd.DataFrame,
+    row_mask: pd.Series,
+    subjects: list[str],
+    sessions: list[str],
+) -> np.ndarray:
+    selected = stats_df.loc[row_mask].copy()
+    if selected.empty:
         return np.zeros((len(subjects), len(sessions)), dtype=float)
-    significant["subject"] = significant["subject"].astype(str)
-    significant["target_condition_label"] = significant["target_condition_label"].astype(str)
-    significant["roi_label"] = significant["roi_label"].astype(str)
+    selected["subject"] = selected["subject"].astype(str)
+    selected["target_condition_label"] = selected["target_condition_label"].astype(str)
+    selected["roi_label"] = selected["roi_label"].astype(str)
     roi_sets = {(subject, session): set() for subject in subjects for session in sessions}
-    for (subject, session), cell_df in significant.groupby(
+    for (subject, session), cell_df in selected.groupby(
         ["subject", "target_condition_label"],
         dropna=False,
         observed=False,
@@ -553,6 +866,18 @@ def _gvs_counts(stats_df: pd.DataFrame, subjects: list[str], sessions: list[str]
     return np.array([[len(roi_sets[(subject, session)]) for session in sessions] for subject in subjects], dtype=float)
 
 
+def _gvs_counts(stats_df: pd.DataFrame, subjects: list[str], sessions: list[str]) -> np.ndarray:
+    return _gvs_counts_from_mask(stats_df, _as_bool(stats_df["significant_fdr"]), subjects, sessions)
+
+
+def _converged_raw_p_only_mask(stats_df: pd.DataFrame, *, alpha: float) -> pd.Series:
+    required = {"p_value_two_sided", "significant_fdr", "model_converged"}
+    if not required.issubset(stats_df.columns):
+        return pd.Series(False, index=stats_df.index)
+    p_values = pd.to_numeric(stats_df["p_value_two_sided"], errors="coerce")
+    return p_values.lt(float(alpha)) & ~_as_bool(stats_df["significant_fdr"]) & _as_bool(stats_df["model_converged"])
+
+
 def _draw_gvs_panel(
     ax: plt.Axes,
     counts: np.ndarray,
@@ -561,6 +886,7 @@ def _draw_gvs_panel(
     cmap_name: str,
     vmax: int,
     show_ylabel: bool,
+    annotate: bool = True,
 ) -> plt.AxesImage:
     image = ax.imshow(counts, aspect="auto", interpolation="nearest", cmap=cmap_name, vmin=0, vmax=max(1, vmax))
     if show_ylabel:
@@ -573,6 +899,8 @@ def _draw_gvs_panel(
     ax.set_yticks(np.arange(-0.5, len(subjects), 1), minor=True)
     ax.grid(which="minor", color="white", linestyle="-", linewidth=1.1)
     ax.tick_params(which="minor", bottom=False, left=False)
+    if not annotate:
+        return image
     threshold = max(1.0, 0.62 * float(max(1, vmax)))
     for row_idx in range(len(subjects)):
         for col_idx in range(len(sessions)):
@@ -593,7 +921,13 @@ def _save_pdf_and_png(fig: plt.Figure, pdf_path: Path, dpi: int = 300) -> tuple[
     return pdf_path, png_path
 
 
-def _write_burden_heatmaps(stats_by_prefix: dict[str, pd.DataFrame], plots_dir: Path) -> tuple[Path, Path]:
+def _write_burden_heatmaps(
+    stats_by_prefix: dict[str, pd.DataFrame],
+    plots_dir: Path,
+    *,
+    include_converged_raw_p: bool = False,
+    raw_p_alpha: float = DEFAULT_ALPHA,
+) -> tuple[Path, Path]:
     specs = [
         ("off_condition_minus_sham_off_roi_mean_delta", "Blues"),
         ("on_condition_minus_sham_on_roi_mean_delta", "Oranges"),
@@ -611,34 +945,89 @@ def _write_burden_heatmaps(stats_by_prefix: dict[str, pd.DataFrame], plots_dir: 
         raise RuntimeError("No active GVS condition labels were available for burden heatmaps.")
 
     plots_dir.mkdir(parents=True, exist_ok=True)
-    prepared: list[tuple[list[str], np.ndarray, str]] = []
+    prepared: list[tuple[list[str], np.ndarray, str, np.ndarray, np.ndarray | None]] = []
     max_count = 0
     for prefix, cmap_name in specs:
         stats_df = stats_by_prefix.get(prefix, pd.DataFrame())
         if stats_df.empty:
             continue
         subjects = sorted(stats_df["subject"].astype(str).unique().tolist(), key=_subject_sort_key)
-        counts = _gvs_counts(stats_df, subjects, sessions)
+        fdr_counts = _gvs_counts(stats_df, subjects, sessions)
+        counts = fdr_counts
+        raw_counts = None
+        if include_converged_raw_p:
+            raw_counts = _gvs_counts_from_mask(
+                stats_df,
+                _converged_raw_p_only_mask(stats_df, alpha=float(raw_p_alpha)),
+                subjects,
+                sessions,
+            )
+            counts = fdr_counts + raw_counts
         max_count = max(max_count, int(np.nanmax(counts)) if counts.size else 0)
-        prepared.append((subjects, counts, cmap_name))
+        prepared.append((subjects, counts, cmap_name, fdr_counts, raw_counts))
         pd.DataFrame(counts.astype(int), index=subjects, columns=sessions).rename_axis("subject").to_csv(
             plots_dir / f"{prefix}_subject_session_roi_burden_heatmap.csv"
         )
+        if raw_counts is not None:
+            pd.DataFrame(fdr_counts.astype(int), index=subjects, columns=sessions).rename_axis("subject").to_csv(
+                plots_dir / f"{prefix}_subject_session_roi_burden_heatmap_fdr.csv"
+            )
+            pd.DataFrame(raw_counts.astype(int), index=subjects, columns=sessions).rename_axis("subject").to_csv(
+                plots_dir / f"{prefix}_subject_session_roi_burden_heatmap_converged_raw_p_only.csv"
+            )
 
     if not prepared:
         raise RuntimeError("No non-empty stats tables were available for burden heatmaps.")
 
     fig_w = max(15.0, 1.7 * len(sessions) + 4.0)
-    fig_h = max(7.4, max(0.48 * len(subjects) for subjects, _, _ in prepared) + 2.1)
+    fig_h = max(7.4, max(0.48 * len(subjects) for subjects, _, _, _, _ in prepared) + 2.1)
     fig, axes = plt.subplots(1, len(prepared), figsize=(fig_w, fig_h))
-    for idx, (ax, (subjects, counts, cmap_name)) in enumerate(zip(np.atleast_1d(axes), prepared)):
-        image = _draw_gvs_panel(ax, counts, subjects, sessions, cmap_name, max_count, show_ylabel=idx == 0)
+    for idx, (ax, (subjects, counts, cmap_name, fdr_counts, raw_counts)) in enumerate(zip(np.atleast_1d(axes), prepared)):
+        image = _draw_gvs_panel(
+            ax,
+            counts,
+            subjects,
+            sessions,
+            cmap_name,
+            max_count,
+            show_ylabel=idx == 0,
+            annotate=raw_counts is None,
+        )
+        if raw_counts is not None:
+            threshold = max(1.0, 0.62 * float(max(1, max_count)))
+            for row_idx in range(len(subjects)):
+                for col_idx in range(len(sessions)):
+                    raw_value = int(raw_counts[row_idx, col_idx])
+                    fdr_value = int(fdr_counts[row_idx, col_idx])
+                    total_value = int(counts[row_idx, col_idx])
+                    if total_value == 0:
+                        text, color = "-", "#7a7a7a"
+                    elif fdr_value and raw_value:
+                        text = f"{fdr_value}*+{raw_value}"
+                        color = "white" if total_value >= threshold else "black"
+                    elif fdr_value:
+                        text = f"{fdr_value}*"
+                        color = "white" if total_value >= threshold else "black"
+                    else:
+                        text = str(raw_value)
+                        color = "white" if total_value >= threshold else "black"
+                    ax.text(col_idx, row_idx, text, ha="center", va="center", fontsize=8.5, color=color)
         ax.set_xlabel("GVS session", fontsize=11)
         colorbar = fig.colorbar(image, ax=ax, shrink=0.84, pad=0.02)
         if idx != 0:
-            colorbar.set_label("No. of significant ROIs", fontsize=10)
+            label = "No. of shown ROIs" if include_converged_raw_p else "No. of significant ROIs"
+            colorbar.set_label(label, fontsize=10)
         colorbar.ax.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
         colorbar.ax.tick_params(labelsize=9)
+    if include_converged_raw_p:
+        fig.text(
+            0.5,
+            0.01,
+            "* = FDR-significant ROI count; unstarred counts are model-converged raw p < 0.05, FDR not significant.",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+        )
     fig.tight_layout()
     out_pdf = plots_dir / "off_on_condition_minus_sham_subject_session_roi_burden_heatmaps.pdf"
     paths = _save_pdf_and_png(fig, out_pdf, dpi=300)
@@ -651,7 +1040,235 @@ def _compact_roi_label(value: str) -> str:
     return "\n".join(labels)
 
 
-def _write_compact_burden_plot(stats_by_prefix: dict[str, pd.DataFrame], plots_dir: Path) -> tuple[Path, Path, Path]:
+def _burden_cell_label(fdr_count: int, raw_only_count: int) -> str:
+    if int(fdr_count) > 0 and int(raw_only_count) > 0:
+        return f"{int(fdr_count)}*+{int(raw_only_count)}"
+    if int(fdr_count) > 0:
+        return f"{int(fdr_count)}*"
+    if int(raw_only_count) > 0:
+        return str(int(raw_only_count))
+    return "-"
+
+
+def _cell_label_fontsize(n_labels: int, max_label_chars: int = 0) -> float:
+    if int(n_labels) <= 1:
+        fontsize = 7.2
+    elif int(n_labels) == 2:
+        fontsize = 6.2
+    elif int(n_labels) == 3:
+        fontsize = 5.2
+    else:
+        fontsize = 4.5
+    if int(max_label_chars) > 22:
+        fontsize -= 0.6
+    elif int(max_label_chars) > 16:
+        fontsize -= 0.3
+    return max(3.6, fontsize)
+
+
+def _split_roi_labels(value: Any) -> list[str]:
+    return [label.strip() for label in str(value).split(";") if label.strip()]
+
+
+def _roi_color_key(label: str) -> str:
+    clean = str(label).replace("*", "").strip()
+    return re.sub(r"_[LR]$", "", clean)
+
+
+def _roi_cell_color_map(nonzero_df: pd.DataFrame) -> dict[str, str]:
+    labels: set[str] = set()
+    for value in nonzero_df.get("shown_roi_labels", pd.Series(dtype=str)).dropna():
+        labels.update(_roi_color_key(label) for label in _split_roi_labels(value))
+    return {label: ROI_CELL_COLORS[index % len(ROI_CELL_COLORS)] for index, label in enumerate(sorted(labels))}
+
+
+def _draw_labeled_roi_cell(
+    ax: plt.Axes,
+    x_value: int,
+    y_value: int,
+    labels: list[str],
+    color_map: dict[str, str],
+) -> None:
+    if not labels:
+        return
+    cell_width = 0.96
+    cell_height = 0.86
+    band_height = cell_height / len(labels)
+    fontsize = _cell_label_fontsize(len(labels), max(len(label) for label in labels))
+    for label_index, label in enumerate(labels):
+        y_min = y_value - cell_height / 2 + label_index * band_height
+        ax.add_patch(
+            plt.Rectangle(
+                (x_value - cell_width / 2, y_min),
+                cell_width,
+                band_height,
+                facecolor=color_map.get(_roi_color_key(label), "#E2E2E2"),
+                edgecolor="white",
+                linewidth=0.7,
+                zorder=2,
+            )
+        )
+        ax.text(
+            x_value,
+            y_min + band_height / 2,
+            label,
+            ha="center",
+            va="center",
+            fontsize=fontsize,
+            color="#111111",
+            fontweight="bold" if label.endswith("*") else "normal",
+            linespacing=0.9,
+            zorder=3,
+        )
+    ax.add_patch(
+        plt.Rectangle(
+            (x_value - cell_width / 2, y_value - cell_height / 2),
+            cell_width,
+            cell_height,
+            facecolor="none",
+            edgecolor="#7C7C7C",
+            linewidth=0.55,
+            zorder=4,
+        )
+    )
+
+
+def _draw_labeled_burden_axis(
+    ax: plt.Axes,
+    subset: pd.DataFrame,
+    sessions: list[str],
+    subjects: list[str],
+    x_lookup: dict[str, int],
+    y_lookup: dict[str, int],
+    color_map: dict[str, str],
+    *,
+    show_ylabel: bool,
+) -> None:
+    ax.set_xlim(-0.5, len(sessions) - 0.5)
+    ax.set_ylim(len(subjects) - 0.5, -0.5)
+    ax.set_xticks(np.arange(len(sessions)))
+    ax.set_xticklabels(sessions, fontsize=9.5)
+    ax.set_yticks(np.arange(len(subjects)))
+    ax.set_yticklabels(subjects, fontsize=9.0)
+    ax.set_xticks(np.arange(-0.5, len(sessions), 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, len(subjects), 1), minor=True)
+    ax.grid(which="minor", color="#D8D8D8", linewidth=0.7)
+    ax.tick_params(which="minor", bottom=False, left=False)
+    ax.set_xlabel("GVS condition", fontsize=10.0)
+    ax.set_ylabel("Subject" if show_ylabel else "", fontsize=10.0)
+    ax.set_facecolor("#FAFAFA")
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+
+    for row in subset.itertuples(index=False):
+        x_value = x_lookup[str(row.target_condition_label)]
+        y_value = y_lookup[str(row.subject)]
+        _draw_labeled_roi_cell(
+            ax,
+            x_value,
+            y_value,
+            _split_roi_labels(getattr(row, "shown_roi_labels", "")),
+            color_map,
+        )
+
+
+def _write_labeled_compact_burden_plot(
+    nonzero_df: pd.DataFrame,
+    plots_dir: Path,
+    specs: dict[str, dict[str, Any]],
+    *,
+    combined_df: pd.DataFrame | None = None,
+) -> tuple[list[Path], list[Path]]:
+    sessions = sorted(nonzero_df["target_condition_label"].astype(str).unique().tolist(), key=_session_sort_key)
+    subjects = sorted(nonzero_df["subject"].astype(str).unique().tolist(), key=_subject_sort_key)
+    x_lookup = {label: index for index, label in enumerate(sessions)}
+    y_lookup = {subject: index for index, subject in enumerate(subjects)}
+    color_map = _roi_cell_color_map(nonzero_df)
+    pdf_paths: list[Path] = []
+    png_paths: list[Path] = []
+
+    for prefix, _spec in specs.items():
+        subset = nonzero_df.loc[nonzero_df["file_prefix"].eq(prefix)].copy()
+        if subset.empty:
+            continue
+
+        fig_width = max(15.0, 1.85 * len(sessions) + 3.0)
+        fig_height = max(9.0, 0.56 * len(subjects) + 1.6)
+        fig, ax = plt.subplots(figsize=(fig_width, fig_height), facecolor="white")
+        _draw_labeled_burden_axis(ax, subset, sessions, subjects, x_lookup, y_lookup, color_map, show_ylabel=True)
+
+        fig.tight_layout()
+        pdf_path, png_path = _save_pdf_and_png(
+            fig,
+            plots_dir / f"{prefix}_subject_session_roi_burden_compact.pdf",
+            dpi=300,
+        )
+        plt.close(fig)
+        pdf_paths.append(pdf_path)
+        png_paths.append(png_path)
+
+    combined_source = nonzero_df if combined_df is None else combined_df
+    combined_subsets = [(prefix, combined_source.loc[combined_source["file_prefix"].eq(prefix)].copy()) for prefix in specs]
+    combined_subsets = [(prefix, subset) for prefix, subset in combined_subsets if not subset.empty]
+    if combined_subsets:
+        combined_sessions = sorted(
+            combined_source["target_condition_label"].astype(str).unique().tolist(),
+            key=_session_sort_key,
+        )
+        combined_x_lookup = {label: index for index, label in enumerate(combined_sessions)}
+        combined_color_map = _roi_cell_color_map(combined_source)
+        max_subjects = max(
+            len(subset["subject"].astype(str).unique().tolist())
+            for _prefix, subset in combined_subsets
+        )
+        fig_width = max(23.0, 2.25 * len(combined_sessions) + 5.0)
+        fig_height = max(7.2, 0.72 * max_subjects + 2.0)
+        fig, axes = plt.subplots(1, len(combined_subsets), figsize=(fig_width, fig_height), facecolor="white")
+        for index, (ax, (_prefix, subset)) in enumerate(zip(np.atleast_1d(axes), combined_subsets, strict=True)):
+            panel_subjects = sorted(subset["subject"].astype(str).unique().tolist(), key=_subject_sort_key)
+            panel_y_lookup = {subject: index for index, subject in enumerate(panel_subjects)}
+            _draw_labeled_burden_axis(
+                ax,
+                subset,
+                combined_sessions,
+                panel_subjects,
+                combined_x_lookup,
+                panel_y_lookup,
+                combined_color_map,
+                show_ylabel=index == 0,
+            )
+        fig.tight_layout(w_pad=2.0)
+        pdf_path, png_path = _save_pdf_and_png(
+            fig,
+            plots_dir / "off_on_condition_minus_sham_subject_session_roi_burden_compact.pdf",
+            dpi=300,
+        )
+        plt.close(fig)
+        pdf_paths.append(pdf_path)
+        png_paths.append(png_path)
+    return pdf_paths, png_paths
+
+
+def _fdr_only_compact_view(nonzero_df: pd.DataFrame) -> pd.DataFrame:
+    if nonzero_df.empty or "n_significant_rois" not in nonzero_df.columns:
+        return nonzero_df.iloc[0:0].copy()
+    fdr_df = nonzero_df.loc[nonzero_df["n_significant_rois"].astype(int) > 0].copy()
+    if fdr_df.empty:
+        return fdr_df
+    fdr_df["shown_roi_labels"] = [
+        "; ".join(f"{label}*" for label in _split_roi_labels(labels))
+        for labels in fdr_df["significant_roi_labels"]
+    ]
+    return fdr_df
+
+
+def _write_compact_burden_plot(
+    stats_by_prefix: dict[str, pd.DataFrame],
+    plots_dir: Path,
+    *,
+    include_converged_raw_p: bool = False,
+    raw_p_alpha: float = DEFAULT_ALPHA,
+) -> tuple[list[Path], list[Path], Path]:
     specs = {
         "off_condition_minus_sham_off_roi_mean_delta": {
             "label": "OFF - sham OFF",
@@ -673,25 +1290,52 @@ def _write_compact_burden_plot(stats_by_prefix: dict[str, pd.DataFrame], plots_d
         stats_df = stats_by_prefix.get(prefix, pd.DataFrame())
         if stats_df.empty:
             continue
-        significant = stats_df.loc[_as_bool(stats_df["significant_fdr"])].copy()
-        significant = significant.loc[significant["target_condition_label"].astype(str).str.casefold() != "sham"]
-        if significant.empty:
+        active = stats_df.loc[stats_df["target_condition_label"].astype(str).str.casefold() != "sham"].copy()
+        fdr = active.loc[_as_bool(active["significant_fdr"])].copy()
+        raw_only = active.loc[_converged_raw_p_only_mask(active, alpha=float(raw_p_alpha))].copy()
+        shown = pd.concat([fdr, raw_only], ignore_index=True) if include_converged_raw_p else fdr
+        if shown.empty:
             continue
-        for (subject, condition_label), cell_df in significant.groupby(
+        for (subject, condition_label), _cell_df in shown.groupby(
             ["subject", "target_condition_label"],
             dropna=False,
             observed=False,
             sort=False,
         ):
-            roi_labels = sorted(cell_df["roi_label"].astype(str).unique().tolist())
+            fdr_labels = sorted(
+                fdr.loc[
+                    fdr["subject"].astype(str).eq(str(subject))
+                    & fdr["target_condition_label"].astype(str).eq(str(condition_label)),
+                    "roi_label",
+                ]
+                .astype(str)
+                .unique()
+                .tolist()
+            )
+            raw_labels = sorted(
+                raw_only.loc[
+                    raw_only["subject"].astype(str).eq(str(subject))
+                    & raw_only["target_condition_label"].astype(str).eq(str(condition_label)),
+                    "roi_label",
+                ]
+                .astype(str)
+                .unique()
+                .tolist()
+            )
+            roi_labels = [f"{label}*" for label in fdr_labels]
+            if include_converged_raw_p:
+                roi_labels.extend(raw_labels)
             rows.append(
                 {
                     "comparison": str(spec["label"]),
                     "file_prefix": prefix,
                     "subject": str(subject),
                     "target_condition_label": str(condition_label),
-                    "n_significant_rois": int(len(roi_labels)),
-                    "significant_roi_labels": "; ".join(roi_labels),
+                    "n_significant_rois": int(len(fdr_labels)),
+                    "n_converged_raw_p_only_rois": int(len(raw_labels)),
+                    "significant_roi_labels": "; ".join(fdr_labels),
+                    "converged_raw_p_only_roi_labels": "; ".join(raw_labels),
+                    "shown_roi_labels": "; ".join(roi_labels),
                 }
             )
 
@@ -710,97 +1354,32 @@ def _write_compact_burden_plot(stats_by_prefix: dict[str, pd.DataFrame], plots_d
         fig, ax = plt.subplots(figsize=(6.0, 2.8))
         ax.text(0.5, 0.5, "No FDR-significant ROI burden cells", ha="center", va="center", fontsize=11)
         ax.axis("off")
-        paths = _save_pdf_and_png(fig, plots_dir / "off_on_condition_minus_sham_subject_session_roi_burden_compact.pdf")
+        pdf_path, png_path = _save_pdf_and_png(
+            fig,
+            plots_dir / "off_on_condition_minus_sham_subject_session_roi_burden_compact.pdf",
+        )
         plt.close(fig)
-        return (*paths, csv_path)
+        return ([pdf_path], [png_path], csv_path)
 
-    sessions = sorted(nonzero_df["target_condition_label"].astype(str).unique().tolist(), key=_session_sort_key)
-    subjects = sorted(nonzero_df["subject"].astype(str).unique().tolist(), key=_subject_sort_key)
-    x_lookup = {label: index for index, label in enumerate(sessions)}
-    y_lookup = {subject: index for index, subject in enumerate(subjects)}
-
-    fig_width = max(9.2, 1.12 * len(sessions) + 3.0)
-    fig_height = max(4.0, 0.62 * len(subjects) + 2.0)
-    fig, ax = plt.subplots(figsize=(fig_width, fig_height), facecolor="white")
-    ax.set_axisbelow(True)
-    ax.grid(axis="both", color="#E1E1E1", linewidth=0.8)
-
-    for prefix, spec in specs.items():
-        subset = nonzero_df.loc[nonzero_df["file_prefix"].eq(prefix)]
-        if subset.empty:
-            continue
-        x_values = np.asarray(
-            [x_lookup[str(label)] + float(spec["x_offset"]) for label in subset["target_condition_label"]],
-            dtype=np.float64,
-        )
-        y_values = np.asarray([y_lookup[str(subject)] for subject in subset["subject"]], dtype=np.float64)
-        ax.scatter(
-            [],
-            [],
-            s=150.0,
-            marker=str(spec["marker"]),
-            color=str(spec["color"]),
-            edgecolor="#202020",
-            linewidth=0.7,
-            alpha=0.92,
-            label=str(spec["label"]),
-        )
-        for x_value, y_value, roi_text in zip(
-            x_values,
-            y_values,
-            subset["significant_roi_labels"].astype(str),
-            strict=True,
-        ):
-            ax.text(
-                x_value,
-                y_value,
-                _compact_roi_label(roi_text),
-                ha="center",
-                va="center",
-                color="white",
-                fontsize=7.2,
-                fontweight="bold",
-                linespacing=1.0,
-                bbox={
-                    "boxstyle": str(spec["boxstyle"]),
-                    "facecolor": str(spec["color"]),
-                    "edgecolor": "#202020",
-                    "linewidth": 0.75,
-                    "alpha": 0.94,
-                },
-                zorder=4,
-            )
-
-    ax.set_xticks(np.arange(len(sessions)))
-    ax.set_xticklabels(sessions, fontsize=10)
-    ax.set_yticks(np.arange(len(subjects)))
-    ax.set_yticklabels(subjects, fontsize=10)
-    ax.set_xlim(-0.55, len(sessions) - 0.45)
-    ax.set_ylim(len(subjects) - 0.55, -0.55)
-    ax.set_xlabel("GVS condition", fontsize=10.5)
-    ax.set_ylabel("Subject with at least one significant ROI", fontsize=10.5)
-    ax.set_title("FDR-significant ROI burden by subject and GVS condition", fontsize=12.5, pad=10)
-    ax.legend(frameon=False, loc="upper right", fontsize=9.5)
-    for spine in ("top", "right"):
-        ax.spines[spine].set_visible(False)
-    fig.tight_layout()
-    pdf_png = _save_pdf_and_png(
-        fig,
-        plots_dir / "off_on_condition_minus_sham_subject_session_roi_burden_compact.pdf",
-        dpi=300,
-    )
-    plt.close(fig)
-    return (*pdf_png, csv_path)
+    combined_df = _fdr_only_compact_view(nonzero_df) if include_converged_raw_p else None
+    pdf_paths, png_paths = _write_labeled_compact_burden_plot(nonzero_df, plots_dir, specs, combined_df=combined_df)
+    return (pdf_paths, png_paths, csv_path)
 
 
 def _missing_inputs(args: argparse.Namespace) -> list[str]:
     missing: list[str] = []
-    for path, label in (
+    required_paths = [
         (args.weight_map, "optimization-weight NIfTI"),
-        (args.roi_definition_figure, "ROI definition reference figure"),
-        (args.roi_region_table, "machine-readable ROI region table"),
         (args.gvs_order, "GVS order table"),
-    ):
+    ]
+    if not bool(args.projected_signal_only):
+        required_paths.extend(
+            [
+                (args.roi_definition_figure, "ROI definition reference figure"),
+                (args.roi_region_table, "machine-readable ROI region table"),
+            ]
+        )
+    for path, label in required_paths:
         if path is None or not Path(path).exists():
             missing.append(f"{path} ({label})")
     if args.beta_root is None or not Path(args.beta_root).exists():
@@ -833,7 +1412,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--roi-region-table", type=_coerce_user_path, default=None)
     parser.add_argument("--gvs-order", type=_coerce_user_path, default=DEFAULT_GVS_ORDER)
     parser.add_argument("--out-dir", type=_coerce_user_path, default=DEFAULT_OUT_DIR)
+    parser.add_argument("--projected-signal-out-dir", type=_coerce_user_path, default=DEFAULT_PROJECTED_SIGNAL_OUT_DIR)
     parser.add_argument("--roi-percentile", type=float, default=DEFAULT_ROI_PERCENTILE)
+    parser.add_argument(
+        "--projected-signal-weight-percentile",
+        type=float,
+        default=DEFAULT_PROJECTED_SIGNAL_WEIGHT_PERCENTILE,
+    )
     parser.add_argument("--min-report-voxels", type=int, default=DEFAULT_MIN_REPORT_VOXELS)
     parser.add_argument("--min-lateralized-voxels", type=int, default=1)
     parser.add_argument("--exclude-rois", nargs="*", default=())
@@ -845,6 +1430,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--subjects", nargs="+", default=None)
     parser.add_argument("--check-inputs", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--skip-projected-signal-profile", action="store_true")
+    parser.add_argument("--projected-signal-only", action="store_true")
     return parser
 
 
@@ -854,6 +1441,7 @@ def _prepare_args(args: argparse.Namespace) -> argparse.Namespace:
     args.roi_definition_figure = _resolve_path(args.roi_definition_figure)
     args.gvs_order = _resolve_path(args.gvs_order)
     args.out_dir = _resolve_path(args.out_dir)
+    args.projected_signal_out_dir = _resolve_path(args.projected_signal_out_dir)
     args.atlas_cache_dir = _resolve_path(args.atlas_cache_dir)
     args.roi_region_table = _resolve_path(args.roi_region_table)
     if args.roi_region_table is None:
@@ -863,6 +1451,8 @@ def _prepare_args(args: argparse.Namespace) -> argparse.Namespace:
         raise ValueError("--trials-per-condition must be positive.")
     if not (0.0 < float(args.alpha) <= 1.0):
         raise ValueError("--alpha must be in (0, 1].")
+    if not (0.0 <= float(args.projected_signal_weight_percentile) <= 100.0):
+        raise ValueError("--projected-signal-weight-percentile must be between 0 and 100.")
     return args
 
 
@@ -891,6 +1481,8 @@ def _print_dry_run(
     print(f"ROI definition figure: {args.roi_definition_figure}")
     print(f"GVS order table: {args.gvs_order}")
     print(f"Output directory: {args.out_dir}")
+    print(f"Projected-signal output directory: {args.projected_signal_out_dir}")
+    print(f"Projected-signal weight percentile: p{args.projected_signal_weight_percentile:g}")
     print(f"ROI percentile: p{args.roi_percentile:g}")
     print(f"Weight threshold: {roi_threshold:.8g}")
     print(f"Split hemispheres: {bool(args.split_hemispheres)}")
@@ -917,6 +1509,33 @@ def main() -> int:
 
     weight_img = nib.load(str(args.weight_map))
     weight_values = np.asarray(weight_img.get_fdata(), dtype=np.float64)
+    gvs_order = _load_gvs_order(args.gvs_order)
+    run_specs = _discover_run_specs(args.beta_root, gvs_order, args.subjects)
+
+    if args.projected_signal_only:
+        if args.dry_run:
+            print("Dry run only; no projected-signal files were written.")
+            print(f"Weight map: {args.weight_map}")
+            print(f"Beta root: {args.beta_root}")
+            print(f"GVS order table: {args.gvs_order}")
+            print(f"Projected-signal output directory: {args.projected_signal_out_dir}")
+            print(f"Projected-signal weight percentile: p{args.projected_signal_weight_percentile:g}")
+            print(f"Runs discovered: {len(run_specs)}")
+            return 0
+        projected_signal_outputs = _write_projected_signal_outputs(
+            run_specs,
+            weight_values,
+            weight_img.shape[:3],
+            Path(args.projected_signal_out_dir),
+            trials_per_condition=int(args.trials_per_condition),
+            weight_percentile=float(args.projected_signal_weight_percentile),
+            alpha=float(args.alpha),
+        )
+        for output_path in projected_signal_outputs.values():
+            if isinstance(output_path, Path):
+                print(f"Saved {output_path}")
+        return 0
+
     groups, roi_metadata, roi_names, min_roi_voxels = _analysis_roi_setup(args, weight_img)
     weighted_rois, roi_threshold = _build_weighted_rois(
         weight_values=weight_values,
@@ -929,8 +1548,6 @@ def main() -> int:
     roi_arrays = _build_roi_arrays(weighted_rois, weight_img.shape[:3])
     roi_labels = [roi.name for roi in roi_arrays]
 
-    gvs_order = _load_gvs_order(args.gvs_order)
-    run_specs = _discover_run_specs(args.beta_root, gvs_order, args.subjects)
     if args.dry_run:
         _print_dry_run(args, roi_arrays, roi_threshold, run_specs)
         return 0
@@ -942,6 +1559,18 @@ def main() -> int:
     common_dir.mkdir(parents=True, exist_ok=True)
     tables_dir.mkdir(parents=True, exist_ok=True)
     plots_dir.mkdir(parents=True, exist_ok=True)
+
+    projected_signal_outputs: dict[str, Any] = {}
+    if not args.skip_projected_signal_profile:
+        projected_signal_outputs = _write_projected_signal_outputs(
+            run_specs,
+            weight_values,
+            weight_img.shape[:3],
+            Path(args.projected_signal_out_dir),
+            trials_per_condition=int(args.trials_per_condition),
+            weight_percentile=float(args.projected_signal_weight_percentile),
+            alpha=float(args.alpha),
+        )
 
     roi_definition = pd.DataFrame(
         {
@@ -986,7 +1615,7 @@ def main() -> int:
         )
 
     pdf_path, png_path = _write_burden_heatmaps(stats_by_prefix, plots_dir)
-    compact_pdf_path, compact_png_path, compact_csv_path = _write_compact_burden_plot(stats_by_prefix, plots_dir)
+    compact_pdf_paths, compact_png_paths, compact_csv_path = _write_compact_burden_plot(stats_by_prefix, plots_dir)
 
     manifest = {
         "inputs": {
@@ -1004,9 +1633,10 @@ def main() -> int:
             "plots_dir": plots_dir,
             "burden_heatmap_png": png_path,
             "burden_heatmap_pdf": pdf_path,
-            "compact_burden_png": compact_png_path,
-            "compact_burden_pdf": compact_pdf_path,
+            "compact_burden_png": compact_png_paths,
+            "compact_burden_pdf": compact_pdf_paths,
             "compact_burden_nonzero_csv": compact_csv_path,
+            "projected_signal": projected_signal_outputs,
         },
         "roi_definition": {
             "source": "new_weight_map_p90_aal_region_table",
@@ -1039,8 +1669,13 @@ def main() -> int:
 
     print(f"Saved {png_path}")
     print(f"Saved {pdf_path}")
-    print(f"Saved {compact_png_path}")
-    print(f"Saved {compact_pdf_path}")
+    for compact_png_path in compact_png_paths:
+        print(f"Saved {compact_png_path}")
+    for compact_pdf_path in compact_pdf_paths:
+        print(f"Saved {compact_pdf_path}")
+    for output_path in projected_signal_outputs.values():
+        if isinstance(output_path, Path):
+            print(f"Saved {output_path}")
     print(f"Saved {compact_csv_path}")
     print(f"Saved {common_dir / 'weighted_roi_definition.csv'}")
     print(f"Saved {common_dir / 'run_condition_inventory.csv'}")
