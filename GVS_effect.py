@@ -46,6 +46,8 @@ DEFAULT_BETA_ROOT = Path(
 )
 DEFAULT_OUT_DIR = ROOT / "figures" / "GVS_effects" / "gvs_similarity_hemi"
 DEFAULT_PROJECTED_SIGNAL_OUT_DIR = ROOT / "figures" / "GVS_effects"
+DEFAULT_MOTOR_REWARD_ROI_PROFILE_OUT_DIR = ROOT / "figures" / "GVS_effects"
+DEFAULT_LME_TRIAL_CSV = ROOT / "Claude_results" / "group_analyses" / "analysis3_lme" / "per_trial_roi_betas.csv"
 DEFAULT_ROI_PERCENTILE = 90.0
 DEFAULT_PROJECTED_SIGNAL_WEIGHT_PERCENTILE = 90.0
 DEFAULT_TRIALS_PER_CONDITION = 10
@@ -62,6 +64,41 @@ PROJECTED_SIGNAL_STIM_SHORT = {
     8: "Beta",
     9: "Gamma",
 }
+ROI_PROFILE_STIM_SHORT = {
+    "GVS1": "Pink\nnoise",
+    "GVS2": "DC+1",
+    "GVS3": "DC-1",
+    "GVS4": "Delta",
+    "GVS5": "Theta",
+    "GVS6": "Alpha",
+    "GVS7": "Beta",
+    "GVS8": "Gamma",
+}
+ROI_PROFILE_ACTIVE_LABELS = tuple(ROI_PROFILE_STIM_SHORT)
+MOTOR_REWARD_ROI_SELECTION: tuple[tuple[str, str], ...] = (
+    ("Precentral_L", "motor_sensorimotor"),
+    ("Precentral_R", "motor_sensorimotor"),
+    ("Supp_Motor_Area_L", "motor_sensorimotor"),
+    ("Supp_Motor_Area_R", "motor_sensorimotor"),
+    ("Postcentral_L", "motor_sensorimotor"),
+    ("Postcentral_R", "motor_sensorimotor"),
+    ("Paracentral_Lobule_L", "motor_sensorimotor"),
+    ("Paracentral_Lobule_R", "motor_sensorimotor"),
+    ("Caudate_L", "basal_ganglia_thalamus"),
+    ("Caudate_R", "basal_ganglia_thalamus"),
+    ("Putamen_L", "basal_ganglia_thalamus"),
+    ("Putamen_R", "basal_ganglia_thalamus"),
+    ("Thalamus_L", "basal_ganglia_thalamus"),
+    ("Thalamus_R", "basal_ganglia_thalamus"),
+    ("Orbitofrontal_L", "reward_limbic"),
+    ("Orbitofrontal_R", "reward_limbic"),
+    ("Cingulate_L", "reward_limbic"),
+    ("Cingulate_R", "reward_limbic"),
+    ("Amygdala_L", "reward_limbic"),
+    ("Amygdala_R", "reward_limbic"),
+    ("Hippocampus_L", "reward_limbic"),
+    ("Hippocampus_R", "reward_limbic"),
+)
 ROI_CELL_COLORS = (
     "#D7E9F7",
     "#F8E3D0",
@@ -678,6 +715,315 @@ def _write_projected_signal_outputs(
         "projected_signal_profile_pdf": pdf_path,
         "projected_signal_profile_png": png_path,
         "projected_signal_mask": mask_metadata,
+    }
+
+
+def _roi_profile_star_label(p_value: float) -> str:
+    if not np.isfinite(p_value):
+        return ""
+    if p_value < 0.001:
+        return "***"
+    if p_value < 0.01:
+        return "**"
+    if p_value < 0.05:
+        return "*"
+    return ""
+
+
+def _compute_motor_reward_roi_profiles(
+    trial_df: pd.DataFrame,
+    rois: list[str],
+    *,
+    alpha: float,
+) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for roi in rois:
+        if roi not in trial_df.columns:
+            continue
+
+        mean_df = (
+            trial_df.groupby(["subject", "session", "medication", "condition_label"])[roi]
+            .mean()
+            .reset_index(name="mean_beta")
+        )
+        sham = (
+            mean_df.loc[mean_df["condition_label"].astype(str).eq("sham")]
+            .set_index(["subject", "session"])["mean_beta"]
+            .rename("sham_beta")
+        )
+        mean_df = mean_df.join(sham, on=["subject", "session"])
+        mean_df["delta_beta"] = mean_df["mean_beta"] - mean_df["sham_beta"]
+        active = mean_df.loc[mean_df["condition_label"].isin(ROI_PROFILE_ACTIVE_LABELS)].copy()
+
+        for (condition, medication), cell_df in active.groupby(["condition_label", "medication"], sort=False):
+            deltas = cell_df["delta_beta"].dropna().to_numpy(dtype=np.float64)
+            if deltas.size < 3:
+                continue
+            test_result = stats.ttest_1samp(deltas, 0.0)
+            p_value = float(test_result.pvalue)
+            rows.append(
+                {
+                    "roi": roi,
+                    "medication": str(medication),
+                    "condition": str(condition),
+                    "stim_short": ROI_PROFILE_STIM_SHORT[str(condition)].replace("\n", " "),
+                    "n_subjects": int(deltas.size),
+                    "mean_delta": float(np.mean(deltas)),
+                    "se_delta": float(stats.sem(deltas)),
+                    "t_stat": float(test_result.statistic),
+                    "p_value": p_value,
+                    "sig_uncorrected": bool(p_value < float(alpha)),
+                }
+            )
+
+    results = pd.DataFrame(rows)
+    if results.empty:
+        return results
+
+    results["q_fdr_within_roi_med"] = np.nan
+    results["sig_fdr_within_roi_med"] = False
+    for _, group_index in results.groupby(["roi", "medication"]).groups.items():
+        p_values = results.loc[group_index, "p_value"].to_numpy(dtype=np.float64)
+        rejected, q_values = fdrcorrection(p_values, alpha=float(alpha))
+        results.loc[group_index, "q_fdr_within_roi_med"] = q_values
+        results.loc[group_index, "sig_fdr_within_roi_med"] = rejected
+
+    results["q_fdr_global_med"] = np.nan
+    results["sig_fdr_global_med"] = False
+    for _, group_index in results.groupby("medication").groups.items():
+        p_values = results.loc[group_index, "p_value"].to_numpy(dtype=np.float64)
+        rejected, q_values = fdrcorrection(p_values, alpha=float(alpha))
+        results.loc[group_index, "q_fdr_global_med"] = q_values
+        results.loc[group_index, "sig_fdr_global_med"] = rejected
+
+    roi_order = {roi: index for index, roi in enumerate(rois)}
+    condition_order = {condition: index for index, condition in enumerate(ROI_PROFILE_ACTIVE_LABELS)}
+    return (
+        results.assign(
+            _roi_order=results["roi"].map(roi_order),
+            _condition_order=results["condition"].map(condition_order),
+        )
+        .sort_values(["_roi_order", "medication", "_condition_order"])
+        .drop(columns=["_roi_order", "_condition_order"])
+        .reset_index(drop=True)
+    )
+
+
+def _write_motor_reward_roi_profile_plot(
+    results: pd.DataFrame,
+    rois: list[str],
+    out_dir: Path,
+    *,
+    alpha: float,
+) -> tuple[Path, Path]:
+    significant_rois = set(results.loc[results["sig_uncorrected"], "roi"])
+    present_rois = [roi for roi in rois if roi in significant_rois]
+    if not present_rois:
+        raise RuntimeError("No motor/reward ROIs had an uncorrected significant GVS condition.")
+
+    roi_to_group = dict(MOTOR_REWARD_ROI_SELECTION)
+    group_bg = {
+        "motor_sensorimotor": "#eef5fb",
+        "basal_ganglia_thalamus": "#fdf3e7",
+        "reward_limbic": "#edf7ea",
+    }
+    group_display = {
+        "motor_sensorimotor": "Sensorimotor",
+        "basal_ganglia_thalamus": "Basal Ganglia\n& Thalamus",
+        "reward_limbic": "Reward\n& Limbic",
+    }
+    stim_labels = [
+        ROI_PROFILE_STIM_SHORT[c].replace("\n", " ") for c in ROI_PROFILE_ACTIVE_LABELS
+    ]
+
+    # Build ordered list of unique base ROI names (strip _L / _R suffix)
+    present_base_names: list[str] = []
+    seen_bases: set[str] = set()
+    for roi in present_rois:
+        base = re.sub(r"_[LR]$", "", roi)
+        if base not in seen_bases:
+            seen_bases.add(base)
+            present_base_names.append(base)
+
+    n_rows = len(present_base_names)
+    # 4 columns: L-OFF, L-ON, R-OFF, R-ON
+    COL_CONFIG: list[tuple[str, str]] = [("L", "OFF"), ("L", "ON"), ("R", "OFF"), ("R", "ON")]
+
+    with plt.rc_context({
+        "font.family": "sans-serif",
+        "font.sans-serif": ["Arial", "Helvetica Neue", "Helvetica", "DejaVu Sans"],
+        "axes.linewidth": 0.7,
+        "xtick.major.width": 0.7,
+        "ytick.major.width": 0.7,
+        "xtick.major.size": 2.5,
+        "ytick.major.size": 2.5,
+    }):
+        fig, axes = plt.subplots(
+            n_rows, 4,
+            figsize=(10.0, n_rows * 1.3 + 1.8),
+            sharey=False,
+            squeeze=False,
+        )
+        fig.patch.set_facecolor("white")
+
+        prev_group: str = ""
+        for row_idx, base_name in enumerate(present_base_names):
+            group = roi_to_group.get(f"{base_name}_L", roi_to_group.get(f"{base_name}_R", ""))
+            bg = group_bg.get(group, "#f8f8f8")
+            is_new_group = group != prev_group
+
+            for col_idx, (hemi, medication) in enumerate(COL_CONFIG):
+                roi = f"{base_name}_{hemi}"
+                ax = axes[row_idx][col_idx]
+                ax.set_facecolor(bg)
+
+                subset = (
+                    results
+                    .loc[results["roi"].eq(roi) & results["medication"].eq(medication)]
+                    .set_index("condition")
+                    .reindex(ROI_PROFILE_ACTIVE_LABELS)
+                    .reset_index()
+                )
+                x_values = np.arange(len(subset))
+                bar_colors = [
+                    PROJECTED_SIGNAL_MED_COLORS[medication] if bool(sig) else "#d0d0d0"
+                    for sig in subset["sig_uncorrected"].fillna(False)
+                ]
+                ax.bar(
+                    x_values, subset["mean_delta"],
+                    yerr=subset["se_delta"],
+                    color=bar_colors,
+                    edgecolor="#333333", linewidth=0.35,
+                    error_kw={"elinewidth": 0.8, "capsize": 2.0, "ecolor": "#444444"},
+                    alpha=0.90, width=0.68,
+                )
+                ax.axhline(0, color="#555555", linewidth=0.6, zorder=0)
+                ax.set_xticks(x_values)
+                ax.set_xticklabels(stim_labels, rotation=35, ha="right", fontsize=7)
+
+                if col_idx == 0:
+                    ax.set_ylabel(base_name.replace("_", " "), fontsize=8.5, labelpad=3)
+
+                finite_vals = pd.concat(
+                    [subset["mean_delta"].abs(), subset["se_delta"].abs()]
+                ).dropna()
+                y_range = max(float(finite_vals.max()) if not finite_vals.empty else 0.01, 0.01)
+                ax.set_ylim(-1.45 * y_range, 1.65 * y_range)
+                star_off = 0.1 * y_range
+
+                for x_val, row in subset.iterrows():
+                    lbl = _roi_profile_star_label(float(row["p_value"])) if pd.notna(row["p_value"]) else ""
+                    if not lbl:
+                        continue
+                    y_base = float(row["mean_delta"])
+                    se = float(row["se_delta"]) if pd.notna(row["se_delta"]) else 0.0
+                    sign = 1.0 if y_base >= 0 else -1.0
+                    ax.text(
+                        x_val, y_base + sign * (se + star_off), lbl,
+                        ha="center", va="bottom" if sign > 0 else "top",
+                        fontsize=9, color="#c0392b", fontweight="bold",
+                    )
+
+                ax.grid(axis="y", alpha=0.25, linestyle="--", linewidth=0.45, zorder=0)
+                for spine in ("top", "right"):
+                    ax.spines[spine].set_visible(False)
+                for spine in ("bottom", "left"):
+                    ax.spines[spine].set_linewidth(0.6)
+
+                # Rotated group label at the first ROI of each anatomical group (last column)
+                if col_idx == 3 and is_new_group and group in group_display:
+                    ax.annotate(
+                        group_display[group],
+                        xy=(1.04, 0.5), xycoords="axes fraction",
+                        fontsize=7.5, va="center", ha="left",
+                        rotation=270, color="#555555", style="italic",
+                        annotation_clip=False,
+                    )
+
+            prev_group = group
+
+        # Shared y-axis label
+        fig.text(
+            0.01, 0.5, r"$\Delta$ Beta vs. sham",
+            va="center", ha="center", rotation=90,
+            fontsize=9, color="#333333",
+        )
+        fig.suptitle(
+            "Motor / Reward-circuit ROI GVS Effects",
+            fontsize=11, fontweight="bold", y=0.995,
+        )
+        fig.tight_layout(rect=(0.04, 0, 0.92, 0.90), h_pad=0.4, w_pad=0.6)
+
+        # All column headers placed in figure coordinates (no set_title clash)
+        import matplotlib.lines as mlines
+
+        axes_top = axes[0][0].get_position().y1
+        med_y = axes_top + 0.012     # "Med. OFF / ON" tier
+        hemi_y = axes_top + 0.048   # "Left / Right Hemisphere" tier
+
+        for col_idx, (hemi, med) in enumerate(COL_CONFIG):
+            x_col = (axes[0][col_idx].get_position().x0 + axes[0][col_idx].get_position().x1) / 2
+            fig.text(
+                x_col, med_y,
+                f"Med. {'OFF' if med == 'OFF' else 'ON'}",
+                ha="center", va="bottom",
+                fontsize=9, fontweight="bold",
+                color=PROJECTED_SIGNAL_MED_COLORS[med],
+            )
+
+        for hemi_label, col_a, col_b in [("Left Hemisphere", 0, 1), ("Right Hemisphere", 2, 3)]:
+            x_mid = (axes[0][col_a].get_position().x0 + axes[0][col_b].get_position().x1) / 2
+            fig.text(
+                x_mid, hemi_y, hemi_label,
+                ha="center", va="bottom",
+                fontsize=10, fontweight="bold", color="#333333",
+            )
+
+        # Vertical separator between L columns (0–1) and R columns (2–3)
+        x_left = axes[0][1].get_position().x1
+        x_right = axes[0][2].get_position().x0
+        x_sep = (x_left + x_right) / 2
+        fig.add_artist(mlines.Line2D(
+            [x_sep, x_sep], [0.02, hemi_y + 0.02],
+            transform=fig.transFigure,
+            color="#aaaaaa", linewidth=0.9, linestyle="--",
+        ))
+
+        paths = _save_pdf_and_png(fig, out_dir / "C_motor_reward_roi_gvs_profiles.pdf", dpi=220)
+        plt.close(fig)
+        return paths
+
+
+def _write_motor_reward_roi_profile_outputs(
+    lme_trial_csv: Path,
+    out_dir: Path,
+    *,
+    alpha: float,
+) -> dict[str, Any]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    rois = [roi for roi, _ in MOTOR_REWARD_ROI_SELECTION]
+    trial_df = pd.read_csv(lme_trial_csv)
+    results = _compute_motor_reward_roi_profiles(trial_df, rois, alpha=float(alpha))
+    if results.empty:
+        raise RuntimeError("Motor/reward ROI profile analysis produced no result rows.")
+
+    results_csv_path = out_dir / "C_motor_reward_roi_gvs_profiles.csv"
+    selection_csv_path = out_dir / "C_motor_reward_roi_selection.csv"
+    results.to_csv(results_csv_path, index=False)
+    pd.DataFrame(MOTOR_REWARD_ROI_SELECTION, columns=["roi", "circuit_group"]).to_csv(selection_csv_path, index=False)
+    pdf_path, png_path = _write_motor_reward_roi_profile_plot(results, rois, out_dir, alpha=float(alpha))
+
+    return {
+        "motor_reward_roi_profile_results_csv": results_csv_path,
+        "motor_reward_roi_selection_csv": selection_csv_path,
+        "motor_reward_roi_profile_pdf": pdf_path,
+        "motor_reward_roi_profile_png": png_path,
+        "motor_reward_roi_profile_summary": {
+            "selected_rois": int(len(rois)),
+            "tests": int(len(results)),
+            "uncorrected_significant_cells": int(results["sig_uncorrected"].sum()),
+            "within_roi_med_fdr_significant_cells": int(results["sig_fdr_within_roi_med"].sum()),
+        },
     }
 
 
@@ -1368,6 +1714,13 @@ def _write_compact_burden_plot(
 
 def _missing_inputs(args: argparse.Namespace) -> list[str]:
     missing: list[str] = []
+    if bool(args.motor_reward_roi_profiles_only):
+        required_paths = [(args.lme_trial_csv, "per-trial ROI beta table")]
+        for path, label in required_paths:
+            if path is None or not Path(path).exists():
+                missing.append(f"{path} ({label})")
+        return missing
+
     required_paths = [
         (args.weight_map, "optimization-weight NIfTI"),
         (args.gvs_order, "GVS order table"),
@@ -1379,6 +1732,8 @@ def _missing_inputs(args: argparse.Namespace) -> list[str]:
                 (args.roi_region_table, "machine-readable ROI region table"),
             ]
         )
+        if not bool(args.skip_motor_reward_roi_profiles):
+            required_paths.append((args.lme_trial_csv, "per-trial ROI beta table"))
     for path, label in required_paths:
         if path is None or not Path(path).exists():
             missing.append(f"{path} ({label})")
@@ -1413,6 +1768,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gvs-order", type=_coerce_user_path, default=DEFAULT_GVS_ORDER)
     parser.add_argument("--out-dir", type=_coerce_user_path, default=DEFAULT_OUT_DIR)
     parser.add_argument("--projected-signal-out-dir", type=_coerce_user_path, default=DEFAULT_PROJECTED_SIGNAL_OUT_DIR)
+    parser.add_argument(
+        "--motor-reward-roi-profile-out-dir",
+        type=_coerce_user_path,
+        default=DEFAULT_MOTOR_REWARD_ROI_PROFILE_OUT_DIR,
+    )
+    parser.add_argument("--lme-trial-csv", type=_coerce_user_path, default=DEFAULT_LME_TRIAL_CSV)
     parser.add_argument("--roi-percentile", type=float, default=DEFAULT_ROI_PERCENTILE)
     parser.add_argument(
         "--projected-signal-weight-percentile",
@@ -1432,6 +1793,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-projected-signal-profile", action="store_true")
     parser.add_argument("--projected-signal-only", action="store_true")
+    parser.add_argument("--skip-motor-reward-roi-profiles", action="store_true")
+    parser.add_argument("--motor-reward-roi-profiles-only", action="store_true")
     return parser
 
 
@@ -1442,6 +1805,8 @@ def _prepare_args(args: argparse.Namespace) -> argparse.Namespace:
     args.gvs_order = _resolve_path(args.gvs_order)
     args.out_dir = _resolve_path(args.out_dir)
     args.projected_signal_out_dir = _resolve_path(args.projected_signal_out_dir)
+    args.motor_reward_roi_profile_out_dir = _resolve_path(args.motor_reward_roi_profile_out_dir)
+    args.lme_trial_csv = _resolve_path(args.lme_trial_csv)
     args.atlas_cache_dir = _resolve_path(args.atlas_cache_dir)
     args.roi_region_table = _resolve_path(args.roi_region_table)
     if args.roi_region_table is None:
@@ -1482,6 +1847,8 @@ def _print_dry_run(
     print(f"GVS order table: {args.gvs_order}")
     print(f"Output directory: {args.out_dir}")
     print(f"Projected-signal output directory: {args.projected_signal_out_dir}")
+    print(f"Motor/reward ROI profile output directory: {args.motor_reward_roi_profile_out_dir}")
+    print(f"LME trial table: {args.lme_trial_csv}")
     print(f"Projected-signal weight percentile: p{args.projected_signal_weight_percentile:g}")
     print(f"ROI percentile: p{args.roi_percentile:g}")
     print(f"Weight threshold: {roi_threshold:.8g}")
@@ -1505,6 +1872,23 @@ def main() -> int:
         return 1
     if args.check_inputs:
         print("All required inputs are present.")
+        return 0
+
+    if args.motor_reward_roi_profiles_only:
+        if args.dry_run:
+            print("Dry run only; no motor/reward ROI profile files were written.")
+            print(f"LME trial table: {args.lme_trial_csv}")
+            print(f"Motor/reward ROI profile output directory: {args.motor_reward_roi_profile_out_dir}")
+            print(f"Selected ROIs: {len(MOTOR_REWARD_ROI_SELECTION)}")
+            return 0
+        motor_reward_roi_profile_outputs = _write_motor_reward_roi_profile_outputs(
+            Path(args.lme_trial_csv),
+            Path(args.motor_reward_roi_profile_out_dir),
+            alpha=float(args.alpha),
+        )
+        for output_path in motor_reward_roi_profile_outputs.values():
+            if isinstance(output_path, Path):
+                print(f"Saved {output_path}")
         return 0
 
     weight_img = nib.load(str(args.weight_map))
@@ -1572,6 +1956,14 @@ def main() -> int:
             alpha=float(args.alpha),
         )
 
+    motor_reward_roi_profile_outputs: dict[str, Any] = {}
+    if not args.skip_motor_reward_roi_profiles:
+        motor_reward_roi_profile_outputs = _write_motor_reward_roi_profile_outputs(
+            Path(args.lme_trial_csv),
+            Path(args.motor_reward_roi_profile_out_dir),
+            alpha=float(args.alpha),
+        )
+
     roi_definition = pd.DataFrame(
         {
             "roi_index": np.arange(1, len(roi_arrays) + 1, dtype=np.int64),
@@ -1624,6 +2016,7 @@ def main() -> int:
             "roi_definition_figure": args.roi_definition_figure,
             "roi_region_table": args.roi_region_table,
             "gvs_order": args.gvs_order,
+            "lme_trial_csv": args.lme_trial_csv,
         },
         "outputs": {
             "out_dir": out_dir,
@@ -1637,6 +2030,7 @@ def main() -> int:
             "compact_burden_pdf": compact_pdf_paths,
             "compact_burden_nonzero_csv": compact_csv_path,
             "projected_signal": projected_signal_outputs,
+            "motor_reward_roi_profiles": motor_reward_roi_profile_outputs,
         },
         "roi_definition": {
             "source": "new_weight_map_p90_aal_region_table",
@@ -1674,6 +2068,9 @@ def main() -> int:
     for compact_pdf_path in compact_pdf_paths:
         print(f"Saved {compact_pdf_path}")
     for output_path in projected_signal_outputs.values():
+        if isinstance(output_path, Path):
+            print(f"Saved {output_path}")
+    for output_path in motor_reward_roi_profile_outputs.values():
         if isinstance(output_path, Path):
             print(f"Saved {output_path}")
     print(f"Saved {compact_csv_path}")
