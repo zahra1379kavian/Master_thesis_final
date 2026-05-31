@@ -67,6 +67,7 @@ BRAINSTEM_MNI_BOUNDS_MM = {
     "z_max": 10.0,
 }
 MOTOR_CONTOUR_ROIS = ("Precentral", "Supp_Motor_Area", "Paracentral_Lobule", "Postcentral")
+MOTOR_OVERLAP_DISPLAY_DILATION_VOXELS = 3
 MIXED_LOG_FINAL_CANDIDATE_KEYS = {
     (0.0, 0.0, 0.0, 0.0, 1.5),
     (1.0, 0.0, 0.0, 0.0, 1.5),
@@ -1166,6 +1167,14 @@ def plot_full_vs_task_only_anatomy(
 
     shared_mask = full_mask & task_mask
     motor_shared_mask = shared_mask & motor_mask
+    motor_shared_display_mask = (
+        ndimage.binary_dilation(
+            motor_shared_mask,
+            structure=ndimage.generate_binary_structure(3, 1),
+            iterations=MOTOR_OVERLAP_DISPLAY_DILATION_VOXELS,
+        )
+        & motor_mask
+    )
     full_only_mask = full_mask & ~task_mask
     task_only_unique_mask = task_mask & ~full_mask
 
@@ -1252,14 +1261,16 @@ def plot_full_vs_task_only_anatomy(
                     [
                         _plane_slice(full_only_mask, axis, index),
                         _plane_slice(task_only_unique_mask, axis, index),
+                        _plane_slice(motor_shared_display_mask, axis, index),
                         _plane_slice(shared_mask, axis, index),
                         _plane_slice(motor_shared_mask, axis, index),
                     ],
                 )
-                full_only_slice, task_only_unique_slice, shared_slice, motor_shared_slice = mask_slices
+                full_only_slice, task_only_unique_slice, motor_shared_display_slice, shared_slice, motor_shared_slice = mask_slices
                 ax.imshow(_anatomy_rgba(bg_slice, vmax), interpolation="nearest")
                 _add_mask_overlay(ax, full_only_slice, colors["full"], 0.75, 0.36)
                 _add_mask_overlay(ax, task_only_unique_slice, colors["task"], 0.75, 0.34)
+                _add_mask_overlay(ax, motor_shared_display_slice, colors["shared"], 1.05, 0.30)
                 _add_mask_overlay(ax, shared_slice, colors["shared"], 0.95, 0.52)
                 _add_mask_overlay(ax, motor_shared_slice, colors["shared"], 2.0, 0.0)
                 coord = _coord_mm(html_affine, axis, index)

@@ -191,10 +191,11 @@ for row, (mode, plane_label) in enumerate(plane_specs):
         a, m, label_slice = crop(plane(bg, mode, cut), plane(mask, mode, cut), plane(region_labels, mode, cut))
         ax.imshow(anat(a), interpolation="nearest")
         overlay(ax, label_slice, m)
-        ax.text(0.5, -0.070, f"{mode} = {cut:g}", transform=ax.transAxes, ha="center", va="top", fontsize=13, color="0.2")
+        height, width = a.shape[:2]
+        ax.text(width / 2, height + 5, f"{mode} = {cut:g}", ha="center", va="top", fontsize=13, color="0.2", clip_on=False)
         if row == 0:
-            ax.text(0.15, 0.99, "L", transform=ax.transAxes, ha="center", va="top", fontsize=13, color="0.15")
-            ax.text(0.85, 0.99, "R", transform=ax.transAxes, ha="center", va="top", fontsize=13, color="0.15")
+            ax.text(width * 0.12, -4, "L", ha="center", va="bottom", fontsize=13, color="0.15", clip_on=False)
+            ax.text(width * 0.88, -4, "R", ha="center", va="bottom", fontsize=13, color="0.15", clip_on=False)
         ax.set_axis_off()
 legend = [
     Patch(facecolor=region_colors[name], edgecolor="0.2", alpha=0.90, label=name)
@@ -202,7 +203,7 @@ legend = [
     if region_counts[name] > 0
 ]
 fig.legend(handles=legend, loc="lower center", ncol=4, frameon=False, fontsize=12, bbox_to_anchor=(0.5, 0.055))
-fig.subplots_adjust(left=0.015, right=0.995, bottom=0.18, top=0.985, wspace=0.015, hspace=0.36)
+fig.subplots_adjust(left=0.015, right=0.995, bottom=0.18, top=0.985, wspace=0.015, hspace=0.28)
 fig.savefig(f"{base}.png", dpi=200, bbox_inches="tight", pad_inches=0.02)
 fig.savefig(f"{base}.pdf", bbox_inches="tight", pad_inches=0.02)
 print(f"{base}.png")
