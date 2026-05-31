@@ -6,11 +6,14 @@ import numpy as np
 warnings.filterwarnings("ignore", message="Unable to import Axes3D.*")
 import matplotlib.pyplot as plt
 from matplotlib.colors import to_rgb
+from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 import nibabel as nib
 from nilearn import datasets, image
 from PIL import Image
 from scipy.ndimage import binary_fill_holes, distance_transform_edt
+
+from motor_overlap_overlay import MOTOR_OVERLAP_COLOR, motor_overlap_masks
 
 src = Path("data/voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5_bold_thr90.html")
 base = Path("figures") / "voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5_bold_thr90_multiplane_contour_all_regions"
@@ -83,14 +86,17 @@ def plane(v, mode, cut):
     return v[:, :, k].T[::-1]
 def pad(a):
     return np.pad(a, ((3, 5), (2, 2)), mode="constant")
-def crop(a, m, label=None):
+def crop(a, m, label=None, *extra_masks):
     b = binary_fill_holes(a > 0) | m
+    for extra_mask in extra_masks:
+        b |= extra_mask
     y, x = np.where(b)
     y0, y1, x0, x1 = max(y.min() - 4, 0), min(y.max() + 5, a.shape[0]), max(x.min() - 4, 0), min(x.max() + 5, a.shape[1])
-    cropped = (pad(a[y0:y1, x0:x1]), pad(m[y0:y1, x0:x1]))
-    if label is None:
-        return cropped
-    return cropped + (pad(label[y0:y1, x0:x1]),)
+    cropped = [pad(a[y0:y1, x0:x1]), pad(m[y0:y1, x0:x1])]
+    if label is not None:
+        cropped.append(pad(label[y0:y1, x0:x1]))
+    cropped.extend(pad(extra_mask[y0:y1, x0:x1]) for extra_mask in extra_masks)
+    return tuple(cropped)
 def anat(a):
     brain = binary_fill_holes(a > 0)
     r = plt.cm.gray(np.clip(a / mx, 0, 1))
@@ -176,7 +182,13 @@ def overlay(ax, labels, m):
     ax.imshow(rgba, interpolation="nearest")
     if np.any(m):
         ax.contour(m.astype(float), levels=[0.5], colors="#111111", linewidths=0.55, alpha=0.95)
+def overlay_motor_overlap(ax, display_mask, core_mask):
+    if np.any(display_mask):
+        ax.contour(display_mask.astype(float), levels=[0.5], colors=MOTOR_OVERLAP_COLOR, linewidths=0.95, alpha=0.95)
+    if np.any(core_mask):
+        ax.contour(core_mask.astype(float), levels=[0.5], colors=MOTOR_OVERLAP_COLOR, linewidths=1.65, alpha=1.0)
 base.parent.mkdir(exist_ok=True)
+motor_overlap_display, motor_overlap_core = motor_overlap_masks(mask, aff)
 n_cols = max(len(cuts[mode]) for mode, _ in plane_specs)
 fig, axes = plt.subplots(len(plane_specs), n_cols, figsize=(15.1, 7.6), facecolor="white")
 for row, (mode, plane_label) in enumerate(plane_specs):
@@ -188,9 +200,16 @@ for row, (mode, plane_label) in enumerate(plane_specs):
             ax.set_axis_off()
             continue
         cut = cuts[mode][col]
-        a, m, label_slice = crop(plane(bg, mode, cut), plane(mask, mode, cut), plane(region_labels, mode, cut))
+        a, m, label_slice, motor_display_slice, motor_core_slice = crop(
+            plane(bg, mode, cut),
+            plane(mask, mode, cut),
+            plane(region_labels, mode, cut),
+            plane(motor_overlap_display, mode, cut),
+            plane(motor_overlap_core, mode, cut),
+        )
         ax.imshow(anat(a), interpolation="nearest")
         overlay(ax, label_slice, m)
+        overlay_motor_overlap(ax, motor_display_slice, motor_core_slice)
         height, width = a.shape[:2]
         brain_y, brain_x = np.where(binary_fill_holes(a > 0))
         label_x = (brain_x.min() + brain_x.max()) / 2
@@ -208,6 +227,8 @@ legend = [
     for name in region_order
     if region_counts[name] > 0
 ]
+if np.any(motor_overlap_display):
+    legend.append(Line2D([0], [0], color=MOTOR_OVERLAP_COLOR, linewidth=1.65, label="Motor overlap"))
 fig.legend(handles=legend, loc="lower center", ncol=4, frameon=False, fontsize=12, bbox_to_anchor=(0.5, 0.055))
 fig.subplots_adjust(left=0.015, right=0.995, bottom=0.18, top=0.985, wspace=0.015, hspace=0.28)
 fig.savefig(f"{base}.png", dpi=200, bbox_inches="tight", pad_inches=0.02)
