@@ -5,6 +5,7 @@ import warnings
 import numpy as np
 warnings.filterwarnings("ignore", message="Unable to import Axes3D.*")
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 from PIL import Image
 from scipy.ndimage import binary_fill_holes
 
@@ -29,7 +30,7 @@ mx = np.percentile(bg[bg > 0], 99.5)
 def coord(mode, k):
     i = "xyz".index(mode)
     return int(round(aff[i, i] * (k + 1) + aff[i, 3]))
-def pick(mode, n=10, gap=3):
+def pick(mode, n=8, gap=4):
     i = "xyz".index(mode)
     c = mask.sum(tuple(j for j in range(3) if j != i))
     out = []
@@ -39,7 +40,8 @@ def pick(mode, n=10, gap=3):
         if len(out) == n:
             break
     return [coord(mode, k) for k in sorted(out)]
-cuts = {mode: pick(mode) for mode in "xyz"}
+plane_specs = [("x", "Sagittal"), ("y", "Coronal"), ("z", "Axial")]
+cuts = {mode: pick(mode) for mode, _ in plane_specs}
 def index(mode, cut):
     i = "xyz".index(mode)
     return int(round((cut - aff[i, 3]) / aff[i, i] - 1))
@@ -67,20 +69,30 @@ def overlay(ax, m):
         ax.contourf(m.astype(float), levels=[0.5, 1.5], colors=[overlay_fill], alpha=0.46, antialiased=True)
         ax.contour(m.astype(float), levels=[0.5], colors=overlay_edge, linewidths=0.95)
 base.parent.mkdir(exist_ok=True)
-fig, axes = plt.subplots(5, 6, figsize=(15.1, 12.3), facecolor="white")
-items = [(mode, cut) for mode in "xyz" for cut in cuts[mode]]
-for i, (ax, (mode, cut)) in enumerate(zip(axes.ravel(), items)):
-    a, m = crop(plane(bg, mode, cut), plane(mask, mode, cut))
-    ax.set_facecolor("none")
-    ax.patch.set_alpha(0)
-    ax.imshow(anat(a), interpolation="nearest")
-    overlay(ax, m)
-    ax.set_axis_off()
-fig.subplots_adjust(left=0.005, right=0.995, bottom=0.005, top=0.995, wspace=-0.04, hspace=0.01)
-for ax in axes.ravel()[:6]:
-    box = ax.get_position()
-    fig.text(box.x0 + box.width * 0.22, box.y1 - box.height * 0.04, "L", ha="center", va="top", fontsize=11, color="black")
-    fig.text(box.x0 + box.width * 0.78, box.y1 - box.height * 0.04, "R", ha="center", va="top", fontsize=11, color="black")
+n_cols = max(len(cuts[mode]) for mode, _ in plane_specs)
+fig, axes = plt.subplots(len(plane_specs), n_cols, figsize=(15.1, 7.0), facecolor="white")
+for row, (mode, label) in enumerate(plane_specs):
+    for col in range(n_cols):
+        ax = axes[row, col]
+        ax.set_facecolor("none")
+        ax.patch.set_alpha(0)
+        if col >= len(cuts[mode]):
+            ax.set_axis_off()
+            continue
+        cut = cuts[mode][col]
+        a, m = crop(plane(bg, mode, cut), plane(mask, mode, cut))
+        ax.imshow(anat(a), interpolation="nearest")
+        overlay(ax, m)
+        ax.text(0.5, -0.055, f"{mode} = {cut:g}", transform=ax.transAxes, ha="center", va="top", fontsize=6.8, color="0.2")
+        if col == 0:
+            ax.text(-0.10, 0.5, label, transform=ax.transAxes, ha="right", va="center", fontsize=8.8, weight="bold", color="0.1")
+        if mode in {"y", "z"}:
+            ax.text(0.15, 0.99, "L", transform=ax.transAxes, ha="center", va="top", fontsize=6.8, color="0.15")
+            ax.text(0.85, 0.99, "R", transform=ax.transAxes, ha="center", va="top", fontsize=6.8, color="0.15")
+        ax.set_axis_off()
+legend = [Patch(facecolor=overlay_fill, edgecolor=overlay_edge, alpha=0.52, label="vigour-network")]
+fig.legend(handles=legend, loc="lower center", frameon=False, fontsize=8.8, bbox_to_anchor=(0.5, 0.012))
+fig.subplots_adjust(left=0.055, right=0.995, bottom=0.11, top=0.985, wspace=0.015, hspace=0.20)
 fig.savefig(f"{base}.png", dpi=200, bbox_inches="tight", pad_inches=0.02)
 fig.savefig(f"{base}.pdf", bbox_inches="tight", pad_inches=0.02)
 print(f"{base}.png")
