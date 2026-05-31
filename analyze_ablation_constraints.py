@@ -1227,7 +1227,7 @@ def plot_full_vs_task_only_anatomy(
     colors = {
         "full": "#004488",
         "task": "#44AA99",
-        "shared": "#CC79A7",
+        "shared": "#AA3377",
     }
     full_bg = np.nan_to_num(full_bg, nan=0.0)
     vmax = float(np.percentile(full_bg[full_bg > 0], 99.5)) if np.any(full_bg > 0) else 1.0
@@ -1307,9 +1307,9 @@ def plot_full_vs_task_only_anatomy(
                 ax.set_axis_off()
 
         handles = [
-            Patch(facecolor=colors["full"], edgecolor=colors["full"], alpha=0.46, label="Full model only"),
-            Patch(facecolor=colors["task"], edgecolor=colors["task"], alpha=0.44, label="Standard GLM only"),
-            Patch(facecolor=colors["shared"], edgecolor=colors["shared"], alpha=0.58, label="Overlap"),
+            Patch(facecolor=colors["full"], edgecolor=colors["full"], alpha=0.46, label="Vigour Network"),
+            Patch(facecolor=colors["task"], edgecolor=colors["task"], alpha=0.44, label="Task-activation map"),
+            Patch(facecolor=colors["shared"], edgecolor=colors["shared"], alpha=0.58, label="Overlap of networks"),
         ]
         fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False, bbox_to_anchor=(0.5, 0.01))
         fig.subplots_adjust(left=0.01, right=0.995, top=0.995, bottom=0.16, wspace=0.02, hspace=-0.04)

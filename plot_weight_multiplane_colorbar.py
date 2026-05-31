@@ -23,6 +23,8 @@ DEFAULT_OUTPUT_BASE = (
     Path("figures")
     / "voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5_bold_thr90_multiplane_weights_colorbar"
 )
+AXIS_LABEL_FONTSIZE = 13
+COLORBAR_FONTSIZE = 12
 
 plt.rcParams.update(
     {
@@ -226,9 +228,9 @@ def main():
             )
             ax.imshow(anatomical_rgba(bg_slice, max_intensity), interpolation="nearest")
             draw_overlay(ax, weight_slice, mask_slice, cmap, norm)
+            height, width = bg_slice.shape[:2]
+            brain_y, brain_x = np.where(binary_fill_holes(bg_slice > 0))
             if row == 0:
-                height, width = bg_slice.shape[:2]
-                brain_y, _ = np.where(binary_fill_holes(bg_slice > 0))
                 label_y = max(float(brain_y.min()) - 2.5, -1.0) if brain_y.size else 0.0
                 ax.text(
                     width * 0.14,
@@ -236,7 +238,7 @@ def main():
                     "L",
                     ha="center",
                     va="bottom",
-                    fontsize=8.5,
+                    fontsize=AXIS_LABEL_FONTSIZE,
                     color="0.15",
                     clip_on=False,
                 )
@@ -246,18 +248,23 @@ def main():
                     "R",
                     ha="center",
                     va="bottom",
-                    fontsize=8.5,
+                    fontsize=AXIS_LABEL_FONTSIZE,
                     color="0.15",
                     clip_on=False,
                 )
+            if brain_y.size and brain_x.size:
+                slice_label_x = (brain_x.min() + brain_x.max()) / 2
+                slice_label_y = brain_y.max() + 3
+            else:
+                slice_label_x = width / 2
+                slice_label_y = height + 3
             ax.text(
-                0.5,
-                -0.055,
+                slice_label_x,
+                slice_label_y,
                 f"{mode} = {cut:g}",
-                transform=ax.transAxes,
                 ha="center",
                 va="top",
-                fontsize=8.5,
+                fontsize=AXIS_LABEL_FONTSIZE,
                 color="0.15",
             )
             ax.set_axis_off()
@@ -266,8 +273,8 @@ def main():
     scalar = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
     scalar.set_array([])
     colorbar = fig.colorbar(scalar, cax=cax)
-    colorbar.ax.set_title(args.colorbar_label, fontsize=8.5, pad=7)
-    colorbar.ax.tick_params(labelsize=8, width=0.6, length=2.8, pad=2)
+    colorbar.ax.set_title(args.colorbar_label, fontsize=COLORBAR_FONTSIZE, pad=7)
+    colorbar.ax.tick_params(labelsize=COLORBAR_FONTSIZE, width=0.6, length=2.8, pad=2)
     colorbar.ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
     colorbar.ax.yaxis.set_major_formatter(FormatStrFormatter("%.2f"))
     colorbar.outline.set_linewidth(0.6)
