@@ -430,6 +430,18 @@ def _format_p_value(p_value: float) -> str:
     return f"p = {p_value:.3f}"
 
 
+def _p_value_stars(p_value: float) -> str:
+    if not np.isfinite(p_value):
+        return "n.s."
+    if p_value < 0.001:
+        return "***"
+    if p_value < 0.01:
+        return "**"
+    if p_value < 0.05:
+        return "*"
+    return "n.s."
+
+
 def _draw_mean_ci(ax: plt.Axes, x: float, values: np.ndarray, color: str, markersize: float = 5.2) -> tuple[float, float, float]:
     mean, ci_low, ci_high = _mean_ci(values)
     yerr = None
@@ -531,8 +543,29 @@ def _plot_paired_estimation(
         zorder=3,
     )
 
+    finite_pairs = np.isfinite(behavior_values) & np.isfinite(projection_values)
+    p_value = (
+        stats.ttest_rel(behavior_values[finite_pairs], projection_values[finite_pairs]).pvalue
+        if np.count_nonzero(finite_pairs) > 1
+        else np.nan
+    )
+    y_low, y_high = y_limits
+    y_range = y_high - y_low
+    max_value = float(np.nanmax(np.concatenate([behavior_values, projection_values])))
+    bracket_y = max_value + y_range * 0.04
+    bracket_height = y_range * 0.025
+    star_y = bracket_y + bracket_height + y_range * 0.012
+    y_high = max(y_high, star_y + y_range * 0.05)
+    ax.plot(
+        [0.0, 0.0, 1.0, 1.0],
+        [bracket_y, bracket_y + bracket_height, bracket_y + bracket_height, bracket_y],
+        color="0.10",
+        linewidth=1.0,
+    )
+    ax.text(0.5, star_y, _p_value_stars(p_value), ha="center", va="bottom", fontsize=9.0, color="0.10")
+
     ax.set_xlim(-0.38, 1.38)
-    ax.set_ylim(y_limits)
+    ax.set_ylim((y_low, y_high))
     ax.set_xticks([0.0, 1.0])
     ax.set_xticklabels(["Behaviour", "Projection"])
     ax.set_ylabel(VARIABILITY_AXIS_LABEL)
@@ -621,17 +654,9 @@ def _save_behavior_projection_figure(metric_df: pd.DataFrame, out_dir: Path) -> 
             "ps.fonttype": 42,
         }
     ):
-        fig, axes = plt.subplots(
-            1,
-            2,
-            figsize=(6.6, 3.55),
-            gridspec_kw={"width_ratios": [1.0, 1.25], "wspace": 0.42},
-        )
-        _plot_paired_estimation(axes[0], subject_df, y_limits)
-        _plot_behaviour_minus_projection(axes[1], subject_df)
-        axes[0].text(0.01, 0.98, "A", transform=axes[0].transAxes, fontweight="bold", fontsize=10.0, va="top")
-        axes[1].text(0.01, 0.98, "B", transform=axes[1].transAxes, fontweight="bold", fontsize=10.0, va="top")
-        fig.subplots_adjust(left=0.10, right=0.98, bottom=0.15, top=0.995, wspace=0.40)
+        fig, ax = plt.subplots(1, 1, figsize=(3.4, 3.55))
+        _plot_paired_estimation(ax, subject_df, y_limits)
+        fig.subplots_adjust(left=0.20, right=0.98, bottom=0.15, top=0.995)
         paths = _save_pdf_and_png(fig, out_dir / "projection_behavior_subject_panel(main).pdf", dpi=300)
         plt.close(fig)
         return paths
