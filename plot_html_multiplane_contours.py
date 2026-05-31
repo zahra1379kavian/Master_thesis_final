@@ -178,16 +178,7 @@ def overlay(ax, labels, m):
         ax.contour(m.astype(float), levels=[0.5], colors="#202020", linewidths=0.38, alpha=0.8)
 base.parent.mkdir(exist_ok=True)
 n_cols = max(len(cuts[mode]) for mode, _ in plane_specs)
-fig, axes = plt.subplots(len(plane_specs), n_cols, figsize=(15.1, 8.8), facecolor="white")
-fig.text(0.5, 0.965, "Vigour-network anatomy", ha="center", va="top", fontsize=18, weight="bold")
-fig.text(
-    0.5,
-    0.925,
-    "Selected voxels span sensorimotor, temporal, frontal, limbic/subcortical, cerebellar, parietal, and occipital AAL3v2-derived categories",
-    ha="center",
-    va="top",
-    fontsize=13,
-)
+fig, axes = plt.subplots(len(plane_specs), n_cols, figsize=(15.1, 7.6), facecolor="white")
 for row, (mode, plane_label) in enumerate(plane_specs):
     for col in range(n_cols):
         ax = axes[row, col]
@@ -201,7 +192,7 @@ for row, (mode, plane_label) in enumerate(plane_specs):
         ax.imshow(anat(a), interpolation="nearest")
         overlay(ax, label_slice, m)
         ax.text(0.5, -0.070, f"{mode} = {cut:g}", transform=ax.transAxes, ha="center", va="top", fontsize=13, color="0.2")
-        if mode in {"y", "z"}:
+        if row == 0:
             ax.text(0.15, 0.99, "L", transform=ax.transAxes, ha="center", va="top", fontsize=13, color="0.15")
             ax.text(0.85, 0.99, "R", transform=ax.transAxes, ha="center", va="top", fontsize=13, color="0.15")
         ax.set_axis_off()
@@ -211,16 +202,7 @@ legend = [
     if region_counts[name] > 0
 ]
 fig.legend(handles=legend, loc="lower center", ncol=4, frameon=False, fontsize=12, bbox_to_anchor=(0.5, 0.055))
-fig.text(
-    0.5,
-    0.018,
-    "AAL3v2 broad anatomical categories; selected voxels outside atlas labels are assigned to the nearest AAL3 category.",
-    ha="center",
-    va="bottom",
-    fontsize=11,
-    color="0.25",
-)
-fig.subplots_adjust(left=0.015, right=0.995, bottom=0.22, top=0.875, wspace=0.015, hspace=0.36)
+fig.subplots_adjust(left=0.015, right=0.995, bottom=0.18, top=0.985, wspace=0.015, hspace=0.36)
 fig.savefig(f"{base}.png", dpi=200, bbox_inches="tight", pad_inches=0.02)
 fig.savefig(f"{base}.pdf", bbox_inches="tight", pad_inches=0.02)
 print(f"{base}.png")

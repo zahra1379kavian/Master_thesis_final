@@ -1216,9 +1216,9 @@ def plot_full_vs_task_only_anatomy(
     summary.to_csv(f"{out_base}_summary.csv", index=False)
 
     colors = {
-        "full": "#005a8f",
-        "task": "#006b4f",
-        "shared": "#9b3f77",
+        "full": "#003f63",
+        "task": "#004d3d",
+        "shared": "#6d174f",
     }
     full_bg = np.nan_to_num(full_bg, nan=0.0)
     vmax = float(np.percentile(full_bg[full_bg > 0], 99.5)) if np.any(full_bg > 0) else 1.0
@@ -1272,7 +1272,7 @@ def plot_full_vs_task_only_anatomy(
                     va="top",
                     fontsize=PAPER_AXIS_TICK_FONT_SIZE,
                 )
-                if mode in {"y", "z"}:
+                if row == 0:
                     ax.text(
                         0.12,
                         0.96,
