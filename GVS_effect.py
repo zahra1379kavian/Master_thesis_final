@@ -1627,7 +1627,7 @@ def _roi_full_name(label: str) -> str:
     if match is None:
         return ROI_FULL_NAMES.get(clean, clean.replace("_", " "))
     base = match.group("base")
-    hemi = "left" if match.group("hemi") == "L" else "right"
+    hemi = match.group("hemi")
     return f"{ROI_FULL_NAMES.get(base, base.replace('_', ' '))} ({hemi})"
 
 
@@ -1661,9 +1661,9 @@ def _roi_full_names_combined(labels: list[str]) -> list[str]:
 
         hemi_names = []
         if "L" in hemis_by_base[key]:
-            hemi_names.append("left")
+            hemi_names.append("L")
         if "R" in hemis_by_base[key]:
-            hemi_names.append("right")
+            hemi_names.append("R")
         full_name = ROI_FULL_NAMES.get(key, key.replace("_", " "))
         combined_names.append(f"{full_name} ({', '.join(hemi_names)})")
     return combined_names
@@ -1700,6 +1700,7 @@ def _draw_compact_count_axis(
     show_ylabel: bool,
 ) -> Any:
     image = ax.imshow(counts, cmap=cmap, norm=norm, aspect="equal")
+    ax.set_anchor("N")
     ax.set_xticks(np.arange(len(sessions)))
     ax.set_xticklabels(_session_number_labels(sessions), fontsize=PAPER_AXIS_TICK_FONT_SIZE - 1)
     ax.set_yticks(np.arange(len(subjects)))
@@ -1711,9 +1712,9 @@ def _draw_compact_count_axis(
     ax.set_yticks(np.arange(-0.5, len(subjects), 1), minor=True)
     ax.grid(which="minor", color="#FFFFFF", linewidth=1.0)
     ax.tick_params(which="minor", bottom=False, left=False)
-    ax.tick_params(axis="both", which="major", length=0, pad=4)
-    ax.set_xlabel("GVS condition", fontsize=PAPER_AXIS_TICK_FONT_SIZE - 1)
-    ax.set_ylabel("Subject" if show_ylabel else "", fontsize=PAPER_AXIS_TICK_FONT_SIZE - 1)
+    ax.tick_params(axis="both", which="major", length=0, pad=2)
+    ax.set_xlabel("")
+    ax.set_ylabel("")
     for spine in ax.spines.values():
         spine.set_linewidth(0.7)
         spine.set_color("#666666")
@@ -1765,7 +1766,7 @@ def _draw_compact_detail_axis(
     detail_rows: list[tuple[str, str]],
 ) -> None:
     ax.axis("off")
-    y_top = 0.995
+    y_top = 1.02
     y_bottom = 0.03
     step = (y_top - y_bottom) / max(len(detail_rows), 1)
     y = y_top
@@ -1779,7 +1780,7 @@ def _draw_compact_detail_axis(
                 transform=ax.transAxes,
                 ha="left",
                 va="top",
-                fontsize=PAPER_FOOTER_FONT_SIZE - 1,
+                fontsize=PAPER_FOOTER_FONT_SIZE - 2,
                 fontweight="bold",
                 color="#111111",
             )
@@ -1791,7 +1792,7 @@ def _draw_compact_detail_axis(
                 transform=ax.transAxes,
                 ha="left",
                 va="top",
-                fontsize=PAPER_FOOTER_FONT_SIZE - 1,
+                fontsize=PAPER_FOOTER_FONT_SIZE - 2,
                 color="#222222",
             )
         y -= step
@@ -1825,19 +1826,21 @@ def _write_combined_compact_burden_plot(
     norm = colors.BoundaryNorm(boundaries, cmap.N)
     detail_rows = _detail_rows_for_compact_burden(combined_subsets, specs)
 
-    fig_width = max(9.2, 0.35 * len(combined_sessions) * len(combined_subsets) + 3.6)
-    fig_height = max(4.15, 0.30 * len(combined_subjects) + 1.2, 0.135 * len(detail_rows) + 0.8)
+    fig_width = max(7.15, 0.27 * len(combined_sessions) * len(combined_subsets) + 2.75)
+    fig_height = max(3.8, 0.26 * len(combined_subjects) + 1.05, 0.112 * len(detail_rows) + 0.75)
     fig = plt.figure(figsize=(fig_width, fig_height), facecolor="white")
     grid = fig.add_gridspec(
         1,
-        len(combined_subsets) + 2,
-        width_ratios=[0.72] * len(combined_subsets) + [0.03, 1.05],
-        wspace=0.09,
+        len(combined_subsets) + 1,
+        width_ratios=[0.64] * len(combined_subsets) + [0.68],
+        wspace=0.06,
     )
 
     image = None
+    heatmap_axes: list[plt.Axes] = []
     for index, (prefix, subset) in enumerate(combined_subsets):
         ax = fig.add_subplot(grid[0, index])
+        heatmap_axes.append(ax)
         counts, _details = _compact_count_matrix(subset, combined_sessions, combined_subjects)
         image = _draw_compact_count_axis(
             ax,
@@ -1849,26 +1852,48 @@ def _write_combined_compact_burden_plot(
             show_ylabel=index == 0,
         )
         panel_title = str(specs[prefix].get("panel_title", specs[prefix]["label"]))
-        ax.set_title(panel_title, fontsize=PAPER_TITLE_FONT_SIZE - 3, pad=4.0)
+        ax.set_title(panel_title, fontsize=PAPER_TITLE_FONT_SIZE - 5, pad=2.0)
 
-    cbar_ax = None
-    if image is not None:
-        cbar_ax = fig.add_subplot(grid[0, len(combined_subsets)])
-        cbar = fig.colorbar(image, cax=cbar_ax)
-        cbar.ax.set_title("ROIs", fontsize=PAPER_CELL_COLORBAR_FONT_SIZE - 1, pad=4)
-        cbar.ax.tick_params(labelsize=PAPER_CELL_COLORBAR_FONT_SIZE - 1, width=0.6, length=2.8, pad=2)
-        cbar.set_ticks(np.arange(0, vmax + 1, dtype=int))
-        cbar.outline.set_linewidth(0.6)
-
-    detail_ax = fig.add_subplot(grid[0, len(combined_subsets) + 1])
+    detail_ax = fig.add_subplot(grid[0, len(combined_subsets)])
     _draw_compact_detail_axis(detail_ax, detail_rows)
 
-    fig.subplots_adjust(left=0.045, right=0.99, top=0.955, bottom=0.105)
-    if cbar_ax is not None:
-        cbar_pos = cbar_ax.get_position()
-        cbar_ax.set_position(
-            [cbar_pos.x0, cbar_pos.y0 + 0.22 * cbar_pos.height, cbar_pos.width, 0.55 * cbar_pos.height]
+    fig.subplots_adjust(left=0.035, right=0.965, top=0.965, bottom=0.12)
+    if image is not None and heatmap_axes:
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        first_pos = heatmap_axes[0].get_position()
+        last_pos = heatmap_axes[-1].get_position()
+        tick_bottom = min(
+            tick.get_window_extent(renderer).transformed(fig.transFigure.inverted()).y0
+            for ax in heatmap_axes
+            for tick in ax.get_xticklabels()
+            if tick.get_visible()
         )
+        xlabel = fig.text(
+            (first_pos.x0 + last_pos.x1) / 2.0,
+            max(0.06, tick_bottom - 0.045),
+            "GVS condition",
+            ha="center",
+            va="top",
+            fontsize=PAPER_AXIS_TICK_FONT_SIZE - 1,
+        )
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        xlabel_pos = xlabel.get_window_extent(renderer).transformed(fig.transFigure.inverted())
+        cbar_height = 0.026
+        cbar_ax = fig.add_axes(
+            [
+                first_pos.x0,
+                max(0.025, xlabel_pos.y0 - 0.032 - cbar_height),
+                last_pos.x1 - first_pos.x0,
+                cbar_height,
+            ]
+        )
+        cbar = fig.colorbar(image, cax=cbar_ax, orientation="horizontal")
+        cbar.ax.set_xlabel("ROIs", fontsize=PAPER_CELL_COLORBAR_FONT_SIZE - 1, labelpad=1)
+        cbar.ax.tick_params(labelsize=PAPER_CELL_COLORBAR_FONT_SIZE - 1, width=0.6, length=2.4, pad=1)
+        cbar.set_ticks(np.arange(0, vmax + 1, dtype=int))
+        cbar.outline.set_linewidth(0.6)
     pdf_path, png_path = _save_pdf_and_png(
         fig,
         plots_dir / "off_on_condition_minus_sham_subject_session_roi_burden_compact.pdf",
@@ -1958,7 +1983,7 @@ def _write_compact_burden_plot(
     specs = {
         "off_condition_minus_sham_off_roi_mean_delta": {
             "label": "OFF - sham OFF",
-            "panel_title": "Session 1 (medication off)",
+            "panel_title": "medication off",
             "color": "#2F6FAE",
             "marker": "o",
             "boxstyle": "round,pad=0.25,rounding_size=0.18",
@@ -1966,7 +1991,7 @@ def _write_compact_burden_plot(
         },
         "on_condition_minus_sham_on_roi_mean_delta": {
             "label": "ON - sham ON",
-            "panel_title": "Session 2 (medication on)",
+            "panel_title": "medication on",
             "color": "#D87924",
             "marker": "s",
             "boxstyle": "square,pad=0.25",
