@@ -13,7 +13,6 @@ import matplotlib
 warnings.filterwarnings("ignore", message="Unable to import Axes3D.*")
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
 import nibabel as nib
 import numpy as np
 import pandas as pd
@@ -31,6 +30,7 @@ DEFAULT_WEIGHT_MAP = ROOT / "data" / "voxel_weights_task1_bold0.6_beta0.6_smooth
 DEFAULT_OUT_DIR = ROOT / "figures" / "projected_RT"
 PROJECTION_TRIAL_CHUNK_SIZE = 8
 PROJECTION_VOXEL_CHUNK_SIZE = 4096
+VARIABILITY_AXIS_LABEL = "consequtive trials varaibility"
 
 BETA_RE = re.compile(
     r"cleaned_beta_volume_(?P<sub>sub-pd\d+)_ses-(?P<ses>\d+)_run-(?P<run>\d+)\.npy$"
@@ -342,14 +342,6 @@ def _build_run_metric_table(
     return pd.DataFrame(rows).sort_values(["sub_tag", "ses", "run"]).reset_index(drop=True)
 
 
-def _build_subject_color_map(values: list[str]) -> tuple[dict[str, object], list[str]]:
-    unique_values = sorted({str(value) for value in values}, key=_category_sort_key)
-    palette = list(plt.get_cmap("tab20").colors) + list(plt.get_cmap("tab20b").colors) + list(plt.get_cmap("tab20c").colors)
-    step = 11
-    spread = [palette[(idx * step) % len(palette)] for idx in range(len(palette))]
-    return {value: spread[idx % len(spread)] for idx, value in enumerate(unique_values)}, unique_values
-
-
 def _mixedlm_projection_effect(paired_df: pd.DataFrame) -> dict[str, float]:
     row = {
         "lme_coef_projection_minus_behavior": np.nan,
@@ -388,57 +380,142 @@ def _mixedlm_projection_effect(paired_df: pd.DataFrame) -> dict[str, float]:
     return row
 
 
+def _expanded_limits(values: np.ndarray, pad_fraction: float = 0.08, force_zero: bool = False) -> tuple[float, float]:
+    finite_values = np.asarray(values, dtype=np.float64)
+    finite_values = finite_values[np.isfinite(finite_values)]
+    if finite_values.size == 0:
+        return (-1.0, 1.0) if force_zero else (0.0, 1.0)
+
+    low = float(np.min(finite_values))
+    high = float(np.max(finite_values))
+    if force_zero:
+        low = min(low, 0.0)
+        high = max(high, 0.0)
+
+    if high <= low:
+        pad = 1.0 if high == 0.0 else abs(high) * pad_fraction
+    else:
+        pad = (high - low) * pad_fraction
+    return low - pad, high + pad
+
+
+def _subject_level_pairs(paired_df: pd.DataFrame) -> pd.DataFrame:
+    subject_df = (
+        paired_df.groupby("sub_tag", as_index=False)
+        .agg(
+            behavior_raw=("behavior_raw", "mean"),
+            projection_raw=("projection_raw", "mean"),
+            n_runs=("sub_tag", "size"),
+        )
+    )
+    subject_df["_sort_key"] = subject_df["sub_tag"].astype(str).map(_category_sort_key)
+    subject_df = subject_df.sort_values("_sort_key").drop(columns="_sort_key").reset_index(drop=True)
+    subject_df["projection_minus_behavior"] = subject_df["projection_raw"] - subject_df["behavior_raw"]
+    return subject_df
+
+
 def _plot_paired_box_with_connections(
     ax: plt.Axes,
-    paired_df: pd.DataFrame,
-    color_map: dict[str, object],
+    subject_df: pd.DataFrame,
     y_limits: tuple[float, float],
 ) -> None:
-    behavior_values = paired_df["behavior_raw"].to_numpy(dtype=np.float64)
-    projection_values = paired_df["projection_raw"].to_numpy(dtype=np.float64)
+    behavior_values = subject_df["behavior_raw"].to_numpy(dtype=np.float64)
+    projection_values = subject_df["projection_raw"].to_numpy(dtype=np.float64)
     box = ax.boxplot(
         [behavior_values, projection_values],
         positions=[0.0, 1.0],
-        widths=0.5,
+        widths=0.42,
         patch_artist=True,
         showfliers=False,
         showmeans=True,
-        meanprops={"marker": "D", "markerfacecolor": "black", "markeredgecolor": "black", "markersize": 4.0},
+        meanprops={"marker": "D", "markerfacecolor": "0.05", "markeredgecolor": "0.05", "markersize": 4.0},
         zorder=1,
     )
     for patch in box["boxes"]:
-        patch.set(facecolor="0.94", edgecolor="0.35", linewidth=1.15)
+        patch.set(facecolor="0.96", edgecolor="0.5", linewidth=0.85)
     for item in box["whiskers"] + box["caps"]:
-        item.set(color="0.4", linewidth=1.0)
+        item.set(color="0.55", linewidth=0.8)
     for median in box["medians"]:
-        median.set(color="0.1", linewidth=1.6)
+        median.set(color="0.1", linewidth=1.25)
 
     rng = np.random.default_rng(140)
-    jitter_base = rng.uniform(-0.12, 0.12, size=behavior_values.size)
-    x_behavior = jitter_base + rng.uniform(-0.03, 0.03, size=behavior_values.size)
-    x_projection = 1.0 + jitter_base + rng.uniform(-0.03, 0.03, size=behavior_values.size)
-    y_min, y_max = y_limits
-    for x0, x1, y0, y1, group_value in zip(
+    jitter = rng.uniform(-0.06, 0.06, size=behavior_values.size)
+    x_behavior = jitter
+    x_projection = 1.0 + jitter
+    for x0, x1, y0, y1 in zip(x_behavior, x_projection, behavior_values, projection_values):
+        ax.plot([x0, x1], [y0, y1], color="0.58", linewidth=0.75, alpha=0.45, zorder=2)
+    ax.scatter(
         x_behavior,
-        x_projection,
         behavior_values,
+        s=34,
+        color="#4C78A8",
+        alpha=0.88,
+        edgecolors="0.2",
+        linewidths=0.35,
+        zorder=3,
+    )
+    ax.scatter(
+        x_projection,
         projection_values,
-        paired_df["sub_tag"].astype(str),
-    ):
-        color = color_map[group_value]
-        y0_plot = float(np.clip(y0, y_min, y_max))
-        y1_plot = float(np.clip(y1, y_min, y_max))
-        marker0 = "^" if y0 > y_max else "v" if y0 < y_min else "o"
-        marker1 = "^" if y1 > y_max else "v" if y1 < y_min else "o"
-        ax.plot([x0, x1], [y0_plot, y1_plot], color=color, linewidth=0.85, alpha=0.28, zorder=2)
-        ax.scatter([x0], [y0_plot], s=34 if marker0 != "o" else 30, color=color, alpha=0.9, edgecolors="0.15", linewidths=0.3, marker=marker0, zorder=3)
-        ax.scatter([x1], [y1_plot], s=34 if marker1 != "o" else 30, color=color, alpha=0.9, edgecolors="0.15", linewidths=0.3, marker=marker1, zorder=3)
+        s=34,
+        color="#D55E00",
+        alpha=0.88,
+        edgecolors="0.2",
+        linewidths=0.35,
+        zorder=3,
+    )
 
     ax.set_xlim(-0.45, 1.45)
-    ax.axhline(0.0, color="0.55", linestyle=":", linewidth=0.9, zorder=0)
+    ax.set_ylim(y_limits)
     ax.set_xticks([0.0, 1.0])
     ax.set_xticklabels(["Behaviour", "Projection"])
-    ax.grid(axis="y", linestyle=":", linewidth=0.8, alpha=0.5)
+    ax.set_ylabel(VARIABILITY_AXIS_LABEL)
+    ax.grid(axis="y", linestyle=":", linewidth=0.7, alpha=0.35)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+
+def _plot_projection_minus_behavior(ax: plt.Axes, subject_df: pd.DataFrame) -> None:
+    differences = subject_df["projection_minus_behavior"].to_numpy(dtype=np.float64)
+    box = ax.boxplot(
+        [differences],
+        positions=[0.0],
+        widths=0.42,
+        patch_artist=True,
+        showfliers=False,
+        showmeans=True,
+        meanprops={"marker": "D", "markerfacecolor": "0.05", "markeredgecolor": "0.05", "markersize": 4.0},
+        zorder=1,
+    )
+    for patch in box["boxes"]:
+        patch.set(facecolor="0.96", edgecolor="0.5", linewidth=0.85)
+    for item in box["whiskers"] + box["caps"]:
+        item.set(color="0.55", linewidth=0.8)
+    for median in box["medians"]:
+        median.set(color="0.1", linewidth=1.25)
+
+    rng = np.random.default_rng(141)
+    x = rng.uniform(-0.07, 0.07, size=differences.size)
+    colors = np.where(differences < 0.0, "#4C78A8", "#D55E00")
+    ax.scatter(
+        x,
+        differences,
+        s=34,
+        color=colors,
+        alpha=0.88,
+        edgecolors="0.2",
+        linewidths=0.35,
+        zorder=3,
+    )
+    ax.axhline(0.0, color="0.2", linestyle="--", linewidth=0.9, zorder=0)
+    ax.set_xlim(-0.45, 0.45)
+    ax.set_ylim(_expanded_limits(differences, force_zero=True))
+    ax.set_xticks([0.0])
+    ax.set_xticklabels(["Difference"])
+    ax.set_ylabel("Projection - Behaviour")
+    ax.grid(axis="y", linestyle=":", linewidth=0.7, alpha=0.35)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
 
 
 def _save_pdf_and_png(fig: plt.Figure, pdf_path: Path, dpi: int) -> tuple[Path, Path]:
@@ -458,57 +535,33 @@ def _save_behavior_projection_figure(metric_df: pd.DataFrame, out_dir: Path) -> 
 
     paired_df["projection_raw"] = paired_df[projection_col].to_numpy(dtype=np.float64)
     paired_df["behavior_raw"] = paired_df[behavior_col].to_numpy(dtype=np.float64)
+    subject_df = _subject_level_pairs(paired_df)
     finite_values = np.concatenate(
-        [paired_df["behavior_raw"].to_numpy(dtype=np.float64), paired_df["projection_raw"].to_numpy(dtype=np.float64)]
+        [subject_df["behavior_raw"].to_numpy(dtype=np.float64), subject_df["projection_raw"].to_numpy(dtype=np.float64)]
     )
-    q_low, q_high = np.percentile(finite_values[np.isfinite(finite_values)], [2.0, 98.0])
-    pad = 0.18 * (q_high - q_low) if q_high > q_low else 0.55
-    y_limits = (float(q_low - pad), float(q_high + pad))
-    color_map, category_values = _build_subject_color_map(paired_df["sub_tag"].astype(str).tolist())
+    y_limits = _expanded_limits(finite_values)
     lme = _mixedlm_projection_effect(paired_df)
 
-    fig, ax = plt.subplots(figsize=(9.2, 4.8))
-    _plot_paired_box_with_connections(ax, paired_df, color_map, y_limits)
-    ax.set_ylim(y_limits)
-    ax.set_ylabel("Variability")
     if np.isfinite(lme["lme_p_two_sided"]) and np.isfinite(lme["lme_z_projection_minus_behavior"]):
         lme_text = (
-            "LME (Projection-Behaviour)\n"
-            f"p={lme['lme_p_two_sided']:.3g}, "
+            "Run-level LME (Projection - Behaviour): "
+            f"beta={lme['lme_coef_projection_minus_behavior']:.3g}, "
             f"z={lme['lme_z_projection_minus_behavior']:.3g}, "
-            f"beta={lme['lme_coef_projection_minus_behavior']:.3g}"
+            f"p={lme['lme_p_two_sided']:.3g}"
         )
     else:
-        lme_text = "LME (Projection-Behaviour)\nfit unavailable"
-    ax.text(
-        0.70,
-        0.98,
-        lme_text,
-        transform=ax.transAxes,
-        ha="center",
-        va="top",
-        fontsize=8.3,
-        bbox={"boxstyle": "round,pad=0.22", "facecolor": "white", "alpha": 0.8, "edgecolor": "0.75"},
+        lme_text = "Run-level LME (Projection - Behaviour): fit unavailable"
+
+    fig, axes = plt.subplots(
+        1,
+        2,
+        figsize=(7.2, 4.4),
+        gridspec_kw={"width_ratios": [1.75, 1.0], "wspace": 0.42},
     )
-    handles = [
-        Line2D([0], [0], marker="o", linestyle="", markerfacecolor=color_map[value], markeredgecolor="0.25", markersize=5.5, label=str(value))
-        for value in category_values
-    ]
-    ax.legend(
-        handles=handles,
-        title="Subject",
-        loc="center left",
-        bbox_to_anchor=(1.02, 0.42),
-        fontsize=7.5,
-        title_fontsize=8.5,
-        frameon=True,
-        ncol=2,
-        borderaxespad=0.4,
-        handletextpad=0.35,
-        columnspacing=0.8,
-        labelspacing=0.25,
-    )
-    fig.tight_layout(rect=(0.0, 0.0, 0.74, 1.0))
+    _plot_paired_box_with_connections(axes[0], subject_df, y_limits)
+    _plot_projection_minus_behavior(axes[1], subject_df)
+    fig.suptitle(lme_text, fontsize=10.5, y=0.98)
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.93))
     paths = _save_pdf_and_png(fig, out_dir / "projection_behavior_subject_panel(main).pdf", dpi=220)
     plt.close(fig)
     return paths

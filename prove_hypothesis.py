@@ -506,11 +506,17 @@ def _plot_norm_diff_figure(
             markersize=5.8,
             linewidth=2.2,
         )
-        axes[0].axhline(1.0, color=reference_color, linestyle="--", linewidth=1.4)
+        axes[0].axhline(
+            1.0,
+            color=reference_color,
+            linestyle="--",
+            linewidth=1.4,
+            label="Equal fractions",
+        )
         axes[0].set_xticks(percentiles)
         axes[0].set_xticklabels([f"{int(p)}%" for p in percentiles])
         axes[0].set_xlabel("Variability percentile threshold")
-        axes[0].set_ylabel("Below-threshold fraction ratio")
+        axes[0].set_ylabel("Low-variability enrichment")
         finite_ratios = ratios[np.isfinite(ratios)]
         if finite_ratios.size:
             ratio_min = min(1.0, float(np.min(finite_ratios)))
@@ -520,6 +526,7 @@ def _plot_norm_diff_figure(
         else:
             axes[0].set_ylim(0.95, 1.1)
         axes[0].set_xlim(5.0, 95.0)
+        axes[0].legend(frameon=False, fontsize=12, loc="lower left")
         _style_axis(axes[0])
 
         bins = min(40, max(16, int(np.sqrt(resampled_means.size))))
@@ -535,7 +542,7 @@ def _plot_norm_diff_figure(
         )
         axes[1].axvline(selected_mean, color=selected_color, linestyle="--", linewidth=1.8)
         axes[1].axvline(resample_mean, color=reference_color, linestyle="--", linewidth=1.5)
-        axes[1].set_xlabel("Normalized |consecutive-trial beta difference|")
+        axes[1].set_xlabel("Consecutive trial variability")
         axes[1].set_ylabel("Density")
         axes[1].set_xlim(
             min(selected_mean, float(np.min(resampled_means))) - 0.07,
@@ -557,7 +564,7 @@ def _plot_norm_diff_figure(
             bbox=label_box,
         )
         axes[1].annotate(
-            f"Resample mean = {resample_mean:.2f}",
+            f"Control-resample mean = {resample_mean:.2f}",
             xy=(resample_mean, 0.84),
             xycoords=axes[1].get_xaxis_transform(),
             xytext=(6, 0),
