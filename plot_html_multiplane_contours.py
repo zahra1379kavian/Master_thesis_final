@@ -192,10 +192,16 @@ for row, (mode, plane_label) in enumerate(plane_specs):
         ax.imshow(anat(a), interpolation="nearest")
         overlay(ax, label_slice, m)
         height, width = a.shape[:2]
-        ax.text(width / 2, height + 5, f"{mode} = {cut:g}", ha="center", va="top", fontsize=13, color="0.2", clip_on=False)
+        brain_y, brain_x = np.where(binary_fill_holes(a > 0))
+        ax.set_xlim(-0.5, width - 0.5)
+        ax.set_ylim(height + 17, brain_y.min() - 12 if row == 0 else -0.5)
+        label_x = (brain_x.min() + brain_x.max()) / 2
+        label_y = brain_y.max() + 8
+        ax.text(label_x, label_y, f"{mode} = {cut:g}", ha="center", va="top", fontsize=13, color="0.2")
         if row == 0:
-            ax.text(width * 0.12, -4, "L", ha="center", va="bottom", fontsize=13, color="0.15", clip_on=False)
-            ax.text(width * 0.88, -4, "R", ha="center", va="bottom", fontsize=13, color="0.15", clip_on=False)
+            orient_y = brain_y.min() + 1
+            ax.text(brain_x.min() + 2, orient_y, "L", ha="center", va="bottom", fontsize=13, color="0.15")
+            ax.text(brain_x.max() - 2, orient_y, "R", ha="center", va="bottom", fontsize=13, color="0.15")
         ax.set_axis_off()
 legend = [
     Patch(facecolor=region_colors[name], edgecolor="0.2", alpha=0.90, label=name)

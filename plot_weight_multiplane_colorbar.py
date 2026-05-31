@@ -226,6 +226,30 @@ def main():
             )
             ax.imshow(anatomical_rgba(bg_slice, max_intensity), interpolation="nearest")
             draw_overlay(ax, weight_slice, mask_slice, cmap, norm)
+            if row == 0:
+                height, width = bg_slice.shape[:2]
+                brain_y, _ = np.where(binary_fill_holes(bg_slice > 0))
+                label_y = max(float(brain_y.min()) - 2.5, -1.0) if brain_y.size else 0.0
+                ax.text(
+                    width * 0.14,
+                    label_y,
+                    "L",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8.5,
+                    color="0.15",
+                    clip_on=False,
+                )
+                ax.text(
+                    width * 0.86,
+                    label_y,
+                    "R",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8.5,
+                    color="0.15",
+                    clip_on=False,
+                )
             ax.text(
                 0.5,
                 -0.055,

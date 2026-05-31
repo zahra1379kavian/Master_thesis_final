@@ -67,7 +67,7 @@ BRAINSTEM_MNI_BOUNDS_MM = {
     "z_max": 10.0,
 }
 MOTOR_CONTOUR_ROIS = ("Precentral", "Supp_Motor_Area", "Paracentral_Lobule", "Postcentral")
-MOTOR_OVERLAP_DISPLAY_DILATION_VOXELS = 3
+MOTOR_OVERLAP_DISPLAY_DILATION_VOXELS = 1
 MIXED_LOG_FINAL_CANDIDATE_KEYS = {
     (0.0, 0.0, 0.0, 0.0, 1.5),
     (1.0, 0.0, 0.0, 0.0, 1.5),
