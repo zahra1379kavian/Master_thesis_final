@@ -1552,6 +1552,13 @@ def _session_number_labels(sessions: list[str]) -> list[str]:
     return [re.sub(r"(?i)^GVS", "", str(session)) for session in sessions]
 
 
+def _subject_short_label(subject: str) -> str:
+    match = re.match(r"^sub-pd0*(?P<number>\d+)$", str(subject))
+    if match is None:
+        return str(subject)
+    return f"sub{int(match.group('number')):02d}"
+
+
 def _draw_labeled_burden_axis(
     ax: plt.Axes,
     subset: pd.DataFrame,
@@ -1694,16 +1701,19 @@ def _draw_compact_count_axis(
 ) -> Any:
     image = ax.imshow(counts, cmap=cmap, norm=norm, aspect="equal")
     ax.set_xticks(np.arange(len(sessions)))
-    ax.set_xticklabels(_session_number_labels(sessions), fontsize=PAPER_AXIS_TICK_FONT_SIZE)
+    ax.set_xticklabels(_session_number_labels(sessions), fontsize=PAPER_AXIS_TICK_FONT_SIZE - 1)
     ax.set_yticks(np.arange(len(subjects)))
-    ax.set_yticklabels(subjects if show_ylabel else [], fontsize=PAPER_AXIS_TICK_FONT_SIZE)
+    ax.set_yticklabels(
+        [_subject_short_label(subject) for subject in subjects] if show_ylabel else [],
+        fontsize=PAPER_AXIS_TICK_FONT_SIZE - 1,
+    )
     ax.set_xticks(np.arange(-0.5, len(sessions), 1), minor=True)
     ax.set_yticks(np.arange(-0.5, len(subjects), 1), minor=True)
     ax.grid(which="minor", color="#FFFFFF", linewidth=1.0)
     ax.tick_params(which="minor", bottom=False, left=False)
     ax.tick_params(axis="both", which="major", length=0, pad=4)
-    ax.set_xlabel("GVS condition", fontsize=PAPER_AXIS_TICK_FONT_SIZE)
-    ax.set_ylabel("Subject" if show_ylabel else "", fontsize=PAPER_AXIS_TICK_FONT_SIZE)
+    ax.set_xlabel("GVS condition", fontsize=PAPER_AXIS_TICK_FONT_SIZE - 1)
+    ax.set_ylabel("Subject" if show_ylabel else "", fontsize=PAPER_AXIS_TICK_FONT_SIZE - 1)
     for spine in ax.spines.values():
         spine.set_linewidth(0.7)
         spine.set_color("#666666")
@@ -1746,7 +1756,7 @@ def _detail_rows_for_compact_burden(
             labels = ", ".join(
                 _roi_full_names_combined(_split_roi_labels(getattr(row, "shown_roi_labels", "")))
             )
-            rows.append(("body", f"{row.subject} {row.target_condition_label}: {labels}"))
+            rows.append(("body", f"{_subject_short_label(row.subject)} {row.target_condition_label}: {labels}"))
     return rows
 
 
@@ -1769,7 +1779,7 @@ def _draw_compact_detail_axis(
                 transform=ax.transAxes,
                 ha="left",
                 va="top",
-                fontsize=PAPER_FOOTER_FONT_SIZE,
+                fontsize=PAPER_FOOTER_FONT_SIZE - 1,
                 fontweight="bold",
                 color="#111111",
             )
@@ -1781,7 +1791,7 @@ def _draw_compact_detail_axis(
                 transform=ax.transAxes,
                 ha="left",
                 va="top",
-                fontsize=PAPER_FOOTER_FONT_SIZE,
+                fontsize=PAPER_FOOTER_FONT_SIZE - 1,
                 color="#222222",
             )
         y -= step
@@ -1815,14 +1825,14 @@ def _write_combined_compact_burden_plot(
     norm = colors.BoundaryNorm(boundaries, cmap.N)
     detail_rows = _detail_rows_for_compact_burden(combined_subsets, specs)
 
-    fig_width = max(10.8, 0.45 * len(combined_sessions) * len(combined_subsets) + 3.6)
-    fig_height = max(4.8, 0.35 * len(combined_subjects) + 1.5, 0.155 * len(detail_rows) + 0.9)
+    fig_width = max(9.2, 0.35 * len(combined_sessions) * len(combined_subsets) + 3.6)
+    fig_height = max(4.15, 0.30 * len(combined_subjects) + 1.2, 0.135 * len(detail_rows) + 0.8)
     fig = plt.figure(figsize=(fig_width, fig_height), facecolor="white")
     grid = fig.add_gridspec(
         1,
         len(combined_subsets) + 2,
-        width_ratios=[0.78] * len(combined_subsets) + [0.035, 1.0],
-        wspace=0.13,
+        width_ratios=[0.72] * len(combined_subsets) + [0.03, 1.05],
+        wspace=0.09,
     )
 
     image = None
@@ -1839,19 +1849,26 @@ def _write_combined_compact_burden_plot(
             show_ylabel=index == 0,
         )
         panel_title = str(specs[prefix].get("panel_title", specs[prefix]["label"]))
-        ax.set_title(panel_title, fontsize=PAPER_TITLE_FONT_SIZE, pad=11.0)
+        ax.set_title(panel_title, fontsize=PAPER_TITLE_FONT_SIZE - 3, pad=4.0)
 
+    cbar_ax = None
     if image is not None:
-        cbar = fig.colorbar(image, cax=fig.add_subplot(grid[0, len(combined_subsets)]))
-        cbar.ax.set_title("No. ROIs", fontsize=PAPER_CELL_COLORBAR_FONT_SIZE, pad=7)
-        cbar.ax.tick_params(labelsize=PAPER_CELL_COLORBAR_FONT_SIZE, width=0.6, length=2.8, pad=2)
+        cbar_ax = fig.add_subplot(grid[0, len(combined_subsets)])
+        cbar = fig.colorbar(image, cax=cbar_ax)
+        cbar.ax.set_title("ROIs", fontsize=PAPER_CELL_COLORBAR_FONT_SIZE - 1, pad=4)
+        cbar.ax.tick_params(labelsize=PAPER_CELL_COLORBAR_FONT_SIZE - 1, width=0.6, length=2.8, pad=2)
         cbar.set_ticks(np.arange(0, vmax + 1, dtype=int))
         cbar.outline.set_linewidth(0.6)
 
     detail_ax = fig.add_subplot(grid[0, len(combined_subsets) + 1])
     _draw_compact_detail_axis(detail_ax, detail_rows)
 
-    fig.subplots_adjust(left=0.06, right=0.985, top=0.91, bottom=0.10)
+    fig.subplots_adjust(left=0.045, right=0.99, top=0.955, bottom=0.105)
+    if cbar_ax is not None:
+        cbar_pos = cbar_ax.get_position()
+        cbar_ax.set_position(
+            [cbar_pos.x0, cbar_pos.y0 + 0.22 * cbar_pos.height, cbar_pos.width, 0.55 * cbar_pos.height]
+        )
     pdf_path, png_path = _save_pdf_and_png(
         fig,
         plots_dir / "off_on_condition_minus_sham_subject_session_roi_burden_compact.pdf",
