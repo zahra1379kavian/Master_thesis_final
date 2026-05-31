@@ -31,7 +31,12 @@ DEFAULT_WEIGHT_MAP = ROOT / "data" / "voxel_weights_task1_bold0.6_beta0.6_smooth
 DEFAULT_OUT_DIR = ROOT / "figures" / "projected_RT"
 PROJECTION_TRIAL_CHUNK_SIZE = 8
 PROJECTION_VOXEL_CHUNK_SIZE = 4096
-VARIABILITY_AXIS_LABEL = "consequtive trials varaibility"
+VARIABILITY_AXIS_LABEL = "Consecutive-trial variability"
+BEHAVIOUR_COLOR = "#3B7EA1"
+PROJECTION_COLOR = "#B36B3C"
+DIFFERENCE_COLOR = "#6E5A9A"
+SUBJECT_MARKER_SIZE = 22
+MEAN_MARKER = "^"
 
 BETA_RE = re.compile(
     r"cleaned_beta_volume_(?P<sub>sub-pd\d+)_ses-(?P<ses>\d+)_run-(?P<run>\d+)\.npy$"
@@ -415,16 +420,9 @@ def _subject_level_pairs(paired_df: pd.DataFrame) -> pd.DataFrame:
     return subject_df
 
 
-def _build_subject_color_map(values: pd.Series) -> dict[str, object]:
-    subjects = sorted({str(value) for value in values}, key=_category_sort_key)
-    palette = list(plt.get_cmap("tab20").colors)
-    return {subject: palette[idx % len(palette)] for idx, subject in enumerate(subjects)}
-
-
 def _plot_paired_box_with_connections(
     ax: plt.Axes,
     subject_df: pd.DataFrame,
-    color_map: dict[str, object],
     y_limits: tuple[float, float],
 ) -> None:
     behavior_values = subject_df["behavior_raw"].to_numpy(dtype=np.float64)
@@ -436,68 +434,67 @@ def _plot_paired_box_with_connections(
         patch_artist=True,
         showfliers=False,
         showmeans=True,
-        meanprops={"marker": "D", "markerfacecolor": "0.05", "markeredgecolor": "0.05", "markersize": 4.0},
+        meanprops={"marker": MEAN_MARKER, "markerfacecolor": "0.05", "markeredgecolor": "0.05", "markersize": 4.2},
+        medianprops={"color": "0.05", "linewidth": 1.15},
         zorder=1,
     )
-    for patch in box["boxes"]:
-        patch.set(facecolor="0.96", edgecolor="0.5", linewidth=0.85)
+    for patch, color in zip(box["boxes"], [BEHAVIOUR_COLOR, PROJECTION_COLOR]):
+        patch.set(facecolor=color, edgecolor=color, linewidth=1.0, alpha=0.16)
     for item in box["whiskers"] + box["caps"]:
-        item.set(color="0.55", linewidth=0.8)
-    for median in box["medians"]:
-        median.set(color="0.1", linewidth=1.25)
+        item.set(color="0.42", linewidth=0.85)
 
     rng = np.random.default_rng(140)
-    jitter = rng.uniform(-0.06, 0.06, size=behavior_values.size)
+    jitter = rng.uniform(-0.045, 0.045, size=behavior_values.size)
     x_behavior = jitter
     x_projection = 1.0 + jitter
-    for x0, x1, y0, y1, sub in zip(
+    for x0, x1, y0, y1 in zip(x_behavior, x_projection, behavior_values, projection_values):
+        ax.plot([x0, x1], [y0, y1], color="0.62", linewidth=0.65, alpha=0.42, zorder=2)
+    ax.scatter(
         x_behavior,
-        x_projection,
         behavior_values,
+        s=SUBJECT_MARKER_SIZE,
+        facecolors="0.05",
+        edgecolors="0.05",
+        linewidths=0.4,
+        alpha=0.95,
+        zorder=3,
+    )
+    ax.scatter(
+        x_projection,
         projection_values,
-        subject_df["sub_tag"].astype(str),
-    ):
-        color = color_map[sub]
-        ax.plot([x0, x1], [y0, y1], color=color, linewidth=0.75, alpha=0.32, zorder=2)
-        ax.scatter(
-            [x0, x1],
-            [y0, y1],
-            s=34,
-            color=color,
-            alpha=0.88,
-            edgecolors="0.2",
-            linewidths=0.35,
-            zorder=3,
-        )
+        s=SUBJECT_MARKER_SIZE,
+        facecolors="0.05",
+        edgecolors="0.05",
+        linewidths=0.4,
+        alpha=0.95,
+        zorder=3,
+    )
 
     ax.set_xlim(-0.45, 1.45)
     ax.set_ylim(y_limits)
     ax.set_xticks([0.0, 1.0])
     ax.set_xticklabels(["Behaviour", "Projection"])
     ax.set_ylabel(VARIABILITY_AXIS_LABEL)
-    ax.grid(axis="y", linestyle=":", linewidth=0.7, alpha=0.35)
+    ax.grid(axis="y", linestyle="-", linewidth=0.45, alpha=0.18)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    sample_color = next(iter(color_map.values()), "0.45")
+    ax.spines["left"].set_color("0.25")
+    ax.spines["bottom"].set_color("0.25")
     ax.legend(
         handles=[
-            Line2D([0, 1], [0, 0], color=sample_color, marker="o", linewidth=0.75, alpha=0.75, markersize=4.0, label="Subject color"),
-            Line2D([0], [0], marker="D", color="0.05", linestyle="", markersize=4.0, label="Mean"),
+            Line2D([0], [0], marker="o", color="0.05", linestyle="", markersize=3.4, label="Subject"),
+            Line2D([0], [0], marker=MEAN_MARKER, color="0.05", linestyle="", markersize=4.0, label="Mean"),
         ],
         loc="lower left",
-        fontsize=7.0,
         frameon=False,
-        handlelength=1.5,
-        borderpad=0.2,
-        labelspacing=0.25,
+        fontsize=6.6,
+        handlelength=1.0,
+        borderpad=0.1,
+        labelspacing=0.2,
     )
 
 
-def _plot_projection_minus_behavior(
-    ax: plt.Axes,
-    subject_df: pd.DataFrame,
-    color_map: dict[str, object],
-) -> None:
+def _plot_projection_minus_behavior(ax: plt.Axes, subject_df: pd.DataFrame) -> None:
     differences = subject_df["projection_minus_behavior"].to_numpy(dtype=np.float64)
     box = ax.boxplot(
         [differences],
@@ -506,59 +503,58 @@ def _plot_projection_minus_behavior(
         patch_artist=True,
         showfliers=False,
         showmeans=True,
-        meanprops={"marker": "D", "markerfacecolor": "0.05", "markeredgecolor": "0.05", "markersize": 4.0},
+        meanprops={"marker": MEAN_MARKER, "markerfacecolor": "0.05", "markeredgecolor": "0.05", "markersize": 4.2},
+        medianprops={"color": "0.05", "linewidth": 1.15},
         zorder=1,
     )
     for patch in box["boxes"]:
-        patch.set(facecolor="0.96", edgecolor="0.5", linewidth=0.85)
+        patch.set(facecolor=DIFFERENCE_COLOR, edgecolor=DIFFERENCE_COLOR, linewidth=1.0, alpha=0.16)
     for item in box["whiskers"] + box["caps"]:
-        item.set(color="0.55", linewidth=0.8)
-    for median in box["medians"]:
-        median.set(color="0.1", linewidth=1.25)
+        item.set(color="0.42", linewidth=0.85)
 
     rng = np.random.default_rng(141)
-    x = rng.uniform(-0.07, 0.07, size=differences.size)
-    colors = [color_map[sub] for sub in subject_df["sub_tag"].astype(str)]
+    x = rng.uniform(-0.055, 0.055, size=differences.size)
     ax.scatter(
         x,
         differences,
-        s=34,
-        color=colors,
-        alpha=0.88,
-        edgecolors="0.2",
-        linewidths=0.35,
+        s=SUBJECT_MARKER_SIZE,
+        facecolors="0.05",
+        alpha=0.95,
+        edgecolors="0.05",
+        linewidths=0.4,
         zorder=3,
     )
-    ax.axhline(0.0, color="0.2", linestyle="--", linewidth=0.9, zorder=0)
+    ax.axhline(0.0, color="0.30", linestyle=(0, (4, 2)), linewidth=0.9, zorder=0)
     ax.set_xlim(-0.45, 0.45)
     ax.set_ylim(_expanded_limits(differences, force_zero=True))
     ax.set_xticks([0.0])
     ax.set_xticklabels(["Difference"])
-    ax.set_ylabel("projection-behaviour varaibility")
-    ax.grid(axis="y", linestyle=":", linewidth=0.7, alpha=0.35)
+    ax.set_ylabel("Projection - behaviour variability")
+    ax.grid(axis="y", linestyle="-", linewidth=0.45, alpha=0.18)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    sample_color = next(iter(color_map.values()), "0.45")
+    ax.spines["left"].set_color("0.25")
+    ax.spines["bottom"].set_color("0.25")
     ax.legend(
         handles=[
-            Line2D([0], [0], marker="o", color=sample_color, linestyle="", markersize=4.5, label="Subject color"),
-            Line2D([0], [0], marker="D", color="0.05", linestyle="", markersize=4.0, label="Mean"),
-            Line2D([0, 1], [0, 0], color="0.2", linestyle="--", linewidth=0.9, label="Zero"),
+            Line2D([0], [0], marker="o", color="0.05", linestyle="", markersize=3.4, label="Subject"),
+            Line2D([0], [0], marker=MEAN_MARKER, color="0.05", linestyle="", markersize=4.0, label="Mean"),
+            Line2D([0, 1], [0, 0], color="0.30", linestyle=(0, (4, 2)), linewidth=0.9, label="Zero"),
         ],
         loc="lower left",
-        fontsize=7.0,
         frameon=False,
+        fontsize=6.6,
         handlelength=1.5,
-        borderpad=0.2,
-        labelspacing=0.25,
+        borderpad=0.1,
+        labelspacing=0.2,
     )
 
 
 def _save_pdf_and_png(fig: plt.Figure, pdf_path: Path, dpi: int) -> tuple[Path, Path]:
     pdf_path.parent.mkdir(parents=True, exist_ok=True)
     png_path = pdf_path.with_suffix(".png")
-    fig.savefig(pdf_path, bbox_inches="tight")
-    fig.savefig(png_path, dpi=dpi, bbox_inches="tight")
+    fig.savefig(pdf_path, bbox_inches="tight", pad_inches=0.02)
+    fig.savefig(png_path, dpi=dpi, bbox_inches="tight", pad_inches=0.02)
     return pdf_path, png_path
 
 
@@ -576,20 +572,32 @@ def _save_behavior_projection_figure(metric_df: pd.DataFrame, out_dir: Path) -> 
         [subject_df["behavior_raw"].to_numpy(dtype=np.float64), subject_df["projection_raw"].to_numpy(dtype=np.float64)]
     )
     y_limits = _expanded_limits(finite_values)
-    color_map = _build_subject_color_map(subject_df["sub_tag"])
 
-    fig, axes = plt.subplots(
-        1,
-        2,
-        figsize=(7.2, 4.4),
-        gridspec_kw={"width_ratios": [1.75, 1.0], "wspace": 0.42},
-    )
-    _plot_paired_box_with_connections(axes[0], subject_df, color_map, y_limits)
-    _plot_projection_minus_behavior(axes[1], subject_df, color_map)
-    fig.subplots_adjust(left=0.09, right=0.98, bottom=0.14, top=0.94, wspace=0.42)
-    paths = _save_pdf_and_png(fig, out_dir / "projection_behavior_subject_panel(main).pdf", dpi=220)
-    plt.close(fig)
-    return paths
+    with plt.rc_context(
+        {
+            "font.size": 8.0,
+            "axes.labelsize": 9.0,
+            "xtick.labelsize": 8.6,
+            "ytick.labelsize": 8.6,
+            "axes.linewidth": 0.8,
+            "pdf.fonttype": 42,
+            "ps.fonttype": 42,
+        }
+    ):
+        fig, axes = plt.subplots(
+            1,
+            2,
+            figsize=(6.2, 3.6),
+            gridspec_kw={"width_ratios": [1.65, 1.0], "wspace": 0.40},
+        )
+        _plot_paired_box_with_connections(axes[0], subject_df, y_limits)
+        _plot_projection_minus_behavior(axes[1], subject_df)
+        axes[0].text(0.01, 0.98, "A", transform=axes[0].transAxes, fontweight="bold", fontsize=10.0, va="top")
+        axes[1].text(0.01, 0.98, "B", transform=axes[1].transAxes, fontweight="bold", fontsize=10.0, va="top")
+        fig.subplots_adjust(left=0.10, right=0.98, bottom=0.15, top=0.995, wspace=0.40)
+        paths = _save_pdf_and_png(fig, out_dir / "projection_behavior_subject_panel(main).pdf", dpi=300)
+        plt.close(fig)
+        return paths
 
 
 def main() -> None:
