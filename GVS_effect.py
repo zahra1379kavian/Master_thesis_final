@@ -18,7 +18,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib import ticker
+from matplotlib import colors, ticker
 import nibabel as nib
 import numpy as np
 import pandas as pd
@@ -52,6 +52,12 @@ DEFAULT_ROI_PERCENTILE = 90.0
 DEFAULT_PROJECTED_SIGNAL_WEIGHT_PERCENTILE = 90.0
 DEFAULT_TRIALS_PER_CONDITION = 10
 DEFAULT_ALPHA = 0.05
+PAPER_FONT_FAMILY = "Liberation Sans"
+PAPER_TITLE_FONT_SIZE = 18
+PAPER_TAKEAWAY_FONT_SIZE = 13
+PAPER_AXIS_TICK_FONT_SIZE = 13
+PAPER_CELL_COLORBAR_FONT_SIZE = 12
+PAPER_FOOTER_FONT_SIZE = 11
 PROJECTED_SIGNAL_MED_COLORS = {"OFF": "#2F6FAE", "ON": "#D87924"}
 PROJECTED_SIGNAL_STIM_SHORT = {
     1: "Sham",
@@ -827,7 +833,7 @@ def _write_motor_reward_roi_profile_plot(
         "basal_ganglia_thalamus": "Basal Ganglia\n& Thalamus",
         "reward_limbic": "Reward\n& Limbic",
     }
-    stim_labels = [ROI_PROFILE_STIM_SHORT[c].replace("\n", " ") for c in ROI_PROFILE_ACTIVE_LABELS]
+    stim_labels = list(ROI_PROFILE_ACTIVE_LABELS)
 
     # Build ordered list of unique base ROI names (strip _L / _R suffix)
     present_base_names: list[str] = []
@@ -850,17 +856,17 @@ def _write_motor_reward_roi_profile_plot(
     ]
     x_values = np.arange(len(ROI_PROFILE_ACTIVE_LABELS))
 
-    y_limits_by_group: dict[str, float] = {}
-    for group in sorted(set(roi_to_group.values())):
-        group_rois = [roi for roi in plot_rois if roi_to_group.get(roi) == group]
-        group_rows = results.loc[results["roi"].isin(group_rois)]
-        if group_rows.empty:
+    y_limits_by_row: dict[str, float] = {}
+    for base_name in present_base_names:
+        row_rois = [f"{base_name}_{hemi}" for hemi in COL_CONFIG if f"{base_name}_{hemi}" in rois]
+        row_results = results.loc[results["roi"].isin(row_rois)]
+        if row_results.empty:
             continue
-        ci95 = 1.96 * group_rows["se_delta"].fillna(0.0).to_numpy(dtype=np.float64)
-        means = group_rows["mean_delta"].to_numpy(dtype=np.float64)
+        ci95 = 1.96 * row_results["se_delta"].fillna(0.0).to_numpy(dtype=np.float64)
+        means = row_results["mean_delta"].to_numpy(dtype=np.float64)
         finite = np.concatenate([means - ci95, means + ci95])
         finite = finite[np.isfinite(finite)]
-        y_limits_by_group[group] = max(float(np.max(np.abs(finite))) * 1.12, 0.05) if finite.size else 0.05
+        y_limits_by_row[base_name] = max(float(np.max(np.abs(finite))) * 1.12, 0.05) if finite.size else 0.05
 
     with plt.rc_context({
         "font.family": "sans-serif",
@@ -943,8 +949,11 @@ def _write_motor_reward_roi_profile_plot(
                 if col_idx == 0:
                     ax.set_ylabel(base_name.replace("_", " "), fontsize=8.5, labelpad=3)
 
-                y_limit = y_limits_by_group.get(group, 0.05)
+                y_limit = y_limits_by_row.get(base_name, 0.05)
                 ax.set_ylim(-y_limit, y_limit)
+                ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.2f"))
+                for tick_label in ax.get_yticklabels():
+                    tick_label.set_horizontalalignment("right")
                 star_off = 0.06 * y_limit
 
                 for med_idx, (_, subset) in enumerate(med_subsets):
@@ -956,14 +965,13 @@ def _write_motor_reward_roi_profile_plot(
                         se = float(row["se_delta"]) if pd.notna(row["se_delta"]) else 0.0
                         sign = 1.0 if y_base >= 0 else -1.0
                         y_star = y_base + sign * (1.96 * se + star_off)
-                        y_star = np.clip(y_star, -0.94 * y_limit, 0.94 * y_limit)
+                        y_star = np.clip(y_star, -0.90 * y_limit, 0.84 * y_limit)
                         ax.text(
                             x_val + offsets[med_idx], y_star, lbl,
                             ha="center", va="bottom" if sign > 0 else "top",
                             fontsize=8.2, color="#c0392b", fontweight="bold",
                         )
 
-                ax.grid(axis="y", alpha=0.25, linestyle="--", linewidth=0.45, zorder=0)
                 for spine in ("top", "right"):
                     ax.spines[spine].set_visible(False)
                 for spine in ("bottom", "left"):
@@ -981,7 +989,7 @@ def _write_motor_reward_roi_profile_plot(
 
             prev_group = group
 
-        fig.tight_layout(rect=(0.02, 0, 0.87, 0.93), h_pad=0.35, w_pad=0.55)
+        fig.tight_layout(rect=(0.02, 0, 0.94, 0.93), h_pad=0.35, w_pad=0.55)
 
         # Column headers placed in figure coordinates (no set_title clash).
         axes_top = axes[0][0].get_position().y1
@@ -1026,19 +1034,19 @@ def _write_motor_reward_roi_profile_plot(
             matplotlib.lines.Line2D(
                 [],
                 [],
-                marker="*",
+                marker="$*$",
                 linestyle="none",
                 color="#c0392b",
-                markersize=7,
+                markersize=8,
                 label="p<0.05",
             )
         )
         fig.legend(
             handles,
             [handle.get_label() for handle in handles],
-            loc="upper right", bbox_to_anchor=(0.985, 0.965),
-            ncol=1, frameon=False, fontsize=7.3,
-            borderaxespad=0.0, handletextpad=0.7, labelspacing=0.55,
+            loc="upper right", bbox_to_anchor=(0.965, 0.99),
+            ncol=4, frameon=False, fontsize=7.1,
+            borderaxespad=0.0, handletextpad=0.55, columnspacing=0.9,
         )
 
         paths = _save_pdf_and_png(fig, out_dir / "C_motor_reward_roi_gvs_profiles.pdf", dpi=300)
@@ -1473,6 +1481,15 @@ def _roi_color_key(label: str) -> str:
     return re.sub(r"_[LR]$", "", clean)
 
 
+def _roi_cell_display_label(label: str) -> str:
+    label = str(label)
+    parts = label.split("_")
+    if len(label) > 18 and len(parts) >= 3:
+        split_at = len(parts) // 2
+        return f"{'_'.join(parts[:split_at])}\n{'_'.join(parts[split_at:])}"
+    return label
+
+
 def _roi_cell_color_map(nonzero_df: pd.DataFrame) -> dict[str, str]:
     labels: set[str] = set()
     for value in nonzero_df.get("shown_roi_labels", pd.Series(dtype=str)).dropna():
@@ -1492,7 +1509,6 @@ def _draw_labeled_roi_cell(
     cell_width = 0.96
     cell_height = 0.86
     band_height = cell_height / len(labels)
-    fontsize = _cell_label_fontsize(len(labels), max(len(label) for label in labels))
     for label_index, label in enumerate(labels):
         y_min = y_value - cell_height / 2 + label_index * band_height
         ax.add_patch(
@@ -1509,13 +1525,14 @@ def _draw_labeled_roi_cell(
         ax.text(
             x_value,
             y_min + band_height / 2,
-            label,
+            _roi_cell_display_label(label),
             ha="center",
             va="center",
-            fontsize=fontsize,
+            fontsize=PAPER_CELL_COLORBAR_FONT_SIZE,
             color="#111111",
             fontweight="bold" if label.endswith("*") else "normal",
             linespacing=0.9,
+            multialignment="center",
             zorder=3,
         )
     ax.add_patch(
@@ -1545,15 +1562,15 @@ def _draw_labeled_burden_axis(
     ax.set_xlim(-0.5, len(sessions) - 0.5)
     ax.set_ylim(len(subjects) - 0.5, -0.5)
     ax.set_xticks(np.arange(len(sessions)))
-    ax.set_xticklabels(sessions, fontsize=9.5)
+    ax.set_xticklabels(sessions, fontsize=PAPER_AXIS_TICK_FONT_SIZE)
     ax.set_yticks(np.arange(len(subjects)))
-    ax.set_yticklabels(subjects, fontsize=9.0)
+    ax.set_yticklabels(subjects, fontsize=PAPER_AXIS_TICK_FONT_SIZE)
     ax.set_xticks(np.arange(-0.5, len(sessions), 1), minor=True)
     ax.set_yticks(np.arange(-0.5, len(subjects), 1), minor=True)
     ax.grid(which="minor", color="#D8D8D8", linewidth=0.7)
     ax.tick_params(which="minor", bottom=False, left=False)
-    ax.set_xlabel("GVS condition", fontsize=10.0)
-    ax.set_ylabel("Subject" if show_ylabel else "", fontsize=10.0)
+    ax.set_xlabel("GVS condition", fontsize=PAPER_AXIS_TICK_FONT_SIZE)
+    ax.set_ylabel("Subject" if show_ylabel else "", fontsize=PAPER_AXIS_TICK_FONT_SIZE)
     ax.set_facecolor("#FAFAFA")
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
@@ -1568,6 +1585,258 @@ def _draw_labeled_burden_axis(
             _split_roi_labels(getattr(row, "shown_roi_labels", "")),
             color_map,
         )
+
+
+ROI_ABBREVIATIONS = {
+    "Amygdala": "Amyg",
+    "Caudate": "Caud",
+    "Cerebellum": "Cer",
+    "Cingulate": "Cing",
+    "Frontal": "Front",
+    "Fusiform": "Fusi",
+    "Hippocampus": "Hipp",
+    "Occipital": "Occ",
+    "Olfactory": "Olf",
+    "Orbitofrontal": "OFC",
+    "ParaHippocampal": "PHip",
+    "Paracentral_Lobule": "ParCent",
+    "Parietal": "Par",
+    "Postcentral": "PostC",
+    "Precentral": "PreC",
+    "Putamen": "Put",
+    "Supp_Motor_Area": "SMA",
+    "Temporal": "Temp",
+    "Thalamus": "Thal",
+}
+
+
+def _roi_abbreviation(label: str) -> str:
+    clean = str(label).replace("*", "").strip()
+    match = re.match(r"^(?P<base>.+)_(?P<hemi>[LR])$", clean)
+    if match is None:
+        return ROI_ABBREVIATIONS.get(clean, clean)
+    base = match.group("base")
+    hemi = match.group("hemi")
+    return f"{ROI_ABBREVIATIONS.get(base, base)}_{hemi}"
+
+
+def _compact_count_matrix(
+    subset: pd.DataFrame,
+    sessions: list[str],
+    subjects: list[str],
+) -> tuple[np.ndarray, dict[tuple[str, str], list[str]]]:
+    counts = np.zeros((len(subjects), len(sessions)), dtype=np.int64)
+    details: dict[tuple[str, str], list[str]] = defaultdict(list)
+    x_lookup = {label: index for index, label in enumerate(sessions)}
+    y_lookup = {subject: index for index, subject in enumerate(subjects)}
+    for row in subset.itertuples(index=False):
+        subject = str(row.subject)
+        session = str(row.target_condition_label)
+        if subject not in y_lookup or session not in x_lookup:
+            continue
+        labels = _split_roi_labels(getattr(row, "shown_roi_labels", ""))
+        counts[y_lookup[subject], x_lookup[session]] += len(labels)
+        details[(subject, session)].extend(_roi_abbreviation(label) for label in labels)
+    return counts, details
+
+
+def _draw_compact_count_axis(
+    ax: plt.Axes,
+    counts: np.ndarray,
+    sessions: list[str],
+    subjects: list[str],
+    *,
+    cmap: colors.Colormap,
+    norm: colors.BoundaryNorm,
+    show_ylabel: bool,
+) -> Any:
+    image = ax.imshow(counts, cmap=cmap, norm=norm, aspect="equal")
+    ax.set_xticks(np.arange(len(sessions)))
+    ax.set_xticklabels(sessions, fontsize=PAPER_AXIS_TICK_FONT_SIZE)
+    ax.set_yticks(np.arange(len(subjects)))
+    ax.set_yticklabels(subjects if show_ylabel else [], fontsize=PAPER_AXIS_TICK_FONT_SIZE)
+    ax.set_xticks(np.arange(-0.5, len(sessions), 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, len(subjects), 1), minor=True)
+    ax.grid(which="minor", color="#FFFFFF", linewidth=1.0)
+    ax.tick_params(which="minor", bottom=False, left=False)
+    ax.tick_params(axis="both", which="major", length=0, pad=4)
+    ax.set_xlabel("GVS condition", fontsize=PAPER_AXIS_TICK_FONT_SIZE)
+    ax.set_ylabel("Subject" if show_ylabel else "", fontsize=PAPER_AXIS_TICK_FONT_SIZE)
+    for spine in ax.spines.values():
+        spine.set_linewidth(0.7)
+        spine.set_color("#666666")
+
+    threshold = max(1.5, 0.58 * float(np.nanmax(counts) if counts.size else 1))
+    for row_idx in range(counts.shape[0]):
+        for col_idx in range(counts.shape[1]):
+            value = int(counts[row_idx, col_idx])
+            if value <= 0:
+                continue
+            ax.text(
+                col_idx,
+                row_idx,
+                str(value),
+                ha="center",
+                va="center",
+                fontsize=PAPER_CELL_COLORBAR_FONT_SIZE,
+                fontweight="bold",
+                color="white" if value >= threshold else "#111111",
+            )
+    return image
+
+
+def _detail_rows_for_compact_burden(
+    combined_subsets: list[tuple[str, pd.DataFrame]],
+    specs: dict[str, dict[str, Any]],
+) -> list[tuple[str, str]]:
+    rows: list[tuple[str, str]] = []
+    for prefix, subset in combined_subsets:
+        rows.append(("header", str(specs[prefix].get("panel_title", specs[prefix]["label"]))))
+        subset = subset.sort_values(
+            ["subject", "target_condition_label"],
+            key=lambda col: col.map(_subject_sort_key)
+            if col.name == "subject"
+            else col.map(_session_sort_key)
+            if col.name == "target_condition_label"
+            else col,
+        )
+        for row in subset.itertuples(index=False):
+            labels = ", ".join(_roi_abbreviation(label) for label in _split_roi_labels(getattr(row, "shown_roi_labels", "")))
+            rows.append(("body", f"{row.subject} {row.target_condition_label}: {labels}"))
+    return rows
+
+
+def _draw_compact_detail_axis(
+    ax: plt.Axes,
+    detail_rows: list[tuple[str, str]],
+) -> None:
+    ax.axis("off")
+    ax.text(
+        0.0,
+        1.0,
+        "ROI details",
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=PAPER_AXIS_TICK_FONT_SIZE,
+        fontweight="bold",
+        color="#111111",
+    )
+    y_top = 0.94
+    y_bottom = 0.13
+    step = (y_top - y_bottom) / max(len(detail_rows), 1)
+    y = y_top
+    for kind, text in detail_rows:
+        if kind == "header":
+            y -= step * 0.35
+            ax.text(
+                0.0,
+                y,
+                text,
+                transform=ax.transAxes,
+                ha="left",
+                va="top",
+                fontsize=PAPER_FOOTER_FONT_SIZE,
+                fontweight="bold",
+                color="#111111",
+            )
+        else:
+            ax.text(
+                0.0,
+                y,
+                text,
+                transform=ax.transAxes,
+                ha="left",
+                va="top",
+                fontsize=PAPER_FOOTER_FONT_SIZE,
+                color="#222222",
+            )
+        y -= step
+
+    ax.text(
+        0.0,
+        0.02,
+        "Legend: cell value = number of\nFDR-significant ROIs (q < 0.05).\nL/R = hemisphere.",
+        transform=ax.transAxes,
+        ha="left",
+        va="bottom",
+        fontsize=PAPER_FOOTER_FONT_SIZE,
+        color="#333333",
+    )
+
+
+def _write_combined_compact_burden_plot(
+    combined_source: pd.DataFrame,
+    plots_dir: Path,
+    specs: dict[str, dict[str, Any]],
+) -> tuple[Path, Path] | None:
+    combined_subsets = [(prefix, combined_source.loc[combined_source["file_prefix"].eq(prefix)].copy()) for prefix in specs]
+    combined_subsets = [(prefix, subset) for prefix, subset in combined_subsets if not subset.empty]
+    if not combined_subsets:
+        return None
+
+    combined_sessions = sorted(
+        combined_source["target_condition_label"].astype(str).unique().tolist(),
+        key=_session_sort_key,
+    )
+    combined_subjects = sorted(
+        combined_source["subject"].astype(str).unique().tolist(),
+        key=_subject_sort_key,
+    )
+    count_matrices = [
+        _compact_count_matrix(subset, combined_sessions, combined_subjects)[0]
+        for _prefix, subset in combined_subsets
+    ]
+    vmax = max(int(matrix.max()) for matrix in count_matrices) if count_matrices else 1
+    boundaries = np.arange(-0.5, max(1, vmax) + 1.5, 1.0)
+    cmap = colors.ListedColormap(["#F7F7F7", "#CFE3F3", "#6FA8DC", "#2F6FAE", "#174A7E"][: max(2, vmax + 1)])
+    norm = colors.BoundaryNorm(boundaries, cmap.N)
+    detail_rows = _detail_rows_for_compact_burden(combined_subsets, specs)
+
+    fig_width = max(15.2, 0.72 * len(combined_sessions) * len(combined_subsets) + 6.7)
+    fig_height = max(7.0, 0.50 * len(combined_subjects) + 3.0, 0.25 * len(detail_rows) + 1.8)
+    fig = plt.figure(figsize=(fig_width, fig_height), facecolor="white")
+    grid = fig.add_gridspec(
+        1,
+        len(combined_subsets) + 2,
+        width_ratios=[1.0] * len(combined_subsets) + [0.88, 0.055],
+        wspace=0.22,
+    )
+
+    image = None
+    for index, (prefix, subset) in enumerate(combined_subsets):
+        ax = fig.add_subplot(grid[0, index])
+        counts, _details = _compact_count_matrix(subset, combined_sessions, combined_subjects)
+        image = _draw_compact_count_axis(
+            ax,
+            counts,
+            combined_sessions,
+            combined_subjects,
+            cmap=cmap,
+            norm=norm,
+            show_ylabel=index == 0,
+        )
+        panel_title = str(specs[prefix].get("panel_title", specs[prefix]["label"]))
+        ax.set_title(panel_title, fontsize=PAPER_TITLE_FONT_SIZE, pad=11.0)
+
+    detail_ax = fig.add_subplot(grid[0, len(combined_subsets)])
+    _draw_compact_detail_axis(detail_ax, detail_rows)
+
+    if image is not None:
+        cbar = fig.colorbar(image, cax=fig.add_subplot(grid[0, len(combined_subsets) + 1]))
+        cbar.ax.set_title("No. ROIs", fontsize=PAPER_CELL_COLORBAR_FONT_SIZE, pad=7)
+        cbar.ax.tick_params(labelsize=PAPER_CELL_COLORBAR_FONT_SIZE, width=0.6, length=2.8, pad=2)
+        cbar.set_ticks(np.arange(0, vmax + 1, dtype=int))
+        cbar.outline.set_linewidth(0.6)
+
+    fig.subplots_adjust(left=0.055, right=0.985, top=0.90, bottom=0.10)
+    pdf_path, png_path = _save_pdf_and_png(
+        fig,
+        plots_dir / "off_on_condition_minus_sham_subject_session_roi_burden_compact.pdf",
+        dpi=300,
+    )
+    plt.close(fig)
+    return pdf_path, png_path
 
 
 def _write_labeled_compact_burden_plot(
@@ -1585,67 +1854,45 @@ def _write_labeled_compact_burden_plot(
     pdf_paths: list[Path] = []
     png_paths: list[Path] = []
 
-    for prefix, _spec in specs.items():
-        subset = nonzero_df.loc[nonzero_df["file_prefix"].eq(prefix)].copy()
-        if subset.empty:
-            continue
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": [PAPER_FONT_FAMILY, "Arial", "Helvetica", "DejaVu Sans"],
+            "font.size": PAPER_AXIS_TICK_FONT_SIZE,
+            "axes.titlesize": PAPER_TITLE_FONT_SIZE,
+            "axes.labelsize": PAPER_AXIS_TICK_FONT_SIZE,
+            "xtick.labelsize": PAPER_AXIS_TICK_FONT_SIZE,
+            "ytick.labelsize": PAPER_AXIS_TICK_FONT_SIZE,
+            "pdf.fonttype": 42,
+            "ps.fonttype": 42,
+        }
+    ):
+        for prefix, _spec in specs.items():
+            subset = nonzero_df.loc[nonzero_df["file_prefix"].eq(prefix)].copy()
+            if subset.empty:
+                continue
 
-        fig_width = max(15.0, 1.85 * len(sessions) + 3.0)
-        fig_height = max(9.0, 0.56 * len(subjects) + 1.6)
-        fig, ax = plt.subplots(figsize=(fig_width, fig_height), facecolor="white")
-        _draw_labeled_burden_axis(ax, subset, sessions, subjects, x_lookup, y_lookup, color_map, show_ylabel=True)
+            fig_width = max(23.0, 2.4 * len(sessions) + 4.0)
+            fig_height = max(9.0, 0.86 * len(subjects) + 2.0)
+            fig, ax = plt.subplots(figsize=(fig_width, fig_height), facecolor="white")
+            _draw_labeled_burden_axis(ax, subset, sessions, subjects, x_lookup, y_lookup, color_map, show_ylabel=True)
 
-        fig.tight_layout()
-        pdf_path, png_path = _save_pdf_and_png(
-            fig,
-            plots_dir / f"{prefix}_subject_session_roi_burden_compact.pdf",
-            dpi=300,
-        )
-        plt.close(fig)
-        pdf_paths.append(pdf_path)
-        png_paths.append(png_path)
-
-    combined_source = nonzero_df if combined_df is None else combined_df
-    combined_subsets = [(prefix, combined_source.loc[combined_source["file_prefix"].eq(prefix)].copy()) for prefix in specs]
-    combined_subsets = [(prefix, subset) for prefix, subset in combined_subsets if not subset.empty]
-    if combined_subsets:
-        combined_sessions = sorted(
-            combined_source["target_condition_label"].astype(str).unique().tolist(),
-            key=_session_sort_key,
-        )
-        combined_x_lookup = {label: index for index, label in enumerate(combined_sessions)}
-        combined_color_map = _roi_cell_color_map(combined_source)
-        max_subjects = max(
-            len(subset["subject"].astype(str).unique().tolist())
-            for _prefix, subset in combined_subsets
-        )
-        fig_width = max(23.0, 2.25 * len(combined_sessions) + 5.0)
-        fig_height = max(7.2, 0.72 * max_subjects + 2.0)
-        fig, axes = plt.subplots(1, len(combined_subsets), figsize=(fig_width, fig_height), facecolor="white")
-        for index, (ax, (_prefix, subset)) in enumerate(zip(np.atleast_1d(axes), combined_subsets, strict=True)):
-            panel_subjects = sorted(subset["subject"].astype(str).unique().tolist(), key=_subject_sort_key)
-            panel_y_lookup = {subject: index for index, subject in enumerate(panel_subjects)}
-            _draw_labeled_burden_axis(
-                ax,
-                subset,
-                combined_sessions,
-                panel_subjects,
-                combined_x_lookup,
-                panel_y_lookup,
-                combined_color_map,
-                show_ylabel=index == 0,
+            fig.tight_layout()
+            pdf_path, png_path = _save_pdf_and_png(
+                fig,
+                plots_dir / f"{prefix}_subject_session_roi_burden_compact.pdf",
+                dpi=300,
             )
-            panel_title = str(specs[_prefix].get("panel_title", specs[_prefix]["label"]))
-            ax.set_title(panel_title, fontsize=10.5, pad=8.0)
-        fig.tight_layout(w_pad=2.0)
-        pdf_path, png_path = _save_pdf_and_png(
-            fig,
-            plots_dir / "off_on_condition_minus_sham_subject_session_roi_burden_compact.pdf",
-            dpi=300,
-        )
-        plt.close(fig)
-        pdf_paths.append(pdf_path)
-        png_paths.append(png_path)
+            plt.close(fig)
+            pdf_paths.append(pdf_path)
+            png_paths.append(png_path)
+
+        combined_source = nonzero_df if combined_df is None else combined_df
+        combined_paths = _write_combined_compact_burden_plot(combined_source, plots_dir, specs)
+        if combined_paths is not None:
+            pdf_path, png_path = combined_paths
+            pdf_paths.append(pdf_path)
+            png_paths.append(png_path)
     return pdf_paths, png_paths
 
 
