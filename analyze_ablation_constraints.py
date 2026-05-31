@@ -728,7 +728,7 @@ def plot_tradeoff(summary: pd.DataFrame, group: str, out_base: Path, title: str)
     plt.close(fig)
 
 
-def plot_spatial_similarity(overlap_df: pd.DataFrame, out_base: Path) -> None:
+def plot_spatial_similarity(map_specs: list[MapSpec], out_base: Path) -> None:
     keep = [
         "Full ablation map",
         "No task",
@@ -740,11 +740,42 @@ def plot_spatial_similarity(overlap_df: pd.DataFrame, out_base: Path) -> None:
         "Smooth-only",
         "No objective penalties",
     ]
-    sub = overlap_df[overlap_df["label"].isin(keep) & ~overlap_df["map_id"].eq("main_result_p90")].copy()
+    reference_label = "Full ablation map"
+    specs = [spec for spec in map_specs if spec.label in keep and spec.path and spec.path.exists()]
+    reference_specs = [spec for spec in specs if spec.label == reference_label]
+    if not specs or not reference_specs:
+        return
+    reference_spec = reference_specs[0]
+    reference_img, reference_data = _load_data(reference_spec.path)  # type: ignore[arg-type]
+    reference_mask, _ = _mask_from_map(reference_data, reference_spec.threshold_percentile)
+    reference_center = _weighted_center(reference_mask, reference_data, reference_img.affine)
+    n_ref = int(np.count_nonzero(reference_mask))
+
+    rows = []
+    for spec in specs:
+        img, data = _load_data(spec.path)  # type: ignore[arg-type]
+        if img.shape[:3] != reference_img.shape[:3] or not np.allclose(img.affine, reference_img.affine):
+            raise RuntimeError(f"{spec.path} is not on the same grid as {reference_spec.path}.")
+        mask, _ = _mask_from_map(data, spec.threshold_percentile)
+        center = _weighted_center(mask, data, img.affine)
+        intersection = int(np.count_nonzero(reference_mask & mask))
+        n_map = int(np.count_nonzero(mask))
+        rows.append(
+            {
+                "map_id": spec.map_id,
+                "label": spec.label,
+                "dice": float(2 * intersection / (n_ref + n_map)) if n_ref + n_map else np.nan,
+                "center_of_mass_distance_mm": float(
+                    np.linalg.norm(np.asarray(center) - np.asarray(reference_center))
+                ),
+            }
+        )
+
+    sub = pd.DataFrame(rows)
     if sub.empty:
         return
-    main = sub[sub["label"].eq("Full ablation map")]
-    others = sub[~sub["label"].eq("Full ablation map")].sort_values("dice", ascending=False)
+    main = sub[sub["label"].eq(reference_label)]
+    others = sub[~sub["label"].eq(reference_label)].sort_values("dice", ascending=False)
     sub = pd.concat([main, others], ignore_index=True)
     display_labels = {
         "Full ablation map": "Main model",
@@ -787,7 +818,7 @@ def plot_spatial_similarity(overlap_df: pd.DataFrame, out_base: Path) -> None:
     dice_colors, dice_mappable = metric_color_scale(sub["dice"], "Blues")
     distance_colors, distance_mappable = metric_color_scale(sub["center_of_mass_distance_mm"], "Reds")
     axes[0].barh(y, sub["dice"], color=dice_colors, alpha=0.9)
-    axes[0].set_xlabel("Dice with full reference map")
+    axes[0].set_xlabel("Dice with main model")
     axes[0].set_xlim(0, 1)
     axes[0].set_yticks(y)
     axes[0].set_yticklabels(sub["label"].map(display_labels))
@@ -797,7 +828,7 @@ def plot_spatial_similarity(overlap_df: pd.DataFrame, out_base: Path) -> None:
         color=distance_colors,
         alpha=0.9,
     )
-    axes[1].set_xlabel("Center-of-mass distance (mm)")
+    axes[1].set_xlabel("Center-of-mass distance from main model (mm)")
     axes[1].set_yticks(y)
     axes[1].tick_params(labelleft=False)
     for ax in axes:
@@ -1543,7 +1574,7 @@ def main() -> None:
         "Final-weight ablation tradeoff",
     )
     plot_balanced_score(metrics, "final_0p6", args.out_dir / "ablation_balanced_score_final")
-    plot_spatial_similarity(overlap_df, args.out_dir / "ablation_spatial_similarity")
+    plot_spatial_similarity(map_specs, args.out_dir / "ablation_spatial_similarity")
     plot_roi_heatmaps(region_df, args.out_dir / "ablation_roi_heatmap")
     plot_publication_summary(metrics, metric_summary, overlap_df, region_df, args.out_dir / "ablation_publication_summary")
     plot_full_vs_task_only_anatomy(
