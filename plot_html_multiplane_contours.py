@@ -10,10 +10,18 @@ from matplotlib.patches import Patch
 import nibabel as nib
 from nilearn import datasets, image
 from PIL import Image
-from scipy.ndimage import binary_fill_holes
+from scipy.ndimage import binary_fill_holes, distance_transform_edt
 
 src = Path("data/voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5_bold_thr90.html")
 base = Path("figures") / "voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5_bold_thr90_multiplane_contour_all_regions"
+plt.rcParams.update(
+    {
+        "font.family": "Liberation Sans",
+        "font.sans-serif": ["Liberation Sans", "Arial", "DejaVu Sans"],
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
+    }
+)
 atlas_cache_dir = Path("/home/zkavian/nilearn_data")
 atlas_version = "3v2"
 region_order = (
@@ -24,17 +32,15 @@ region_order = (
     "Occipital cortex",
     "Cerebellum",
     "Limbic/subcortical",
-    "Unassigned",
 )
 region_colors = {
-    "Sensorimotor cortex": "#004488",
-    "Frontal cortex": "#7a4ea3",
-    "Parietal cortex": "#117733",
-    "Temporal cortex": "#aa7733",
-    "Occipital cortex": "#999933",
-    "Cerebellum": "#aa4499",
-    "Limbic/subcortical": "#882255",
-    "Unassigned": "#666666",
+    "Sensorimotor cortex": "#005ab5",
+    "Frontal cortex": "#4b0092",
+    "Parietal cortex": "#006d2c",
+    "Temporal cortex": "#7a4a00",
+    "Occipital cortex": "#d39200",
+    "Cerebellum": "#a00078",
+    "Limbic/subcortical": "#8f1d21",
 }
 s = src.read_text()
 imgs = [np.asarray(Image.open(BytesIO(base64.b64decode(x))).convert("RGBA")) for x in re.findall(r'src="data:image/png;base64,([^"]+)"', s)]
@@ -141,14 +147,18 @@ def resample_aal_to_mask():
 def region_label_data():
     atlas_data, atlas = resample_aal_to_mask()
     category_ids = {name: idx + 1 for idx, name in enumerate(region_order)}
-    labels = np.zeros(mask.shape, dtype=np.int16)
+    atlas_labels = np.zeros(mask.shape, dtype=np.int16)
     for label_value, label_name in zip(atlas.indices, atlas.labels):
         label_value = int(label_value)
         if label_value == 0:
             continue
         category = atlas_category(str(label_name))
-        labels[(atlas_data == label_value) & mask] = category_ids[category]
-    labels[mask & (labels == 0)] = category_ids["Unassigned"]
+        atlas_labels[atlas_data == label_value] = category_ids[category]
+    labels = np.where(mask, atlas_labels, 0).astype(np.int16, copy=False)
+    outside_atlas = mask & (labels == 0)
+    if np.any(outside_atlas):
+        nearest = distance_transform_edt(atlas_labels == 0, return_distances=False, return_indices=True)
+        labels[outside_atlas] = atlas_labels[tuple(axis_indices[outside_atlas] for axis_indices in nearest)]
     return labels
 region_labels = region_label_data()
 region_counts = {
@@ -162,13 +172,22 @@ def overlay(ax, labels, m):
         if not np.any(hit):
             continue
         rgba[hit, :3] = to_rgb(region_colors[name])
-        rgba[hit, 3] = 0.58 if name != "Unassigned" else 0.42
+        rgba[hit, 3] = 0.76
     ax.imshow(rgba, interpolation="nearest")
     if np.any(m):
         ax.contour(m.astype(float), levels=[0.5], colors="#202020", linewidths=0.38, alpha=0.8)
 base.parent.mkdir(exist_ok=True)
 n_cols = max(len(cuts[mode]) for mode, _ in plane_specs)
-fig, axes = plt.subplots(len(plane_specs), n_cols, figsize=(15.1, 7.25), facecolor="white")
+fig, axes = plt.subplots(len(plane_specs), n_cols, figsize=(15.1, 8.8), facecolor="white")
+fig.text(0.5, 0.965, "Vigour-network anatomy", ha="center", va="top", fontsize=18, weight="bold")
+fig.text(
+    0.5,
+    0.925,
+    "Selected voxels span sensorimotor, temporal, frontal, limbic/subcortical, cerebellar, parietal, and occipital AAL3v2-derived categories",
+    ha="center",
+    va="top",
+    fontsize=13,
+)
 for row, (mode, plane_label) in enumerate(plane_specs):
     for col in range(n_cols):
         ax = axes[row, col]
@@ -181,20 +200,27 @@ for row, (mode, plane_label) in enumerate(plane_specs):
         a, m, label_slice = crop(plane(bg, mode, cut), plane(mask, mode, cut), plane(region_labels, mode, cut))
         ax.imshow(anat(a), interpolation="nearest")
         overlay(ax, label_slice, m)
-        ax.text(0.5, -0.055, f"{mode} = {cut:g}", transform=ax.transAxes, ha="center", va="top", fontsize=6.8, color="0.2")
-        if col == 0:
-            ax.text(-0.10, 0.5, plane_label, transform=ax.transAxes, ha="right", va="center", fontsize=8.8, weight="bold", color="0.1")
+        ax.text(0.5, -0.070, f"{mode} = {cut:g}", transform=ax.transAxes, ha="center", va="top", fontsize=13, color="0.2")
         if mode in {"y", "z"}:
-            ax.text(0.15, 0.99, "L", transform=ax.transAxes, ha="center", va="top", fontsize=6.8, color="0.15")
-            ax.text(0.85, 0.99, "R", transform=ax.transAxes, ha="center", va="top", fontsize=6.8, color="0.15")
+            ax.text(0.15, 0.99, "L", transform=ax.transAxes, ha="center", va="top", fontsize=13, color="0.15")
+            ax.text(0.85, 0.99, "R", transform=ax.transAxes, ha="center", va="top", fontsize=13, color="0.15")
         ax.set_axis_off()
 legend = [
-    Patch(facecolor=region_colors[name], edgecolor="0.2", alpha=0.72, label=f"{name} ({region_counts[name]:,})")
+    Patch(facecolor=region_colors[name], edgecolor="0.2", alpha=0.82, label=name)
     for name in region_order
     if region_counts[name] > 0
 ]
-fig.legend(handles=legend, loc="lower center", ncol=4, frameon=False, fontsize=7.4, bbox_to_anchor=(0.5, 0.010))
-fig.subplots_adjust(left=0.055, right=0.995, bottom=0.16, top=0.985, wspace=0.015, hspace=0.20)
+fig.legend(handles=legend, loc="lower center", ncol=4, frameon=False, fontsize=12, bbox_to_anchor=(0.5, 0.055))
+fig.text(
+    0.5,
+    0.018,
+    "AAL3v2 broad anatomical categories; selected voxels outside atlas labels are assigned to the nearest AAL3 category.",
+    ha="center",
+    va="bottom",
+    fontsize=11,
+    color="0.25",
+)
+fig.subplots_adjust(left=0.015, right=0.995, bottom=0.22, top=0.875, wspace=0.015, hspace=0.36)
 fig.savefig(f"{base}.png", dpi=200, bbox_inches="tight", pad_inches=0.02)
 fig.savefig(f"{base}.pdf", bbox_inches="tight", pad_inches=0.02)
 print(f"{base}.png")

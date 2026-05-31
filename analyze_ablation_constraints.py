@@ -48,6 +48,12 @@ DEFAULT_LOGS = (
     Path("data/ablation/slurm-11445550.out"),
 )
 DEFAULT_ATLAS_CACHE_DIR = Path("/home/zkavian/nilearn_data")
+PAPER_FONT_FAMILY = "Liberation Sans"
+PAPER_TITLE_FONT_SIZE = 18
+PAPER_TAKEAWAY_FONT_SIZE = 13
+PAPER_AXIS_TICK_FONT_SIZE = 13
+PAPER_CELL_COLORBAR_FONT_SIZE = 12
+PAPER_FOOTER_FONT_SIZE = 11
 REFERENCE_PERCENTILE = 90.0
 EPS = 1e-8
 HARVARD_OXFORD_SUBCORTICAL_ATLAS = "sub-maxprob-thr25-2mm"
@@ -1218,49 +1224,87 @@ def plot_full_vs_task_only_anatomy(
     vmax = float(np.percentile(full_bg[full_bg > 0], 99.5)) if np.any(full_bg > 0) else 1.0
 
     n_cols = max(len(cuts) for cuts in cuts_by_mode.values())
-    fig, axes = plt.subplots(3, n_cols, figsize=(11.4, 4.45), facecolor="white")
-    for row, (mode, axis) in enumerate(mode_specs):
-        cuts = cuts_by_mode[mode]
-        for col in range(n_cols):
-            ax = axes[row, col]
-            if col >= len(cuts):
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": [PAPER_FONT_FAMILY, "Arial", "Helvetica", "DejaVu Sans"],
+            "font.size": PAPER_AXIS_TICK_FONT_SIZE,
+            "axes.titlesize": PAPER_TITLE_FONT_SIZE,
+            "axes.labelsize": PAPER_AXIS_TICK_FONT_SIZE,
+            "xtick.labelsize": PAPER_AXIS_TICK_FONT_SIZE,
+            "ytick.labelsize": PAPER_AXIS_TICK_FONT_SIZE,
+            "legend.fontsize": PAPER_CELL_COLORBAR_FONT_SIZE,
+            "pdf.fonttype": 42,
+            "ps.fonttype": 42,
+        }
+    ):
+        fig, axes = plt.subplots(3, n_cols, figsize=(11.4, 5.6), facecolor="white")
+        for row, (mode, axis) in enumerate(mode_specs):
+            cuts = cuts_by_mode[mode]
+            for col in range(n_cols):
+                ax = axes[row, col]
+                if col >= len(cuts):
+                    ax.set_axis_off()
+                    continue
+                index = cuts[col]
+                bg_slice, mask_slices = _crop_slices(
+                    _plane_slice(full_bg, axis, index),
+                    [
+                        _plane_slice(full_only_mask, axis, index),
+                        _plane_slice(task_only_unique_mask, axis, index),
+                        _plane_slice(shared_mask, axis, index),
+                        _plane_slice(motor_shared_mask, axis, index),
+                    ],
+                )
+                full_only_slice, task_only_unique_slice, shared_slice, motor_shared_slice = mask_slices
+                ax.imshow(_anatomy_rgba(bg_slice, vmax), interpolation="nearest")
+                _add_mask_overlay(ax, full_only_slice, colors["full"], 0.75, 0.36)
+                _add_mask_overlay(ax, task_only_unique_slice, colors["task"], 0.75, 0.34)
+                _add_mask_overlay(ax, shared_slice, colors["shared"], 0.95, 0.52)
+                _add_mask_overlay(ax, motor_shared_slice, colors["shared"], 2.0, 0.0)
+                coord = _coord_mm(html_affine, axis, index)
+                ax.text(
+                    0.02,
+                    -0.03,
+                    f"{mode}={coord:g}",
+                    transform=ax.transAxes,
+                    ha="left",
+                    va="top",
+                    fontsize=PAPER_AXIS_TICK_FONT_SIZE,
+                )
+                if mode in {"y", "z"}:
+                    ax.text(
+                        0.12,
+                        0.96,
+                        "L",
+                        transform=ax.transAxes,
+                        ha="center",
+                        va="top",
+                        fontsize=PAPER_AXIS_TICK_FONT_SIZE,
+                    )
+                    ax.text(
+                        0.88,
+                        0.96,
+                        "R",
+                        transform=ax.transAxes,
+                        ha="center",
+                        va="top",
+                        fontsize=PAPER_AXIS_TICK_FONT_SIZE,
+                    )
+                ax.set_facecolor("none")
+                ax.patch.set_alpha(0)
                 ax.set_axis_off()
-                continue
-            index = cuts[col]
-            bg_slice, mask_slices = _crop_slices(
-                _plane_slice(full_bg, axis, index),
-                [
-                    _plane_slice(full_only_mask, axis, index),
-                    _plane_slice(task_only_unique_mask, axis, index),
-                    _plane_slice(shared_mask, axis, index),
-                    _plane_slice(motor_shared_mask, axis, index),
-                ],
-            )
-            full_only_slice, task_only_unique_slice, shared_slice, motor_shared_slice = mask_slices
-            ax.imshow(_anatomy_rgba(bg_slice, vmax), interpolation="nearest")
-            _add_mask_overlay(ax, full_only_slice, colors["full"], 0.75, 0.36)
-            _add_mask_overlay(ax, task_only_unique_slice, colors["task"], 0.75, 0.34)
-            _add_mask_overlay(ax, shared_slice, colors["shared"], 0.95, 0.52)
-            _add_mask_overlay(ax, motor_shared_slice, colors["shared"], 2.0, 0.0)
-            coord = _coord_mm(html_affine, axis, index)
-            ax.text(0.02, -0.03, f"{mode}={coord:g}", transform=ax.transAxes, ha="left", va="top", fontsize=5.6)
-            if mode in {"y", "z"}:
-                ax.text(0.12, 1.02, "L", transform=ax.transAxes, ha="center", va="bottom", fontsize=5.6)
-                ax.text(0.88, 1.02, "R", transform=ax.transAxes, ha="center", va="bottom", fontsize=5.6)
-            ax.set_facecolor("none")
-            ax.patch.set_alpha(0)
-            ax.set_axis_off()
 
-    handles = [
-        Patch(facecolor=colors["full"], edgecolor=colors["full"], alpha=0.46, label=f"Full model only ({np.count_nonzero(full_only_mask):,})"),
-        Patch(facecolor=colors["task"], edgecolor=colors["task"], alpha=0.44, label=f"Standard GLM only, z>={task_z_threshold:g} ({np.count_nonzero(task_only_unique_mask):,})"),
-        Patch(facecolor=colors["shared"], edgecolor=colors["shared"], alpha=0.58, label=f"Overlap ({n_shared:,})"),
-    ]
-    fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False, fontsize=6.2, bbox_to_anchor=(0.5, 0.01))
-    fig.subplots_adjust(left=0.01, right=0.995, top=0.995, bottom=0.12, wspace=0.02, hspace=0.18)
-    fig.savefig(f"{out_base}.png", dpi=300, bbox_inches="tight")
-    fig.savefig(f"{out_base}.pdf", bbox_inches="tight")
-    plt.close(fig)
+        handles = [
+            Patch(facecolor=colors["full"], edgecolor=colors["full"], alpha=0.46, label="Full model only"),
+            Patch(facecolor=colors["task"], edgecolor=colors["task"], alpha=0.44, label="Standard GLM only"),
+            Patch(facecolor=colors["shared"], edgecolor=colors["shared"], alpha=0.58, label="Overlap"),
+        ]
+        fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False, bbox_to_anchor=(0.5, 0.01))
+        fig.subplots_adjust(left=0.01, right=0.995, top=0.995, bottom=0.16, wspace=0.02, hspace=0.34)
+        fig.savefig(f"{out_base}.png", dpi=300, bbox_inches="tight")
+        fig.savefig(f"{out_base}.pdf", bbox_inches="tight")
+        plt.close(fig)
     return summary
 
 
