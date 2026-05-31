@@ -37,6 +37,8 @@ DEFAULT_AAL_VERSION = "3v2"
 DEFAULT_ATLAS_NAME = "AAL3v2 (Automated Anatomical Labeling 3)"
 UNASSIGNED_ROI = "Unassigned Active Voxels"
 BILATERAL_HEMISPHERE_LABEL = "Bilateral"
+EXCLUDED_MAIN_PLOT_REGIONS = {"Insula", "N_Acc", "Olfactory", "Rolandic_Oper"}
+EXCLUDED_ATLAS_LABEL_REGIONS = {"Olfactory"}
 COARSE_AAL_GROUPS = (
     ("Cerebellum", ("Cerebellum", "Vermis"), ()),
     ("Temporal", ("Temporal",), ("Heschl",)),
@@ -347,6 +349,8 @@ def _plot_atlas_regions(
     selected_groups = sorted(selected_groups, key=lambda group: reference_counts.get(group.name, 0), reverse=True)
     label_data = _make_group_label_data(selected_groups, shape)
     colors = plt.get_cmap("turbo")(np.linspace(0.04, 0.96, max(1, len(selected_groups))))[:, :3]
+    group_colors = {group.name: colors[idx] for idx, group in enumerate(selected_groups)}
+    labeled_groups = [group for group in selected_groups if group.name not in EXCLUDED_ATLAS_LABEL_REGIONS]
     cmap = ListedColormap(np.vstack([[0.96, 0.97, 0.99], colors]))
     norm = BoundaryNorm(np.arange(-0.5, len(selected_groups) + 1.5, 1), cmap.N)
 
@@ -378,7 +382,7 @@ def _plot_atlas_regions(
         centers[group.name] = nib.affines.apply_affine(reference_img.affine, ijk).mean(axis=0)
 
     offsets = [(-22.0, 16.0), (20.0, 14.0), (-18.0, -18.0), (20.0, -16.0), (0.0, 22.0), (0.0, -22.0)]
-    for rank, group in enumerate(selected_groups[:28]):
+    for rank, group in enumerate(labeled_groups[:28]):
         center = centers[group.name]
         name_lower = group.name.lower()
         panel_idx = 2 if "cerebellum" in name_lower or "vermis" in name_lower else 1 if any(
@@ -405,15 +409,15 @@ def _plot_atlas_regions(
     legend_ax = fig.add_subplot(gs[1, :])
     legend_ax.axis("off")
     n_cols = 6
-    rows_per_col = int(np.ceil(len(selected_groups) / n_cols))
+    rows_per_col = max(1, int(np.ceil(len(labeled_groups) / n_cols)))
     row_step = 0.31
-    for idx, group in enumerate(selected_groups, start=1):
+    for idx, group in enumerate(labeled_groups, start=1):
         col = (idx - 1) // rows_per_col
         row = (idx - 1) % rows_per_col
         x = (col + 0.02) / n_cols
         y = 0.78 - row * row_step
         label = _compact_region_label(group.name, reference_counts.get(group.name, 0))
-        legend_ax.add_patch(plt.Rectangle((x, y - 0.040), 0.010, 0.080, color=colors[idx - 1], transform=legend_ax.transAxes))
+        legend_ax.add_patch(plt.Rectangle((x, y - 0.040), 0.010, 0.080, color=group_colors[group.name], transform=legend_ax.transAxes))
         legend_ax.text(x + 0.014, y, label, fontsize=7.0, va="center")
 
     out_base.parent.mkdir(parents=True, exist_ok=True)
@@ -426,6 +430,7 @@ def _plot_robustness(summary_df: pd.DataFrame, region_df: pd.DataFrame, out_base
     report_regions = region_df.loc[
         (region_df["n_voxels"] >= min_report_voxels) & ~region_df["roi_name"].eq(UNASSIGNED_ROI)
     ].copy()
+    report_regions = report_regions.loc[~report_regions["node_name"].isin(EXCLUDED_MAIN_PLOT_REGIONS)]
     p90_counts = (
         report_regions.loc[np.isclose(report_regions["percentile"], REFERENCE_THRESHOLD), ["node_name", "n_voxels"]]
         .set_index("node_name")["n_voxels"]

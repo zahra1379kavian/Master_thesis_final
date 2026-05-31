@@ -1051,8 +1051,17 @@ def plot_full_vs_task_only_anatomy(
         return pd.DataFrame()
 
     reference_img, _ = _load_data(reference_map)
-    full_mask = _html_overlay_mask(full_html, reference_img)
-    task_mask = _html_overlay_mask(task_only_html, reference_img)
+    full_bg, full_mask, html_affine = _html_sprite_volumes(full_html)
+    _, task_mask, task_affine = _html_sprite_volumes(task_only_html)
+    if full_mask.shape != reference_img.shape[:3]:
+        raise RuntimeError(
+            f"{full_html} overlay shape {full_mask.shape} does not match reference shape {reference_img.shape[:3]}."
+        )
+    if task_mask.shape != full_mask.shape:
+        raise RuntimeError(f"{task_only_html} overlay shape {task_mask.shape} differs from {full_html}.")
+    if not np.allclose(task_affine, html_affine):
+        raise RuntimeError(f"{task_only_html} affine differs from {full_html}.")
+
     union_mask = full_mask | task_mask
     if not np.any(union_mask):
         return pd.DataFrame()
@@ -1061,13 +1070,16 @@ def plot_full_vs_task_only_anatomy(
     full_only_mask = full_mask & ~task_mask
     task_only_unique_mask = task_mask & ~full_mask
 
-    cuts = _cut_indices_for_mask(union_mask, axis=2)
-    cut_labels = [float(reference_img.affine[2, 2] * k + reference_img.affine[2, 3]) for k in cuts]
-
     n_full = int(np.count_nonzero(full_mask))
     n_task = int(np.count_nonzero(task_mask))
     n_shared = int(np.count_nonzero(shared_mask))
     n_union = int(np.count_nonzero(union_mask))
+    mode_specs = [("x", 0), ("y", 1), ("z", 2)]
+    cuts_by_mode = {mode: _cut_indices_for_mask(union_mask, axis, n_cuts=9, min_gap=4) for mode, axis in mode_specs}
+    cut_summary = "|".join(
+        f"{mode}:{';'.join(f'{_coord_mm(html_affine, axis, index):g}' for index in cuts_by_mode[mode])}"
+        for mode, axis in mode_specs
+    )
     summary = pd.DataFrame(
         [
             {
@@ -1081,76 +1093,59 @@ def plot_full_vs_task_only_anatomy(
                 "union_voxels": n_union,
                 "dice": float(2 * n_shared / (n_full + n_task)),
                 "jaccard": float(n_shared / n_union),
-                "axial_cuts_mm": ";".join(f"{value:g}" for value in cut_labels),
+                "slice_cuts_mm": cut_summary,
             }
         ]
     )
     summary.to_csv(f"{out_base}_summary.csv", index=False)
 
-    template = datasets.load_mni152_template(resolution=2)
-    bg_img = image.resample_to_img(template, reference_img, interpolation="continuous", force_resample=True, copy_header=True)
-    bg = np.nan_to_num(np.asarray(bg_img.get_fdata(), dtype=float), nan=0.0)
-    vmax = float(np.percentile(bg[bg > 0], 99.2)) if np.any(bg > 0) else 1.0
-
     colors = {
-        "full": "#2563eb",
-        "task": "#f97316",
-        "shared": "#7c3aed",
+        "full": "#dc2626",
+        "task": "#2563eb",
+        "shared": "#c026d3",
     }
-    rows = [
-        ("Full model", full_mask, colors["full"]),
-        ("Task-only", task_mask, colors["task"]),
-    ]
-    fig, axes = plt.subplots(3, len(cuts), figsize=(11.7, 5.9), facecolor="white")
-    for col, (k, z_mm) in enumerate(zip(cuts, cut_labels)):
-        bg_slice = _axial_slice(bg, k)
-        for row, (label, mask, color) in enumerate(rows):
+    full_bg = np.nan_to_num(full_bg, nan=0.0)
+    vmax = float(np.percentile(full_bg[full_bg > 0], 99.5)) if np.any(full_bg > 0) else 1.0
+
+    n_cols = max(len(cuts) for cuts in cuts_by_mode.values())
+    fig, axes = plt.subplots(3, n_cols, figsize=(11.4, 4.45), facecolor="white")
+    for row, (mode, axis) in enumerate(mode_specs):
+        cuts = cuts_by_mode[mode]
+        for col in range(n_cols):
             ax = axes[row, col]
-            ax.imshow(bg_slice, cmap="gray", vmin=0, vmax=vmax, interpolation="nearest")
-            ax.imshow(_rgba_overlay(_axial_slice(mask, k), color), interpolation="nearest")
-            if col == 0:
-                ax.text(
-                    -0.08,
-                    0.5,
-                    f"{label}\n{int(np.count_nonzero(mask)):,} voxels",
-                    transform=ax.transAxes,
-                    ha="right",
-                    va="center",
-                    fontsize=9,
-                    weight="bold",
-                )
-            if row == 0:
-                ax.set_title(f"z={z_mm:g} mm", fontsize=8, pad=2)
+            if col >= len(cuts):
+                ax.set_axis_off()
+                continue
+            index = cuts[col]
+            bg_slice, mask_slices = _crop_slices(
+                _plane_slice(full_bg, axis, index),
+                [
+                    _plane_slice(full_mask, axis, index),
+                    _plane_slice(task_mask, axis, index),
+                    _plane_slice(shared_mask, axis, index),
+                ],
+            )
+            full_slice, task_slice, shared_slice = mask_slices
+            ax.imshow(_anatomy_rgba(bg_slice, vmax), interpolation="nearest")
+            _add_contour(ax, full_slice, colors["full"], 0.85)
+            _add_contour(ax, task_slice, colors["task"], 0.85)
+            _add_contour(ax, shared_slice, colors["shared"], 0.95)
+            coord = _coord_mm(html_affine, axis, index)
+            ax.text(0.02, -0.03, f"{mode}={coord:g}", transform=ax.transAxes, ha="left", va="top", fontsize=5.6)
+            if mode in {"y", "z"}:
+                ax.text(0.12, 1.02, "L", transform=ax.transAxes, ha="center", va="bottom", fontsize=5.6)
+                ax.text(0.88, 1.02, "R", transform=ax.transAxes, ha="center", va="bottom", fontsize=5.6)
+            ax.set_facecolor("none")
+            ax.patch.set_alpha(0)
             ax.set_axis_off()
 
-        ax = axes[2, col]
-        ax.imshow(bg_slice, cmap="gray", vmin=0, vmax=vmax, interpolation="nearest")
-        comparison = np.zeros(bg_slice.shape + (4,), dtype=float)
-        comparison[_axial_slice(full_only_mask, k)] = matplotlib.colors.to_rgba(colors["full"], 0.82)
-        comparison[_axial_slice(shared_mask, k)] = matplotlib.colors.to_rgba(colors["shared"], 0.9)
-        comparison[_axial_slice(task_only_unique_mask, k)] = matplotlib.colors.to_rgba(colors["task"], 0.82)
-        ax.imshow(comparison, interpolation="nearest")
-        if col == 0:
-            ax.text(
-                -0.08,
-                0.5,
-                "Comparison",
-                transform=ax.transAxes,
-                ha="right",
-                va="center",
-                fontsize=9,
-                weight="bold",
-            )
-        ax.set_axis_off()
-
     handles = [
-        Patch(facecolor=colors["full"], label=f"Full-only: {int(np.count_nonzero(full_only_mask)):,}"),
-        Patch(facecolor=colors["shared"], label=f"Shared: {n_shared:,}"),
-        Patch(facecolor=colors["task"], label=f"Task-only unique: {int(np.count_nonzero(task_only_unique_mask)):,}"),
+        Line2D([0], [0], color=colors["full"], lw=1.0, label=f"Full model (red; {n_full:,})"),
+        Line2D([0], [0], color=colors["task"], lw=1.0, label=f"Task-only map (blue; {n_task:,})"),
+        Line2D([0], [0], color=colors["shared"], lw=1.0, label=f"Overlap (magenta; {n_shared:,})"),
     ]
-    fig.suptitle("Full model vs task-only selected voxels", fontsize=13, weight="bold", y=0.98)
-    fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False, bbox_to_anchor=(0.58, 0.01))
-    fig.subplots_adjust(left=0.17, right=0.995, top=0.89, bottom=0.12, wspace=0.02, hspace=0.06)
+    fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False, fontsize=6.2, bbox_to_anchor=(0.5, 0.01))
+    fig.subplots_adjust(left=0.01, right=0.995, top=0.995, bottom=0.12, wspace=0.02, hspace=0.18)
     fig.savefig(f"{out_base}.png", dpi=300, bbox_inches="tight")
     fig.savefig(f"{out_base}.pdf", bbox_inches="tight")
     plt.close(fig)
@@ -1266,7 +1261,7 @@ def write_report(
         "- `ablation_roi_regions.csv`: AAL coarse ROI composition by map.",
         "- `ablation_publication_summary.{png,pdf}`: compact multi-panel publication figure.",
         "- `ablation_map_montage.{png,pdf}`: axial slice overview of available maps.",
-        "- `ablation_full_vs_task_only_anatomy.{png,pdf}`: focused anatomy slices for the supplied full-model and task-only thresholded HTML maps.",
+        "- `ablation_full_vs_task_only_anatomy.{png,pdf}`: Figure-3-style sagittal/coronal/axial contour montage for the supplied full-model and task-only thresholded HTML maps.",
         "- `ablation_full_vs_task_only_anatomy_summary.csv`: voxel counts and overlap for the focused full-vs-task-only anatomy figure.",
         "",
         "## Notes",
@@ -1274,7 +1269,7 @@ def write_report(
         "- The final-weight SLURM log contains the `task=1, bold=0.6, beta=0.6, smooth=1.25, gamma=1.5` full model plus no-task/no-BOLD/no-beta and single-term baselines, but no final-weight no-smooth metrics.",
         "- `slurm-11445550.out` is mixed; only the parameter-independent task-only and no-objective baselines were retained. The unrelated `task=1, bold=1, beta=0.75, smooth=1.8` sweep was excluded.",
         "- Balanced scores were computed within the final-weight analysis group using inverse ranges of candidate-mean score components.",
-        "- The focused full-vs-task-only anatomy figure uses the selected-voxel overlays embedded in the two thresholded HTML maps.",
+        "- The focused full-vs-task-only anatomy figure uses the selected-voxel overlays embedded in the two thresholded HTML maps; red contours show the full model, blue contours show the task-only map, and magenta contours show overlap.",
         "",
         "## Balanced-Score Weights",
         "",
