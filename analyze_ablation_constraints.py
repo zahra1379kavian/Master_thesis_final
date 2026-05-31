@@ -758,23 +758,35 @@ def plot_spatial_similarity(overlap_df: pd.DataFrame, out_base: Path) -> None:
         "No objective penalties": "Corr-only",
     }
 
-    def metric_colors(values: pd.Series, cmap_name: str) -> list[tuple[float, float, float, float]]:
+    def metric_color_scale(
+        values: pd.Series,
+        cmap_name: str,
+    ) -> tuple[list[tuple[float, float, float, float]], matplotlib.cm.ScalarMappable]:
         finite_values = pd.to_numeric(values, errors="coerce").to_numpy(dtype=float)
         finite_mask = np.isfinite(finite_values)
-        levels = np.full(finite_values.shape, 0.55)
         if finite_mask.any():
             low = float(np.nanmin(finite_values[finite_mask]))
             high = float(np.nanmax(finite_values[finite_mask]))
-            if high > low:
-                levels[finite_mask] = 0.25 + 0.65 * (finite_values[finite_mask] - low) / (high - low)
-            else:
-                levels[finite_mask] = 0.65
-        cmap = plt.get_cmap(cmap_name)
-        return [cmap(float(level)) for level in levels]
+            if not high > low:
+                pad = max(abs(low) * 0.05, 1.0)
+                low -= pad
+                high += pad
+        else:
+            low, high = 0.0, 1.0
+        cmap = matplotlib.colors.ListedColormap(plt.get_cmap(cmap_name)(np.linspace(0.25, 0.9, 256)))
+        norm = matplotlib.colors.Normalize(vmin=low, vmax=high)
+        colors = np.full((finite_values.size, 4), cmap(0.55), dtype=float)
+        if finite_mask.any():
+            colors[finite_mask] = cmap(norm(finite_values[finite_mask]))
+        mappable = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap)
+        mappable.set_array([])
+        return [tuple(color) for color in colors], mappable
 
-    fig, axes = plt.subplots(1, 2, figsize=(11.0, 4.4), facecolor="white", sharey=True)
+    fig, axes = plt.subplots(1, 2, figsize=(11.2, 4.4), facecolor="white", sharey=True)
     y = np.arange(sub.shape[0])
-    axes[0].barh(y, sub["dice"], color=metric_colors(sub["dice"], "Blues"), alpha=0.9)
+    dice_colors, dice_mappable = metric_color_scale(sub["dice"], "Blues")
+    distance_colors, distance_mappable = metric_color_scale(sub["center_of_mass_distance_mm"], "Reds")
+    axes[0].barh(y, sub["dice"], color=dice_colors, alpha=0.9)
     axes[0].set_xlabel("Dice with full reference map")
     axes[0].set_xlim(0, 1)
     axes[0].set_yticks(y)
@@ -782,7 +794,7 @@ def plot_spatial_similarity(overlap_df: pd.DataFrame, out_base: Path) -> None:
     axes[1].barh(
         y,
         sub["center_of_mass_distance_mm"],
-        color=metric_colors(sub["center_of_mass_distance_mm"], "Reds"),
+        color=distance_colors,
         alpha=0.9,
     )
     axes[1].set_xlabel("Center-of-mass distance (mm)")
@@ -791,6 +803,23 @@ def plot_spatial_similarity(overlap_df: pd.DataFrame, out_base: Path) -> None:
     for ax in axes:
         ax.grid(axis="x", color="#dddddd", linewidth=0.8, alpha=0.7)
     axes[0].invert_yaxis()
+    for ax, mappable, label, tick_format in (
+        (axes[0], dice_mappable, "Dice", "{:.2f}"),
+        (axes[1], distance_mappable, "Distance (mm)", "{:.1f}"),
+    ):
+        cbar = fig.colorbar(
+            mappable,
+            ax=ax,
+            orientation="vertical",
+            fraction=0.035,
+            pad=0.02,
+            aspect=25,
+        )
+        ticks = np.linspace(mappable.norm.vmin, mappable.norm.vmax, 4)
+        cbar.set_ticks(ticks)
+        cbar.set_ticklabels([tick_format.format(tick) for tick in ticks])
+        cbar.ax.set_title(label, fontsize=8, pad=3)
+        cbar.ax.tick_params(labelsize=8, length=2, pad=1)
     fig.tight_layout()
     fig.savefig(f"{out_base}.png", dpi=300, bbox_inches="tight")
     fig.savefig(f"{out_base}.pdf", bbox_inches="tight")

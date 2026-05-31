@@ -37,6 +37,12 @@ DEFAULT_AAL_VERSION = "3v2"
 DEFAULT_ATLAS_NAME = "AAL3v2 (Automated Anatomical Labeling 3)"
 UNASSIGNED_ROI = "Unassigned Active Voxels"
 BILATERAL_HEMISPHERE_LABEL = "Bilateral"
+PAPER_FONT_FAMILY = "Liberation Sans"
+PAPER_TITLE_FONT_SIZE = 18
+PAPER_TAKEAWAY_FONT_SIZE = 13
+PAPER_AXIS_TICK_FONT_SIZE = 13
+PAPER_CELL_COLORBAR_FONT_SIZE = 12
+PAPER_FOOTER_FONT_SIZE = 11
 EXCLUDED_MAIN_PLOT_REGIONS = {"N_Acc"}
 EXCLUDED_ATLAS_LABEL_REGIONS = {"Olfactory"}
 COARSE_AAL_GROUPS = (
@@ -451,59 +457,70 @@ def _plot_robustness(summary_df: pd.DataFrame, region_df: pd.DataFrame, out_base
     )
     reportable = pivot >= min_report_voxels
 
-    fig = plt.figure(figsize=(10.8, max(7.6, 0.24 * max(1, len(node_order)) + 2.8)), facecolor="white")
-    gs = fig.add_gridspec(
-        2,
-        3,
-        width_ratios=[1.0, 1.0, 0.028],
-        height_ratios=[1.35, max(2.2, 0.17 * max(1, len(node_order)))],
-        hspace=0.34,
-        wspace=0.015,
-    )
-    ax_vox = fig.add_subplot(gs[0, 0])
-    ax_stable = fig.add_subplot(gs[0, 1])
-    ax_heat = fig.add_subplot(gs[1, :2])
-    cax = fig.add_subplot(gs[1, 2])
-    top_pos = ax_vox.get_position()
-    top_left = 0.055
-    top_gap = 0.095
-    top_right = cax.get_position().x1
-    top_width = (top_right - top_left - top_gap) / 2.0
-    ax_vox.set_position([top_left, top_pos.y0, top_width, top_pos.height])
-    ax_stable.set_position([top_left + top_width + top_gap, top_pos.y0, top_width, top_pos.height])
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": [PAPER_FONT_FAMILY, "Arial", "Helvetica", "DejaVu Sans"],
+            "font.size": PAPER_AXIS_TICK_FONT_SIZE,
+            "axes.titlesize": PAPER_TITLE_FONT_SIZE,
+            "axes.labelsize": PAPER_AXIS_TICK_FONT_SIZE,
+            "xtick.labelsize": PAPER_AXIS_TICK_FONT_SIZE,
+            "ytick.labelsize": PAPER_AXIS_TICK_FONT_SIZE,
+            "legend.fontsize": PAPER_CELL_COLORBAR_FONT_SIZE,
+            "pdf.fonttype": 42,
+            "ps.fonttype": 42,
+        }
+    ):
+        fig = plt.figure(figsize=(12.4, max(9.2, 0.34 * max(1, len(node_order)) + 3.0)), facecolor="white")
+        gs = fig.add_gridspec(
+            2,
+            3,
+            width_ratios=[1.0, 1.0, 0.030],
+            height_ratios=[1.25, max(3.0, 0.30 * max(1, len(node_order)))],
+            hspace=0.20,
+            wspace=0.018,
+        )
+        ax_vox = fig.add_subplot(gs[0, 0])
+        ax_stable = fig.add_subplot(gs[0, 1])
+        ax_heat = fig.add_subplot(gs[1, :2])
+        cax = fig.add_subplot(gs[1, 2])
+        top_pos = ax_vox.get_position()
+        top_left = 0.060
+        top_gap = 0.105
+        top_right = cax.get_position().x1
+        top_width = (top_right - top_left - top_gap) / 2.0
+        ax_vox.set_position([top_left, top_pos.y0, top_width, top_pos.height])
+        ax_stable.set_position([top_left + top_width + top_gap, top_pos.y0, top_width, top_pos.height])
 
-    ax_vox.plot(summary_df["percentile"], summary_df["n_voxels"], marker="o", color="#2563eb", linewidth=2.0)
-    ax_vox.set_xlabel("Percentile threshold")
-    ax_vox.set_ylabel("Voxels")
-    ax_vox.grid(alpha=0.25)
-    ax_vox.axvline(REFERENCE_THRESHOLD, color="#dc2626", linestyle="--", linewidth=1.3)
+        ax_vox.plot(summary_df["percentile"], summary_df["n_voxels"], marker="o", color="#2563eb", linewidth=2.0)
+        ax_vox.set_xticks(summary_df["percentile"].to_numpy())
+        ax_vox.set_xlabel("Percentile threshold")
+        ax_vox.set_ylabel("Voxels")
+        ax_vox.tick_params(axis="both", labelsize=PAPER_AXIS_TICK_FONT_SIZE)
+        ax_vox.grid(alpha=0.25)
+        ax_vox.axvline(REFERENCE_THRESHOLD, color="#dc2626", linestyle="--", linewidth=1.3)
 
-    ax_stable.plot(summary_df["percentile"], summary_df["p90_nodes_retained"], marker="o", color="#0f766e", label="p90 groups retained")
-    ax_stable.plot(summary_df["percentile"], summary_df["node_jaccard_vs_p90"], marker="s", color="#7c3aed", label="group Jaccard vs p90")
-    ax_stable.set_xlabel("Percentile threshold")
-    ax_stable.set_ylabel("Stability")
-    ax_stable.set_ylim(-0.03, 1.03)
-    ax_stable.grid(alpha=0.25)
-    ax_stable.axvline(REFERENCE_THRESHOLD, color="#dc2626", linestyle="--", linewidth=1.3)
-    ax_stable.legend(frameon=False, fontsize=9, loc="lower left")
+        ax_stable.plot(summary_df["percentile"], summary_df["p90_nodes_retained"], marker="o", color="#0f766e", label="p90 groups retained")
+        ax_stable.plot(summary_df["percentile"], summary_df["node_jaccard_vs_p90"], marker="s", color="#7c3aed", label="Jaccard vs p90")
+        ax_stable.set_xticks(summary_df["percentile"].to_numpy())
+        ax_stable.set_xlabel("Percentile threshold")
+        ax_stable.set_ylabel("Stability")
+        ax_stable.set_ylim(-0.03, 1.03)
+        ax_stable.tick_params(axis="both", labelsize=PAPER_AXIS_TICK_FONT_SIZE)
+        ax_stable.grid(alpha=0.25)
+        ax_stable.axvline(REFERENCE_THRESHOLD, color="#dc2626", linestyle="--", linewidth=1.3)
+        ax_stable.legend(frameon=False, loc="lower left")
 
-    heat = np.log10(pivot.to_numpy(dtype=float) + 1.0)
-    im = ax_heat.imshow(heat, aspect="auto", cmap="viridis", vmin=0)
-    ax_heat.set_xticks(np.arange(pivot.shape[1]))
-    ax_heat.set_xticklabels(pivot.columns.tolist())
-    ax_heat.set_yticks(np.arange(pivot.shape[0]))
-    ax_heat.set_yticklabels([_display_region_name(name) for name in pivot.index.tolist()], fontsize=8)
-    ax_heat.set_xlabel("Threshold")
-    ax_heat.set_title(
-        f"Rows are kept if they are reportable at any threshold; lower heatmap colors mark below-threshold cells (<{min_report_voxels} voxels).",
-        fontsize=8.5,
-        loc="left",
-        pad=10,
-        color="#374151",
-    )
-    for row_idx in range(pivot.shape[0]):
-        for col_idx in range(pivot.shape[1]):
-            if bool(reportable.iat[row_idx, col_idx]):
+        heat = np.log10(pivot.to_numpy(dtype=float) + 1.0)
+        im = ax_heat.imshow(heat, aspect="auto", cmap="viridis", vmin=0)
+        ax_heat.set_xticks(np.arange(pivot.shape[1]))
+        ax_heat.set_xticklabels(pivot.columns.tolist())
+        ax_heat.set_yticks(np.arange(pivot.shape[0]))
+        ax_heat.set_yticklabels([_display_region_name(name) for name in pivot.index.tolist()])
+        ax_heat.set_xlabel("Threshold")
+        ax_heat.tick_params(axis="both", labelsize=PAPER_AXIS_TICK_FONT_SIZE)
+        for row_idx in range(pivot.shape[0]):
+            for col_idx in range(pivot.shape[1]):
                 value = int(pivot.iat[row_idx, col_idx])
                 ax_heat.text(
                     col_idx,
@@ -511,15 +528,16 @@ def _plot_robustness(summary_df: pd.DataFrame, region_df: pd.DataFrame, out_base
                     str(value),
                     ha="center",
                     va="center",
-                    fontsize=6.5,
+                    fontsize=PAPER_CELL_COLORBAR_FONT_SIZE,
                     color="black",
                 )
-    cbar = fig.colorbar(im, cax=cax)
-    cbar.set_label("log10(voxels + 1)")
-    out_base.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(f"{out_base}.png", dpi=220, bbox_inches="tight", pad_inches=0.04)
-    fig.savefig(f"{out_base}.pdf", bbox_inches="tight", pad_inches=0.04)
-    plt.close(fig)
+        cbar = fig.colorbar(im, cax=cax)
+        cbar.set_label("log10(voxels + 1)", fontsize=PAPER_CELL_COLORBAR_FONT_SIZE)
+        cbar.ax.tick_params(labelsize=PAPER_CELL_COLORBAR_FONT_SIZE)
+        out_base.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(f"{out_base}.png", dpi=220, bbox_inches="tight", pad_inches=0.04)
+        fig.savefig(f"{out_base}.pdf", bbox_inches="tight", pad_inches=0.04)
+        plt.close(fig)
 
 
 def _node_set(region_df: pd.DataFrame, percentile: float, min_report_voxels: int) -> set[str]:
