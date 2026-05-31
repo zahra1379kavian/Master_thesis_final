@@ -194,8 +194,8 @@ def _plot_region_heatmap(region_df, mask_names, out_base, min_row_percent=DEFAUL
                 value = values[row, col]
                 if value >= 2.0:
                     ax.text(col, row, f'{value:.1f}', ha='center', va='center', fontsize=PAPER_CELL_COLORBAR_FONT_SIZE, color='black')
-        cbar = fig.colorbar(im, ax=ax, fraction=0.025, pad=0.02)
-        cbar.ax.set_title('Percent\nof map', fontsize=PAPER_CELL_COLORBAR_FONT_SIZE, pad=6)
+        cbar = fig.colorbar(im, ax=ax, fraction=0.025, pad=0.04)
+        cbar.ax.set_title('Voxels %', fontsize=PAPER_CELL_COLORBAR_FONT_SIZE, pad=6)
         cbar.ax.tick_params(labelsize=PAPER_CELL_COLORBAR_FONT_SIZE, colors='black')
         fig.tight_layout()
         fig.savefig(f'{out_base}_region_heatmap.png', dpi=220, bbox_inches='tight', pad_inches=0.04)

@@ -34,13 +34,13 @@ region_order = (
     "Limbic/subcortical",
 )
 region_colors = {
-    "Sensorimotor cortex": "#4E79A7",
-    "Frontal cortex": "#F28E2B",
-    "Parietal cortex": "#59A14F",
-    "Temporal cortex": "#9C755F",
-    "Occipital cortex": "#EDC948",
-    "Cerebellum": "#B07AA1",
-    "Limbic/subcortical": "#E15759",
+    "Sensorimotor cortex": "#0066CC",
+    "Frontal cortex": "#CC0000",
+    "Parietal cortex": "#008000",
+    "Temporal cortex": "#8B4513",
+    "Occipital cortex": "#D4A017",
+    "Cerebellum": "#800080",
+    "Limbic/subcortical": "#008C8C",
 }
 s = src.read_text()
 imgs = [np.asarray(Image.open(BytesIO(base64.b64decode(x))).convert("RGBA")) for x in re.findall(r'src="data:image/png;base64,([^"]+)"', s)]
@@ -172,10 +172,10 @@ def overlay(ax, labels, m):
         if not np.any(hit):
             continue
         rgba[hit, :3] = to_rgb(region_colors[name])
-        rgba[hit, 3] = 0.76
+        rgba[hit, 3] = 0.80
     ax.imshow(rgba, interpolation="nearest")
     if np.any(m):
-        ax.contour(m.astype(float), levels=[0.5], colors="#202020", linewidths=0.38, alpha=0.8)
+        ax.contour(m.astype(float), levels=[0.5], colors="#111111", linewidths=0.55, alpha=0.95)
 base.parent.mkdir(exist_ok=True)
 n_cols = max(len(cuts[mode]) for mode, _ in plane_specs)
 fig, axes = plt.subplots(len(plane_specs), n_cols, figsize=(15.1, 7.6), facecolor="white")
@@ -197,7 +197,7 @@ for row, (mode, plane_label) in enumerate(plane_specs):
             ax.text(0.85, 0.99, "R", transform=ax.transAxes, ha="center", va="top", fontsize=13, color="0.15")
         ax.set_axis_off()
 legend = [
-    Patch(facecolor=region_colors[name], edgecolor="0.2", alpha=0.82, label=name)
+    Patch(facecolor=region_colors[name], edgecolor="0.2", alpha=0.90, label=name)
     for name in region_order
     if region_counts[name] > 0
 ]

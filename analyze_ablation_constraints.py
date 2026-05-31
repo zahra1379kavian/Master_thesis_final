@@ -1216,7 +1216,7 @@ def plot_full_vs_task_only_anatomy(
     summary.to_csv(f"{out_base}_summary.csv", index=False)
 
     colors = {
-        "full": "#003f63",
+        "full": "#001f4d",
         "task": "#004d3d",
         "shared": "#6d174f",
     }
@@ -1301,7 +1301,7 @@ def plot_full_vs_task_only_anatomy(
             Patch(facecolor=colors["shared"], edgecolor=colors["shared"], alpha=0.58, label="Overlap"),
         ]
         fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False, bbox_to_anchor=(0.5, 0.01))
-        fig.subplots_adjust(left=0.01, right=0.995, top=0.995, bottom=0.16, wspace=0.02, hspace=0.16)
+        fig.subplots_adjust(left=0.01, right=0.995, top=0.995, bottom=0.16, wspace=0.02, hspace=-0.04)
         fig.savefig(f"{out_base}.png", dpi=300, bbox_inches="tight")
         fig.savefig(f"{out_base}.pdf", bbox_inches="tight")
         plt.close(fig)
