@@ -6,14 +6,13 @@ import numpy as np
 warnings.filterwarnings("ignore", message="Unable to import Axes3D.*")
 import matplotlib.pyplot as plt
 from matplotlib.colors import to_rgb
-from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 import nibabel as nib
 from nilearn import datasets, image
 from PIL import Image
 from scipy.ndimage import binary_fill_holes, distance_transform_edt
 
-from motor_overlap_overlay import MOTOR_OVERLAP_COLOR, motor_overlap_masks
+from motor_overlap_overlay import motor_overlap_masks
 
 src = Path("data/voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5_bold_thr90.html")
 base = Path("figures") / "voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5_bold_thr90_multiplane_contour_all_regions"
@@ -160,12 +159,14 @@ def region_label_data():
             continue
         category = atlas_category(str(label_name))
         atlas_labels[atlas_data == label_value] = category_ids[category]
-    labels = np.where(mask, atlas_labels, 0).astype(np.int16, copy=False)
-    outside_atlas = mask & (labels == 0)
+    labels = np.where(display_mask, atlas_labels, 0).astype(np.int16, copy=False)
+    outside_atlas = display_mask & (labels == 0)
     if np.any(outside_atlas):
         nearest = distance_transform_edt(atlas_labels == 0, return_distances=False, return_indices=True)
         labels[outside_atlas] = atlas_labels[tuple(axis_indices[outside_atlas] for axis_indices in nearest)]
     return labels
+motor_overlap_display, _ = motor_overlap_masks(mask, aff)
+display_mask = mask | motor_overlap_display
 region_labels = region_label_data()
 region_counts = {
     name: int(np.count_nonzero(region_labels == idx + 1))
@@ -182,15 +183,9 @@ def overlay(ax, labels, m):
     ax.imshow(rgba, interpolation="nearest")
     if np.any(m):
         ax.contour(m.astype(float), levels=[0.5], colors="#111111", linewidths=0.55, alpha=0.95)
-def overlay_motor_overlap(ax, display_mask, core_mask):
-    if np.any(display_mask):
-        ax.contour(display_mask.astype(float), levels=[0.5], colors=MOTOR_OVERLAP_COLOR, linewidths=0.95, alpha=0.95)
-    if np.any(core_mask):
-        ax.contour(core_mask.astype(float), levels=[0.5], colors=MOTOR_OVERLAP_COLOR, linewidths=1.65, alpha=1.0)
 base.parent.mkdir(exist_ok=True)
-motor_overlap_display, motor_overlap_core = motor_overlap_masks(mask, aff)
 n_cols = max(len(cuts[mode]) for mode, _ in plane_specs)
-fig, axes = plt.subplots(len(plane_specs), n_cols, figsize=(15.1, 7.6), facecolor="white")
+fig, axes = plt.subplots(len(plane_specs), n_cols, figsize=(15.1, 6.4), facecolor="white")
 for row, (mode, plane_label) in enumerate(plane_specs):
     for col in range(n_cols):
         ax = axes[row, col]
@@ -200,22 +195,19 @@ for row, (mode, plane_label) in enumerate(plane_specs):
             ax.set_axis_off()
             continue
         cut = cuts[mode][col]
-        a, m, label_slice, motor_display_slice, motor_core_slice = crop(
+        a, m, label_slice = crop(
             plane(bg, mode, cut),
-            plane(mask, mode, cut),
+            plane(display_mask, mode, cut),
             plane(region_labels, mode, cut),
-            plane(motor_overlap_display, mode, cut),
-            plane(motor_overlap_core, mode, cut),
         )
         ax.imshow(anat(a), interpolation="nearest")
         overlay(ax, label_slice, m)
-        overlay_motor_overlap(ax, motor_display_slice, motor_core_slice)
         height, width = a.shape[:2]
         brain_y, brain_x = np.where(binary_fill_holes(a > 0))
         label_x = (brain_x.min() + brain_x.max()) / 2
-        label_y = brain_y.max() + 4
+        label_y = brain_y.max() + 3
         ax.set_xlim(-0.5, width - 0.5)
-        ax.set_ylim(label_y + 18, brain_y.min() - 12 if row == 0 else brain_y.min() - 2)
+        ax.set_ylim(label_y + 12, brain_y.min() - 12 if row == 0 else brain_y.min() - 2)
         ax.text(label_x, label_y, f"{mode} = {cut:g}", ha="center", va="top", fontsize=13, color="0.2")
         if row == 0:
             orient_y = brain_y.min() + 1
@@ -227,10 +219,8 @@ legend = [
     for name in region_order
     if region_counts[name] > 0
 ]
-if np.any(motor_overlap_display):
-    legend.append(Line2D([0], [0], color=MOTOR_OVERLAP_COLOR, linewidth=1.65, label="Motor overlap"))
 fig.legend(handles=legend, loc="lower center", ncol=4, frameon=False, fontsize=12, bbox_to_anchor=(0.5, 0.055))
-fig.subplots_adjust(left=0.015, right=0.995, bottom=0.18, top=0.985, wspace=0.015, hspace=0.28)
+fig.subplots_adjust(left=0.015, right=0.995, bottom=0.18, top=0.985, wspace=0.015, hspace=0.06)
 fig.savefig(f"{base}.png", dpi=200, bbox_inches="tight", pad_inches=0.02)
 fig.savefig(f"{base}.pdf", bbox_inches="tight", pad_inches=0.02)
 print(f"{base}.png")

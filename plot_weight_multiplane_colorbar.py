@@ -16,7 +16,7 @@ import nibabel as nib
 from PIL import Image
 from scipy.ndimage import binary_fill_holes
 
-from motor_overlap_overlay import MOTOR_OVERLAP_COLOR, fill_from_nearest_selected, motor_overlap_masks
+from motor_overlap_overlay import fill_from_nearest_selected, motor_overlap_masks
 
 
 DEFAULT_HTML = Path("data/voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5_bold_thr90.html")
@@ -187,17 +187,10 @@ def draw_overlay(ax, weights, mask, cmap, norm):
         ax.contour(mask.astype(float), levels=[0.5], colors="0.12", linewidths=0.34, alpha=0.72)
 
 
-def draw_motor_overlap(ax, display_mask, core_mask):
-    if np.any(display_mask):
-        ax.contour(display_mask.astype(float), levels=[0.5], colors=MOTOR_OVERLAP_COLOR, linewidths=0.72, alpha=0.95)
-    if np.any(core_mask):
-        ax.contour(core_mask.astype(float), levels=[0.5], colors=MOTOR_OVERLAP_COLOR, linewidths=1.25, alpha=1.0)
-
-
 def main():
     args = parse_args()
     background, selected_mask, display_affine = load_html_display(args.html)
-    motor_overlap_display, motor_overlap_core = motor_overlap_masks(selected_mask, display_affine)
+    motor_overlap_display, _ = motor_overlap_masks(selected_mask, display_affine)
     weight_img = nib.load(args.weight_map)
     weights = align_weights_to_display(weight_img, selected_mask.shape, display_affine) * args.scale
     weights = np.where(selected_mask & np.isfinite(weights), weights, np.nan)
@@ -236,16 +229,13 @@ def main():
                 ax.set_axis_off()
                 continue
             cut = cuts[mode][col]
-            bg_slice, mask_slice, weight_slice, motor_display_slice, motor_core_slice = crop(
+            bg_slice, mask_slice, weight_slice = crop(
                 plane(background, display_affine, mode, cut),
                 plane(display_mask, display_affine, mode, cut),
                 plane(weights, display_affine, mode, cut),
-                plane(motor_overlap_display, display_affine, mode, cut),
-                plane(motor_overlap_core, display_affine, mode, cut),
             )
             ax.imshow(anatomical_rgba(bg_slice, max_intensity), interpolation="nearest")
             draw_overlay(ax, weight_slice, mask_slice, cmap, norm)
-            draw_motor_overlap(ax, motor_display_slice, motor_core_slice)
             height, width = bg_slice.shape[:2]
             brain_y, brain_x = np.where(binary_fill_holes(bg_slice > 0))
             if row == 0:

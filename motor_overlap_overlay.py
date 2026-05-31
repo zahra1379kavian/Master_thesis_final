@@ -16,9 +16,6 @@ from analyze_ablation_constraints import (
 )
 
 
-MOTOR_OVERLAP_COLOR = "#AA3377"
-
-
 def motor_overlap_masks(
     selected_mask: np.ndarray,
     display_affine: np.ndarray,
