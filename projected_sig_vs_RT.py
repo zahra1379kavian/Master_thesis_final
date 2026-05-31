@@ -453,6 +453,27 @@ def _draw_mean_ci(ax: plt.Axes, x: float, values: np.ndarray, color: str, marker
     return mean, ci_low, ci_high
 
 
+def _draw_boxplot(ax: plt.Axes, values: list[np.ndarray], positions: list[float], colors: list[str], width: float) -> None:
+    finite_values = [np.asarray(value, dtype=np.float64)[np.isfinite(value)] for value in values]
+    box = ax.boxplot(
+        finite_values,
+        positions=positions,
+        widths=width,
+        patch_artist=True,
+        showfliers=False,
+        whis=1.5,
+        zorder=2,
+    )
+    for patch, color in zip(box["boxes"], colors):
+        patch.set(facecolor=color, edgecolor=color, alpha=0.18, linewidth=1.0)
+    for median in box["medians"]:
+        median.set(color="0.10", linewidth=1.2)
+    for whisker in box["whiskers"]:
+        whisker.set(color="0.30", linewidth=0.9)
+    for cap in box["caps"]:
+        cap.set(color="0.30", linewidth=0.9)
+
+
 def _subject_level_pairs(paired_df: pd.DataFrame) -> pd.DataFrame:
     subject_df = (
         paired_df.groupby("sub_tag", as_index=False)
@@ -480,6 +501,13 @@ def _plot_paired_estimation(
     jitter = np.linspace(-0.045, 0.045, behavior_values.size) if behavior_values.size > 1 else np.array([0.0])
     x_behavior = jitter
     x_projection = 1.0 + jitter
+    _draw_boxplot(
+        ax,
+        [behavior_values, projection_values],
+        [0.0, 1.0],
+        [BEHAVIOUR_COLOR, PROJECTION_COLOR],
+        width=0.30,
+    )
     for x0, x1, y0, y1 in zip(x_behavior, x_projection, behavior_values, projection_values):
         ax.plot([x0, x1], [y0, y1], color="0.55", linewidth=0.55, alpha=0.28, zorder=1)
     ax.scatter(
@@ -502,8 +530,6 @@ def _plot_paired_estimation(
         alpha=0.72,
         zorder=3,
     )
-    _draw_mean_ci(ax, 0.0, behavior_values, BEHAVIOUR_COLOR)
-    _draw_mean_ci(ax, 1.0, projection_values, PROJECTION_COLOR)
 
     ax.set_xlim(-0.38, 1.38)
     ax.set_ylim(y_limits)
@@ -521,7 +547,8 @@ def _plot_behaviour_minus_projection(ax: plt.Axes, subject_df: pd.DataFrame) -> 
     reductions = subject_df["behaviour_minus_projection"].to_numpy(dtype=np.float64)
     finite_reductions = reductions[np.isfinite(reductions)]
     rng = np.random.default_rng(141)
-    x = rng.uniform(-0.045, 0.045, size=reductions.size)
+    x = rng.uniform(-0.055, 0.055, size=reductions.size)
+    _draw_boxplot(ax, [reductions], [0.0], [DIFFERENCE_COLOR], width=0.24)
     ax.scatter(
         x,
         reductions,
@@ -532,16 +559,16 @@ def _plot_behaviour_minus_projection(ax: plt.Axes, subject_df: pd.DataFrame) -> 
         linewidths=0.25,
         zorder=3,
     )
-    mean, ci_low, ci_high = _draw_mean_ci(ax, 0.18, reductions, "0.08", markersize=5.6)
+    mean, ci_low, ci_high = _mean_ci(reductions)
     p_value = stats.ttest_1samp(finite_reductions, 0.0).pvalue if finite_reductions.size > 1 else np.nan
     y_low, y_high = _expanded_limits(reductions, force_zero=True)
     y_high += (y_high - y_low) * 0.16
 
     ax.axhline(0.0, color="0.30", linestyle=(0, (4, 2)), linewidth=0.9, zorder=0)
-    ax.set_xlim(-0.18, 0.32)
+    ax.set_xlim(-0.30, 0.30)
     ax.set_ylim((y_low, y_high))
-    ax.set_xticks([0.0, 0.18])
-    ax.set_xticklabels(["Subjects", "Mean"])
+    ax.set_xticks([0.0])
+    ax.set_xticklabels(["Subjects"])
     ax.set_ylabel("Reduction in variability\n(Behaviour - Projection)")
     ax.grid(axis="y", linestyle="-", linewidth=0.45, alpha=0.18)
     ax.spines["top"].set_visible(False)
