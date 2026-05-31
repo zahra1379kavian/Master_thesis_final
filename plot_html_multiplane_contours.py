@@ -193,10 +193,10 @@ for row, (mode, plane_label) in enumerate(plane_specs):
         overlay(ax, label_slice, m)
         height, width = a.shape[:2]
         brain_y, brain_x = np.where(binary_fill_holes(a > 0))
-        ax.set_xlim(-0.5, width - 0.5)
-        ax.set_ylim(height + 17, brain_y.min() - 12 if row == 0 else -0.5)
         label_x = (brain_x.min() + brain_x.max()) / 2
-        label_y = brain_y.max() + 8
+        label_y = brain_y.max() + 4
+        ax.set_xlim(-0.5, width - 0.5)
+        ax.set_ylim(label_y + 18, brain_y.min() - 12 if row == 0 else brain_y.min() - 2)
         ax.text(label_x, label_y, f"{mode} = {cut:g}", ha="center", va="top", fontsize=13, color="0.2")
         if row == 0:
             orient_y = brain_y.min() + 1

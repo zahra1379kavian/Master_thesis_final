@@ -1225,9 +1225,9 @@ def plot_full_vs_task_only_anatomy(
     summary.to_csv(f"{out_base}_summary.csv", index=False)
 
     colors = {
-        "full": "#001f4d",
-        "task": "#004d3d",
-        "shared": "#6d174f",
+        "full": "#004488",
+        "task": "#44AA99",
+        "shared": "#CC79A7",
     }
     full_bg = np.nan_to_num(full_bg, nan=0.0)
     vmax = float(np.percentile(full_bg[full_bg > 0], 99.5)) if np.any(full_bg > 0) else 1.0
