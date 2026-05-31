@@ -825,7 +825,14 @@ def _add_significance_stars(ax, groups, tests, y_max, y_span):
         x_right = positions[test['right']]
         y = baseline + level * step
         ax.plot([x_left, x_left, x_right, x_right], [y, y + bracket_height, y + bracket_height, y], color='#222222', linewidth=1.0, clip_on=False)
-        ax.text((x_left + x_right) / 2.0, y + bracket_height + 0.008 * y_span, test['stars'], ha='center', va='bottom', color='#222222', fontsize=11, clip_on=False)
+        p_value = float(test.get('p_value_holm', np.nan))
+        if not np.isfinite(p_value):
+            p_value = float(test.get('p_value', np.nan))
+        if np.isfinite(p_value):
+            label = f"{test['stars']} p = {p_value:.4f}"
+        else:
+            label = test['stars']
+        ax.text((x_left + x_right) / 2.0, y + bracket_height + 0.008 * y_span, label, ha='center', va='bottom', color='#222222', fontsize=11, clip_on=False)
 
 def _add_star_legend(ax, tests):
     shown_stars = {str(test.get('stars', '')) for test in tests}
@@ -907,9 +914,11 @@ def _plot_cross_subject_distribution(pairwise, out_dir, paired_stats=None):
                 ax.plot([positions[0], positions[1]], [off_value, on_value], color='#4b5563', alpha=0.38, linewidth=0.8, zorder=3)
             ax.scatter(np.full(off_values.size, positions[0]), off_values, s=28, facecolor='#ffffff', edgecolor=colors_by_name['OFF-OFF'], linewidth=1.1, zorder=4)
             ax.scatter(np.full(on_values.size, positions[1]), on_values, s=28, facecolor='#ffffff', edgecolor=colors_by_name['ON-ON'], linewidth=1.1, zorder=4)
-            ax.scatter([positions[0], positions[1]], [float(np.mean(off_values)), float(np.mean(on_values))], s=46, marker='D', color='#111111', zorder=5)
+            mean_values = [float(np.mean(off_values)), float(np.mean(on_values))]
+            ax.plot([positions[0], positions[1]], mean_values, color='#111111', linewidth=1.4, zorder=5)
+            ax.scatter([positions[0], positions[1]], mean_values, s=34, marker='D', color='#111111', zorder=6)
     ax.set_xticks(positions)
-    ax.set_xticklabels([name for (name, _, _) in groups])
+    ax.set_xticklabels([{'OFF-OFF': 'off medication', 'ON-ON': 'on medication'}.get(name, name) for (name, _, _) in groups])
     ax.set_xlim(min(positions) - 0.42, max(positions) + 0.42)
     ax.set_ylabel('cross-subject distance')
     y_values = np.concatenate([values for (_, _, values) in groups])
@@ -923,9 +932,6 @@ def _plot_cross_subject_distribution(pairwise, out_dir, paired_stats=None):
     upper_padding = 0.14 if significant_count == 0 else 0.22 + 0.08 * significant_count
     ax.set_ylim(y_min - 0.05 * y_span, y_max + upper_padding * y_span)
     _add_significance_stars(ax, groups, group_tests, y_max, y_span)
-    if significant_count:
-        ax.text(0.98, 0.98, '*** p < .001', transform=ax.transAxes, ha='right', va='top', fontsize=8, color='#333333')
-    ax.grid(axis='y', color='#d9d9d9', linewidth=0.7, alpha=0.75)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     fig.tight_layout()
