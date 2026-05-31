@@ -1247,7 +1247,13 @@ def plot_full_vs_task_only_anatomy(
             "ps.fonttype": 42,
         }
     ):
-        fig, axes = plt.subplots(3, n_cols, figsize=(11.4, 5.6), facecolor="white")
+        fig, axes = plt.subplots(
+            3,
+            n_cols,
+            figsize=(11.4, 5.6),
+            facecolor="white",
+            gridspec_kw={"height_ratios": [0.68, 1.0, 1.0]},
+        )
         for row, (mode, axis) in enumerate(mode_specs):
             cuts = cuts_by_mode[mode]
             for col in range(n_cols):
