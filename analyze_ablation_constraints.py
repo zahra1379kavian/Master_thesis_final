@@ -772,13 +772,12 @@ def plot_spatial_similarity(map_specs: list[MapSpec], out_base: Path) -> None:
         )
 
     sub = pd.DataFrame(rows)
+    sub = sub[~sub["label"].eq(reference_label)].copy()
     if sub.empty:
         return
-    main = sub[sub["label"].eq(reference_label)]
-    others = sub[~sub["label"].eq(reference_label)].sort_values("dice", ascending=False)
-    sub = pd.concat([main, others], ignore_index=True)
+    sub = sub.sort_values("dice", ascending=False).reset_index(drop=True)
     display_labels = {
-        "Full ablation map": "Main model",
+        "Full ablation map": "Vigour Network",
         "No task": "Task penalty removed",
         "No BOLD stability": "BOLD stability removed",
         "No beta stability": "Beta stability removed",
@@ -818,7 +817,7 @@ def plot_spatial_similarity(map_specs: list[MapSpec], out_base: Path) -> None:
     dice_colors, dice_mappable = metric_color_scale(sub["dice"], "Blues")
     distance_colors, distance_mappable = metric_color_scale(sub["center_of_mass_distance_mm"], "Reds")
     axes[0].barh(y, sub["dice"], color=dice_colors, alpha=0.9)
-    axes[0].set_xlabel("Dice with main model")
+    axes[0].set_xlabel("Dice with Vigour Network")
     axes[0].set_xlim(0, 1)
     axes[0].set_yticks(y)
     axes[0].set_yticklabels(sub["label"].map(display_labels))
@@ -828,7 +827,7 @@ def plot_spatial_similarity(map_specs: list[MapSpec], out_base: Path) -> None:
         color=distance_colors,
         alpha=0.9,
     )
-    axes[1].set_xlabel("Center-of-mass distance from main model (mm)")
+    axes[1].set_xlabel("Center-of-mass distance from Vigour Network (mm)")
     axes[1].set_yticks(y)
     axes[1].tick_params(labelleft=False)
     for ax in axes:

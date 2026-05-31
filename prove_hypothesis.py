@@ -465,7 +465,8 @@ def _style_axis(ax) -> None:
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.set_axisbelow(True)
-    ax.tick_params(labelsize=9)
+    ax.grid(axis="y", color="#e6e6e6", linewidth=0.8)
+    ax.tick_params(labelsize=13)
 
 
 def _plot_norm_diff_figure(
@@ -475,66 +476,117 @@ def _plot_norm_diff_figure(
     selected_scores: np.ndarray,
     resampled_means: np.ndarray,
 ) -> Path:
+    selected_color = "#d55e00"
+    resample_color = "#56b4e9"
+    reference_color = "#666666"
+    ci_color = "#bdbdbd"
+
     selected_mean = float(np.mean(selected_scores))
     resample_mean = float(np.mean(resampled_means))
     ci_low, ci_high = np.percentile(resampled_means, [2.5, 97.5])
 
-    fig, axes = plt.subplots(1, 2, figsize=(11.35, 4.3))
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Liberation Sans", "Arial", "DejaVu Sans"],
+            "axes.labelsize": 13,
+            "xtick.labelsize": 13,
+            "ytick.labelsize": 13,
+            "pdf.fonttype": 42,
+            "ps.fonttype": 42,
+        }
+    ):
+        fig, axes = plt.subplots(1, 2, figsize=(11.35, 4.3))
 
-    axes[0].bar(percentiles, ratios, width=7.6, color="#c43b4d", edgecolor="#c43b4d", linewidth=0.5)
-    axes[0].axhline(1.0, color="#777777", linestyle="--", linewidth=1.4)
-    axes[0].set_xticks(percentiles)
-    axes[0].set_xticklabels([f"{int(p)}%" for p in percentiles])
-    axes[0].set_xlabel("Variability Percentile Threshold", fontsize=10)
-    axes[0].set_ylabel("Below-threshold fraction ratio\n(Selected / Non-selected)", fontsize=10)
-    finite_ratios = ratios[np.isfinite(ratios)]
-    ratio_top = max(1.1, float(np.max(finite_ratios)) * 1.12) if finite_ratios.size else 1.1
-    axes[0].set_ylim(0, ratio_top)
-    axes[0].set_xlim(1.5, 98.5)
-    _style_axis(axes[0])
+        axes[0].plot(
+            percentiles,
+            ratios,
+            color=selected_color,
+            marker="o",
+            markersize=5.8,
+            linewidth=2.2,
+        )
+        axes[0].axhline(1.0, color=reference_color, linestyle="--", linewidth=1.4)
+        axes[0].set_xticks(percentiles)
+        axes[0].set_xticklabels([f"{int(p)}%" for p in percentiles])
+        axes[0].set_xlabel("Variability percentile threshold")
+        axes[0].set_ylabel("Below-threshold fraction ratio")
+        finite_ratios = ratios[np.isfinite(ratios)]
+        if finite_ratios.size:
+            ratio_min = min(1.0, float(np.min(finite_ratios)))
+            ratio_max = max(1.0, float(np.max(finite_ratios)))
+            ratio_pad = max(0.02, (ratio_max - ratio_min) * 0.18)
+            axes[0].set_ylim(max(0.0, ratio_min - ratio_pad), ratio_max + ratio_pad)
+        else:
+            axes[0].set_ylim(0.95, 1.1)
+        axes[0].set_xlim(5.0, 95.0)
+        _style_axis(axes[0])
 
-    bins = min(40, max(16, int(np.sqrt(resampled_means.size))))
-    axes[1].hist(
-        resampled_means,
-        bins=bins,
-        density=True,
-        color="#9ecae1",
-        edgecolor="white",
-        linewidth=0.4,
-    )
-    axes[1].axvline(
-        selected_mean,
-        color="#c43b4d",
-        linestyle="--",
-        linewidth=1.7,
-        label=f"Selected mean = {selected_mean:.3f}",
-    )
-    axes[1].axvline(
-        resample_mean,
-        color="#777777",
-        linestyle="--",
-        linewidth=1.4,
-        label=f"Resample mean = {resample_mean:.3f}",
-    )
-    axes[1].axvline(
-        ci_low,
-        color="#777777",
-        linestyle="--",
-        linewidth=1.4,
-        label=f"95% CI = [{ci_low:.3f}, {ci_high:.3f}]",
-    )
-    axes[1].axvline(ci_high, color="#777777", linestyle="--", linewidth=1.4)
-    axes[1].set_xlabel("Normalized |consecutive trial beta difference|", fontsize=10)
-    axes[1].set_ylabel("Density", fontsize=10)
-    axes[1].legend(frameon=True, fontsize=9, loc="upper center", bbox_to_anchor=(0.58, 0.98))
-    _style_axis(axes[1])
+        bins = min(40, max(16, int(np.sqrt(resampled_means.size))))
+        axes[1].axvspan(ci_low, ci_high, color=ci_color, alpha=0.24, linewidth=0)
+        axes[1].hist(
+            resampled_means,
+            bins=bins,
+            density=True,
+            color=resample_color,
+            alpha=0.58,
+            edgecolor="white",
+            linewidth=0.4,
+        )
+        axes[1].axvline(selected_mean, color=selected_color, linestyle="--", linewidth=1.8)
+        axes[1].axvline(resample_mean, color=reference_color, linestyle="--", linewidth=1.5)
+        axes[1].set_xlabel("Normalized |consecutive-trial beta difference|")
+        axes[1].set_ylabel("Density")
+        axes[1].set_xlim(
+            min(selected_mean, float(np.min(resampled_means))) - 0.07,
+            max(ci_high, float(np.max(resampled_means))) + 0.07,
+        )
+        _style_axis(axes[1])
 
-    fig.tight_layout(w_pad=2.0)
-    output_png.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_png, dpi=320, bbox_inches="tight", pad_inches=0.04)
-    output_pdf = output_png.with_suffix(".pdf")
-    fig.savefig(output_pdf, bbox_inches="tight", pad_inches=0.04)
-    plt.close(fig)
+        label_box = {"facecolor": "white", "edgecolor": "none", "alpha": 0.82, "pad": 1.5}
+        axes[1].annotate(
+            f"Selected mean = {selected_mean:.2f}",
+            xy=(selected_mean, 0.94),
+            xycoords=axes[1].get_xaxis_transform(),
+            xytext=(6, 0),
+            textcoords="offset points",
+            ha="left",
+            va="center",
+            color=selected_color,
+            fontsize=12,
+            bbox=label_box,
+        )
+        axes[1].annotate(
+            f"Resample mean = {resample_mean:.2f}",
+            xy=(resample_mean, 0.84),
+            xycoords=axes[1].get_xaxis_transform(),
+            xytext=(6, 0),
+            textcoords="offset points",
+            ha="left",
+            va="center",
+            color=reference_color,
+            fontsize=12,
+            bbox=label_box,
+        )
+        axes[1].annotate(
+            f"95% CI [{ci_low:.2f}, {ci_high:.2f}]",
+            xy=(ci_high, 0.94),
+            xycoords=axes[1].get_xaxis_transform(),
+            xytext=(-6, 0),
+            textcoords="offset points",
+            ha="right",
+            va="center",
+            color=reference_color,
+            fontsize=12,
+            bbox=label_box,
+        )
+
+        fig.tight_layout(w_pad=2.0)
+        output_png.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_png, dpi=320, bbox_inches="tight", pad_inches=0.04)
+        output_pdf = output_png.with_suffix(".pdf")
+        fig.savefig(output_pdf, bbox_inches="tight", pad_inches=0.04)
+        plt.close(fig)
     return output_pdf
 
 
