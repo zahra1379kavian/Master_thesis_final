@@ -5,14 +5,37 @@ import warnings
 import numpy as np
 warnings.filterwarnings("ignore", message="Unable to import Axes3D.*")
 import matplotlib.pyplot as plt
+from matplotlib.colors import to_rgb
 from matplotlib.patches import Patch
+import nibabel as nib
+from nilearn import datasets, image
 from PIL import Image
 from scipy.ndimage import binary_fill_holes
 
 src = Path("data/voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5_bold_thr90.html")
 base = Path("figures") / "voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5_bold_thr90_multiplane_contour_all_regions"
-overlay_fill = "#0072b2"
-overlay_edge = "#004c73"
+atlas_cache_dir = Path("/home/zkavian/nilearn_data")
+atlas_version = "3v2"
+region_order = (
+    "Sensorimotor cortex",
+    "Frontal cortex",
+    "Parietal cortex",
+    "Temporal cortex",
+    "Occipital cortex",
+    "Cerebellum",
+    "Limbic/subcortical",
+    "Unassigned",
+)
+region_colors = {
+    "Sensorimotor cortex": "#004488",
+    "Frontal cortex": "#7a4ea3",
+    "Parietal cortex": "#117733",
+    "Temporal cortex": "#aa7733",
+    "Occipital cortex": "#999933",
+    "Cerebellum": "#aa4499",
+    "Limbic/subcortical": "#882255",
+    "Unassigned": "#666666",
+}
 s = src.read_text()
 imgs = [np.asarray(Image.open(BytesIO(base64.b64decode(x))).convert("RGBA")) for x in re.findall(r'src="data:image/png;base64,([^"]+)"', s)]
 cfg = json.loads(re.search(r"brainsprite\((\{.*?\})\);", s).group(1))
@@ -54,24 +77,99 @@ def plane(v, mode, cut):
     return v[:, :, k].T[::-1]
 def pad(a):
     return np.pad(a, ((3, 5), (2, 2)), mode="constant")
-def crop(a, m):
+def crop(a, m, label=None):
     b = binary_fill_holes(a > 0) | m
     y, x = np.where(b)
     y0, y1, x0, x1 = max(y.min() - 4, 0), min(y.max() + 5, a.shape[0]), max(x.min() - 4, 0), min(x.max() + 5, a.shape[1])
-    return pad(a[y0:y1, x0:x1]), pad(m[y0:y1, x0:x1])
+    cropped = (pad(a[y0:y1, x0:x1]), pad(m[y0:y1, x0:x1]))
+    if label is None:
+        return cropped
+    return cropped + (pad(label[y0:y1, x0:x1]),)
 def anat(a):
     brain = binary_fill_holes(a > 0)
     r = plt.cm.gray(np.clip(a / mx, 0, 1))
     r[~brain, 3] = 0
     return r
-def overlay(ax, m):
+def atlas_category(label_name):
+    name = re.sub(r"_(L|R)$", "", label_name)
+    if name.startswith(("Precentral", "Postcentral", "Supp_Motor_Area", "Paracentral_Lobule", "Rolandic_Oper")):
+        return "Sensorimotor cortex"
+    if name.startswith(("Frontal", "OFC")) or name in {"Rectus", "Olfactory"}:
+        return "Frontal cortex"
+    if name.startswith("Parietal") or name in {"Angular", "SupraMarginal", "Precuneus"}:
+        return "Parietal cortex"
+    if name.startswith("Temporal") or name in {"Heschl", "Fusiform"}:
+        return "Temporal cortex"
+    if name.startswith("Occipital") or name in {"Calcarine", "Cuneus", "Lingual"}:
+        return "Occipital cortex"
+    if name.startswith(("Cerebellum", "Vermis")):
+        return "Cerebellum"
+    if name.startswith(("Cingulate", "ACC", "Thal", "SN")) or name in {
+        "Insula",
+        "Hippocampus",
+        "ParaHippocampal",
+        "Amygdala",
+        "Caudate",
+        "Putamen",
+        "Pallidum",
+        "N_Acc",
+        "VTA",
+        "Red_N",
+        "LC",
+        "Raphe_D",
+        "Raphe_M",
+    }:
+        return "Limbic/subcortical"
+    return "Unassigned"
+def resample_aal_to_mask():
+    reference_img = nib.Nifti1Image(np.zeros(mask.shape, dtype=np.uint8), aff)
+    atlas = datasets.fetch_atlas_aal(version=atlas_version, data_dir=str(atlas_cache_dir), verbose=0)
+    atlas_img = atlas.maps if isinstance(atlas.maps, nib.Nifti1Image) else nib.load(atlas.maps)
+    if atlas_img.shape[:3] == reference_img.shape[:3] and np.allclose(atlas_img.affine, reference_img.affine):
+        atlas_data = np.rint(atlas_img.get_fdata()).astype(np.int32, copy=False)
+    else:
+        atlas_data = np.rint(
+            image.resample_to_img(
+                atlas_img,
+                reference_img,
+                interpolation="nearest",
+                force_resample=True,
+                copy_header=True,
+            ).get_fdata()
+        ).astype(np.int32, copy=False)
+    return atlas_data, atlas
+def region_label_data():
+    atlas_data, atlas = resample_aal_to_mask()
+    category_ids = {name: idx + 1 for idx, name in enumerate(region_order)}
+    labels = np.zeros(mask.shape, dtype=np.int16)
+    for label_value, label_name in zip(atlas.indices, atlas.labels):
+        label_value = int(label_value)
+        if label_value == 0:
+            continue
+        category = atlas_category(str(label_name))
+        labels[(atlas_data == label_value) & mask] = category_ids[category]
+    labels[mask & (labels == 0)] = category_ids["Unassigned"]
+    return labels
+region_labels = region_label_data()
+region_counts = {
+    name: int(np.count_nonzero(region_labels == idx + 1))
+    for idx, name in enumerate(region_order)
+}
+def overlay(ax, labels, m):
+    rgba = np.zeros(labels.shape + (4,), dtype=float)
+    for idx, name in enumerate(region_order, start=1):
+        hit = labels == idx
+        if not np.any(hit):
+            continue
+        rgba[hit, :3] = to_rgb(region_colors[name])
+        rgba[hit, 3] = 0.58 if name != "Unassigned" else 0.42
+    ax.imshow(rgba, interpolation="nearest")
     if np.any(m):
-        ax.contourf(m.astype(float), levels=[0.5, 1.5], colors=[overlay_fill], alpha=0.46, antialiased=True)
-        ax.contour(m.astype(float), levels=[0.5], colors=overlay_edge, linewidths=0.95)
+        ax.contour(m.astype(float), levels=[0.5], colors="#202020", linewidths=0.38, alpha=0.8)
 base.parent.mkdir(exist_ok=True)
 n_cols = max(len(cuts[mode]) for mode, _ in plane_specs)
-fig, axes = plt.subplots(len(plane_specs), n_cols, figsize=(15.1, 7.0), facecolor="white")
-for row, (mode, label) in enumerate(plane_specs):
+fig, axes = plt.subplots(len(plane_specs), n_cols, figsize=(15.1, 7.25), facecolor="white")
+for row, (mode, plane_label) in enumerate(plane_specs):
     for col in range(n_cols):
         ax = axes[row, col]
         ax.set_facecolor("none")
@@ -80,19 +178,23 @@ for row, (mode, label) in enumerate(plane_specs):
             ax.set_axis_off()
             continue
         cut = cuts[mode][col]
-        a, m = crop(plane(bg, mode, cut), plane(mask, mode, cut))
+        a, m, label_slice = crop(plane(bg, mode, cut), plane(mask, mode, cut), plane(region_labels, mode, cut))
         ax.imshow(anat(a), interpolation="nearest")
-        overlay(ax, m)
+        overlay(ax, label_slice, m)
         ax.text(0.5, -0.055, f"{mode} = {cut:g}", transform=ax.transAxes, ha="center", va="top", fontsize=6.8, color="0.2")
         if col == 0:
-            ax.text(-0.10, 0.5, label, transform=ax.transAxes, ha="right", va="center", fontsize=8.8, weight="bold", color="0.1")
+            ax.text(-0.10, 0.5, plane_label, transform=ax.transAxes, ha="right", va="center", fontsize=8.8, weight="bold", color="0.1")
         if mode in {"y", "z"}:
             ax.text(0.15, 0.99, "L", transform=ax.transAxes, ha="center", va="top", fontsize=6.8, color="0.15")
             ax.text(0.85, 0.99, "R", transform=ax.transAxes, ha="center", va="top", fontsize=6.8, color="0.15")
         ax.set_axis_off()
-legend = [Patch(facecolor=overlay_fill, edgecolor=overlay_edge, alpha=0.52, label="vigour-network")]
-fig.legend(handles=legend, loc="lower center", frameon=False, fontsize=8.8, bbox_to_anchor=(0.5, 0.012))
-fig.subplots_adjust(left=0.055, right=0.995, bottom=0.11, top=0.985, wspace=0.015, hspace=0.20)
+legend = [
+    Patch(facecolor=region_colors[name], edgecolor="0.2", alpha=0.72, label=f"{name} ({region_counts[name]:,})")
+    for name in region_order
+    if region_counts[name] > 0
+]
+fig.legend(handles=legend, loc="lower center", ncol=4, frameon=False, fontsize=7.4, bbox_to_anchor=(0.5, 0.010))
+fig.subplots_adjust(left=0.055, right=0.995, bottom=0.16, top=0.985, wspace=0.015, hspace=0.20)
 fig.savefig(f"{base}.png", dpi=200, bbox_inches="tight", pad_inches=0.02)
 fig.savefig(f"{base}.pdf", bbox_inches="tight", pad_inches=0.02)
 print(f"{base}.png")
