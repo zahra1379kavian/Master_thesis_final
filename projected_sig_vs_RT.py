@@ -37,6 +37,12 @@ PROJECTION_COLOR = "#D55E00"
 DIFFERENCE_COLOR = "#009E73"
 SUBJECT_MARKER_SIZE = 15
 MEAN_MARKER = "D"
+PAPER_FONT_FAMILY = "Liberation Sans"
+TITLE_FONT_SIZE = 18
+TAKEAWAY_SUBTITLE_FONT_SIZE = 13
+AXIS_TICK_FONT_SIZE = 13
+CELL_VALUE_FONT_SIZE = 12
+FOOTER_NOTE_FONT_SIZE = 11
 
 BETA_RE = re.compile(
     r"cleaned_beta_volume_(?P<sub>sub-pd\d+)_ses-(?P<ses>\d+)_run-(?P<run>\d+)\.npy$"
@@ -566,7 +572,7 @@ def _plot_paired_estimation(
         color="0.10",
         linewidth=1.0,
     )
-    ax.text(0.5, star_y, _significance_label(p_value), ha="center", va="bottom", fontsize=8.0, color="0.10")
+    ax.text(0.5, star_y, _significance_label(p_value), ha="center", va="bottom", fontsize=CELL_VALUE_FONT_SIZE, color="0.10")
 
     ax.set_xlim(-0.38, 1.38)
     ax.set_ylim((y_low, y_high))
@@ -619,7 +625,7 @@ def _plot_behaviour_minus_projection(ax: plt.Axes, subject_df: pd.DataFrame) -> 
         transform=ax.transAxes,
         ha="right",
         va="top",
-        fontsize=6.7,
+        fontsize=CELL_VALUE_FONT_SIZE,
         linespacing=1.25,
     )
 
@@ -649,10 +655,15 @@ def _save_behavior_projection_figure(metric_df: pd.DataFrame, out_dir: Path) -> 
 
     with plt.rc_context(
         {
-            "font.size": 8.0,
-            "axes.labelsize": 9.0,
-            "xtick.labelsize": 8.6,
-            "ytick.labelsize": 8.6,
+            "font.family": "sans-serif",
+            "font.sans-serif": [PAPER_FONT_FAMILY, "Arial", "DejaVu Sans"],
+            "font.size": AXIS_TICK_FONT_SIZE,
+            "axes.titlesize": TITLE_FONT_SIZE,
+            "figure.titlesize": TITLE_FONT_SIZE,
+            "axes.labelsize": AXIS_TICK_FONT_SIZE,
+            "xtick.labelsize": AXIS_TICK_FONT_SIZE,
+            "ytick.labelsize": AXIS_TICK_FONT_SIZE,
+            "legend.fontsize": CELL_VALUE_FONT_SIZE,
             "axes.linewidth": 0.8,
             "pdf.fonttype": 42,
             "ps.fonttype": 42,
@@ -661,12 +672,12 @@ def _save_behavior_projection_figure(metric_df: pd.DataFrame, out_dir: Path) -> 
         fig, axes = plt.subplots(
             1,
             2,
-            figsize=(6.2, 3.55),
+            figsize=(8.2, 4.65),
             gridspec_kw={"width_ratios": [1.45, 1.0]},
         )
         _plot_paired_estimation(axes[0], subject_df, y_limits)
         _plot_behaviour_minus_projection(axes[1], subject_df)
-        fig.subplots_adjust(left=0.115, right=0.985, bottom=0.15, top=0.985, wspace=0.46)
+        fig.subplots_adjust(left=0.105, right=0.985, bottom=0.18, top=0.965, wspace=0.25)
         paths = _save_pdf_and_png(fig, out_dir / "projection_behavior_subject_panel(main).pdf", dpi=300)
         plt.close(fig)
         return paths

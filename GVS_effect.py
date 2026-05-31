@@ -827,7 +827,7 @@ def _write_motor_reward_roi_profile_plot(
         "basal_ganglia_thalamus": "Basal Ganglia\n& Thalamus",
         "reward_limbic": "Reward\n& Limbic",
     }
-    stim_labels = [c.lower() for c in ROI_PROFILE_ACTIVE_LABELS]
+    stim_labels = [ROI_PROFILE_STIM_SHORT[c].replace("\n", " ") for c in ROI_PROFILE_ACTIVE_LABELS]
 
     # Build ordered list of unique base ROI names (strip _L / _R suffix)
     present_base_names: list[str] = []
@@ -842,6 +842,33 @@ def _write_motor_reward_roi_profile_plot(
     # 2 columns: left and right hemisphere; medication state is encoded by color.
     COL_CONFIG = ("L", "R")
     MEDICATION_ORDER = ("OFF", "ON")
+    plot_rois = [
+        f"{base_name}_{hemi}"
+        for base_name in present_base_names
+        for hemi in COL_CONFIG
+        if f"{base_name}_{hemi}" in rois
+    ]
+    roi_display_names = [
+        f"{re.sub(r'_[LR]$', '', roi).replace('_', ' ')} {roi[-1]}"
+        for roi in plot_rois
+    ]
+    x_values = np.arange(len(ROI_PROFILE_ACTIVE_LABELS))
+
+    y_limits_by_group: dict[str, float] = {}
+    for group in sorted(set(roi_to_group.values())):
+        group_rois = [roi for roi in plot_rois if roi_to_group.get(roi) == group]
+        group_rows = results.loc[results["roi"].isin(group_rois)]
+        if group_rows.empty:
+            continue
+        ci95 = 1.96 * group_rows["se_delta"].fillna(0.0).to_numpy(dtype=np.float64)
+        means = group_rows["mean_delta"].to_numpy(dtype=np.float64)
+        finite = np.concatenate([means - ci95, means + ci95])
+        finite = finite[np.isfinite(finite)]
+        y_limits_by_group[group] = max(float(np.max(np.abs(finite))) * 1.12, 0.05) if finite.size else 0.05
+
+    heat_max = results.loc[results["roi"].isin(plot_rois), "mean_delta"].abs().max()
+    heat_max = max(float(heat_max) if pd.notna(heat_max) else 0.05, 0.05)
+    heat_norm = matplotlib.colors.TwoSlopeNorm(vmin=-heat_max, vcenter=0.0, vmax=heat_max)
 
     with plt.rc_context({
         "font.family": "sans-serif",
@@ -852,13 +879,103 @@ def _write_motor_reward_roi_profile_plot(
         "xtick.major.size": 2.5,
         "ytick.major.size": 2.5,
     }):
-        fig, axes = plt.subplots(
-            n_rows, 2,
-            figsize=(6.8, n_rows * 1.05 + 0.85),
-            sharey=False,
-            squeeze=False,
-        )
+        heatmap_height = max(2.7, 0.22 * len(plot_rois) + 0.75)
+        fig = plt.figure(figsize=(7.2, heatmap_height + n_rows * 0.92 + 1.0))
         fig.patch.set_facecolor("white")
+        grid = fig.add_gridspec(
+            n_rows + 2,
+            3,
+            height_ratios=[heatmap_height, 0.22] + [1.0] * n_rows,
+            width_ratios=[1.0, 1.0, 0.045],
+            hspace=0.42,
+            wspace=0.28,
+        )
+        heat_axes = [fig.add_subplot(grid[0, col_idx]) for col_idx in range(2)]
+        cbar_ax = fig.add_subplot(grid[0, 2])
+        for col_idx, hemi_label in enumerate(["Left Hemisphere", "Right Hemisphere"]):
+            header_ax = fig.add_subplot(grid[1, col_idx])
+            header_ax.axis("off")
+            header_ax.text(
+                0.5,
+                0.5,
+                hemi_label,
+                ha="center",
+                va="center",
+                fontsize=8.8,
+                fontweight="bold",
+                color="#333333",
+            )
+        axes = np.array(
+            [
+                [fig.add_subplot(grid[row_idx + 2, col_idx]) for col_idx in range(2)]
+                for row_idx in range(n_rows)
+            ],
+            dtype=object,
+        )
+
+        heat_image = None
+        for col_idx, medication in enumerate(MEDICATION_ORDER):
+            ax = heat_axes[col_idx]
+            heat_rows = (
+                results
+                .loc[results["roi"].isin(plot_rois) & results["medication"].eq(medication)]
+                .pivot(index="roi", columns="condition", values="mean_delta")
+                .reindex(index=plot_rois, columns=ROI_PROFILE_ACTIVE_LABELS)
+            )
+            heat_image = ax.imshow(
+                heat_rows.to_numpy(dtype=np.float64),
+                aspect="auto",
+                cmap="RdBu_r",
+                norm=heat_norm,
+            )
+            ax.set_title(f"Med. {medication}", fontsize=8.5, fontweight="bold", pad=5)
+            ax.set_xticks(x_values)
+            ax.set_xticklabels(stim_labels, rotation=35, ha="right", fontsize=6.6)
+            ax.set_yticks(np.arange(len(plot_rois)))
+            if col_idx == 0:
+                ax.set_yticklabels(roi_display_names, fontsize=6.6)
+            else:
+                ax.set_yticklabels([])
+                ax.tick_params(axis="y", length=0)
+            ax.tick_params(axis="x", pad=1.5)
+            ax.set_xlim(-0.5, len(ROI_PROFILE_ACTIVE_LABELS) - 0.5)
+            ax.set_ylim(len(plot_rois) - 0.5, -0.5)
+            ax.set_facecolor("#f7f7f7")
+
+            med_rows = results.loc[results["medication"].eq(medication)].set_index(["roi", "condition"])
+            for roi_idx, roi in enumerate(plot_rois):
+                for condition_idx, condition in enumerate(ROI_PROFILE_ACTIVE_LABELS):
+                    if not bool(med_rows.get("sig_fdr_within_roi_med", pd.Series(dtype=bool)).get((roi, condition), False)):
+                        continue
+                    ax.scatter(
+                        condition_idx,
+                        roi_idx,
+                        s=25,
+                        facecolors="none",
+                        edgecolors="#111111",
+                        linewidths=0.8,
+                    )
+
+            for spine in ax.spines.values():
+                spine.set_visible(False)
+            ax.set_xticks(np.arange(-0.5, len(ROI_PROFILE_ACTIVE_LABELS), 1), minor=True)
+            ax.set_yticks(np.arange(-0.5, len(plot_rois), 1), minor=True)
+            ax.grid(which="minor", color="white", linewidth=0.6)
+            ax.tick_params(which="minor", bottom=False, left=False)
+
+            boundary = 0
+            for group_name, group_items in pd.Series(plot_rois).groupby(
+                [roi_to_group.get(roi, "") for roi in plot_rois],
+                sort=False,
+            ):
+                boundary += len(group_items)
+                if boundary < len(plot_rois):
+                    ax.axhline(boundary - 0.5, color="#555555", linewidth=0.7)
+
+        if heat_image is not None:
+            cbar = fig.colorbar(heat_image, cax=cbar_ax)
+            cbar.set_label("Mean delta vs sham", fontsize=7)
+            cbar.ax.tick_params(labelsize=6.5, width=0.6, length=2.5)
 
         prev_group: str = ""
         for row_idx, base_name in enumerate(present_base_names):
@@ -882,36 +999,40 @@ def _write_motor_reward_roi_profile_plot(
                     )
                     for medication in MEDICATION_ORDER
                 ]
-                x_values = np.arange(len(ROI_PROFILE_ACTIVE_LABELS))
-                bar_width = 0.32
-                offsets = np.linspace(-0.18, 0.18, len(MEDICATION_ORDER))
+                offsets = np.linspace(-0.16, 0.16, len(MEDICATION_ORDER))
                 for med_idx, (medication, subset) in enumerate(med_subsets):
-                    ax.bar(
+                    yerr = 1.96 * subset["se_delta"].fillna(0.0).to_numpy(dtype=np.float64)
+                    ax.errorbar(
                         x_values + offsets[med_idx],
                         subset["mean_delta"],
-                        yerr=subset["se_delta"],
+                        yerr=yerr,
+                        fmt="o",
+                        markersize=3.2,
                         color=PROJECTED_SIGNAL_MED_COLORS[medication],
-                        edgecolor="#333333", linewidth=0.35,
-                        error_kw={"elinewidth": 0.8, "capsize": 1.8, "ecolor": "#444444"},
-                        alpha=0.90, width=bar_width,
+                        markerfacecolor=PROJECTED_SIGNAL_MED_COLORS[medication],
+                        markeredgecolor="#222222",
+                        markeredgewidth=0.35,
+                        elinewidth=0.8,
+                        capsize=2.0,
+                        capthick=0.75,
+                        linestyle="none",
+                        alpha=0.95,
                         label=medication if row_idx == 0 and col_idx == 0 else "_nolegend_",
                     )
                 ax.axhline(0, color="#555555", linewidth=0.6, zorder=0)
                 ax.set_xticks(x_values)
-                ax.set_xticklabels(stim_labels, rotation=0, ha="center", fontsize=7)
+                if row_idx == n_rows - 1:
+                    ax.set_xticklabels(stim_labels, rotation=35, ha="right", fontsize=6.6)
+                else:
+                    ax.set_xticklabels([])
+                    ax.tick_params(axis="x", labelbottom=False)
 
                 if col_idx == 0:
                     ax.set_ylabel(base_name.replace("_", " "), fontsize=8.5, labelpad=3)
 
-                finite_vals = pd.concat(
-                    [
-                        subset["mean_delta"].abs() + subset["se_delta"].abs().fillna(0)
-                        for _, subset in med_subsets
-                    ]
-                ).dropna()
-                y_range = max(float(finite_vals.max()) if not finite_vals.empty else 0.01, 0.01)
-                ax.set_ylim(-1.45 * y_range, 1.65 * y_range)
-                star_off = 0.1 * y_range
+                y_limit = y_limits_by_group.get(group, 0.05)
+                ax.set_ylim(-y_limit, y_limit)
+                star_off = 0.06 * y_limit
 
                 for med_idx, (_, subset) in enumerate(med_subsets):
                     for x_val, row in subset.iterrows():
@@ -921,10 +1042,12 @@ def _write_motor_reward_roi_profile_plot(
                         y_base = float(row["mean_delta"])
                         se = float(row["se_delta"]) if pd.notna(row["se_delta"]) else 0.0
                         sign = 1.0 if y_base >= 0 else -1.0
+                        y_star = y_base + sign * (1.96 * se + star_off)
+                        y_star = np.clip(y_star, -0.94 * y_limit, 0.94 * y_limit)
                         ax.text(
-                            x_val + offsets[med_idx], y_base + sign * (se + star_off), lbl,
+                            x_val + offsets[med_idx], y_star, lbl,
                             ha="center", va="bottom" if sign > 0 else "top",
-                            fontsize=9, color="#c0392b", fontweight="bold",
+                            fontsize=8.2, color="#c0392b", fontweight="bold",
                         )
 
                 ax.grid(axis="y", alpha=0.25, linestyle="--", linewidth=0.45, zorder=0)
@@ -945,28 +1068,61 @@ def _write_motor_reward_roi_profile_plot(
 
             prev_group = group
 
-        fig.tight_layout(rect=(0.02, 0, 0.94, 0.93), h_pad=0.35, w_pad=0.55)
-
-        # Column headers placed in figure coordinates (no set_title clash)
-        axes_top = axes[0][0].get_position().y1
-        hemi_y = axes_top + 0.012
-
-        for col_idx, hemi_label in enumerate(["Left Hemisphere", "Right Hemisphere"]):
-            x_mid = (axes[0][col_idx].get_position().x0 + axes[0][col_idx].get_position().x1) / 2
-            fig.text(
-                x_mid, hemi_y, hemi_label,
-                ha="center", va="bottom",
-                fontsize=9, fontweight="bold", color="#333333",
-            )
-
-        handles, labels = axes[0][0].get_legend_handles_labels()
-        fig.legend(
-            handles, [f"Med. {label}" for label in labels],
-            loc="upper center", bbox_to_anchor=(0.5, 0.995),
-            ncol=2, frameon=False, fontsize=8,
+        fig.subplots_adjust(
+            left=0.13,
+            right=0.90,
+            top=0.91,
+            bottom=0.06,
+            hspace=0.45,
+            wspace=0.30,
         )
 
-        paths = _save_pdf_and_png(fig, out_dir / "C_motor_reward_roi_gvs_profiles.pdf", dpi=220)
+        handles = [
+            matplotlib.lines.Line2D(
+                [],
+                [],
+                marker="o",
+                linestyle="none",
+                markerfacecolor=PROJECTED_SIGNAL_MED_COLORS[medication],
+                markeredgecolor="#222222",
+                markeredgewidth=0.35,
+                markersize=5,
+                label=f"Med. {medication}",
+            )
+            for medication in MEDICATION_ORDER
+        ]
+        handles.append(
+            matplotlib.lines.Line2D(
+                [],
+                [],
+                marker="o",
+                linestyle="none",
+                markerfacecolor="none",
+                markeredgecolor="#111111",
+                markeredgewidth=0.8,
+                markersize=5,
+                label="FDR q<0.05",
+            )
+        )
+        handles.append(
+            matplotlib.lines.Line2D(
+                [],
+                [],
+                marker="*",
+                linestyle="none",
+                color="#c0392b",
+                markersize=7,
+                label="p<0.05",
+            )
+        )
+        fig.legend(
+            handles,
+            [handle.get_label() for handle in handles],
+            loc="upper center", bbox_to_anchor=(0.5, 0.992),
+            ncol=4, frameon=False, fontsize=7.3,
+        )
+
+        paths = _save_pdf_and_png(fig, out_dir / "C_motor_reward_roi_gvs_profiles.pdf", dpi=300)
         plt.close(fig)
         return paths
 

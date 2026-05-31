@@ -11,6 +11,7 @@ warnings.filterwarnings('ignore', message='Unable to import Axes3D.*')
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+from matplotlib.text import Text
 import nibabel as nib
 import numpy as np
 import pandas as pd
@@ -37,8 +38,23 @@ COMPARISON_METRIC = 'laplacian_spectral_distance_signed'
 INTRA_BETWEEN_FC_METRIC = 'pearson_fisher_z'
 BETA_FILE_RE = re.compile('cleaned_beta_volume_(?P<subject>sub-pd\\d+)_ses-(?P<session>\\d+)_run-(?P<run>\\d+)\\.npy$')
 DEFAULT_SESSION_STATES = {'1': 'off', '2': 'on'}
+PAPER_FONT_FAMILY = 'Liberation Sans'
+TITLE_FONT_SIZE = 18
+TAKEAWAY_SUBTITLE_FONT_SIZE = 13
+AXIS_TICK_FONT_SIZE = 13
+CELL_VALUE_FONT_SIZE = 12
+FOOTER_NOTE_FONT_SIZE = 11
 WeightedROI = namedtuple('WeightedROI', ('name', 'mask', 'weights', 'n_voxels'))
 SessionSpec = namedtuple('SessionSpec', ('label', 'subject', 'session', 'state', 'bold_path', 'timeseries_path', 'beta_paths'))
+
+def _apply_paper_typography(fig, axes):
+    for ax in np.atleast_1d(axes).ravel():
+        ax.xaxis.label.set_fontsize(AXIS_TICK_FONT_SIZE)
+        ax.yaxis.label.set_fontsize(AXIS_TICK_FONT_SIZE)
+        ax.title.set_fontsize(TITLE_FONT_SIZE)
+        ax.tick_params(labelsize=AXIS_TICK_FONT_SIZE)
+    for text in fig.findobj(match=Text):
+        text.set_fontfamily(PAPER_FONT_FAMILY)
 
 def _resolve_path(value, base_dir):
     if pd.isna(value):
@@ -832,7 +848,7 @@ def _add_significance_stars(ax, groups, tests, y_max, y_span):
             label = f"{test['stars']} p = {p_value:.4f}"
         else:
             label = test['stars']
-        ax.text((x_left + x_right) / 2.0, y + bracket_height + 0.008 * y_span, label, ha='center', va='bottom', color='#222222', fontsize=11, clip_on=False)
+        ax.text((x_left + x_right) / 2.0, y + bracket_height + 0.008 * y_span, label, ha='center', va='bottom', color='#222222', fontsize=CELL_VALUE_FONT_SIZE, clip_on=False)
 
 def _add_star_legend(ax, tests):
     shown_stars = {str(test.get('stars', '')) for test in tests}
@@ -846,7 +862,7 @@ def _add_star_legend(ax, tests):
     if not labels:
         return
     handles = [Line2D([], [], linestyle='none', label=label) for label in labels]
-    ax.legend(handles=handles, loc='upper right', frameon=False, handlelength=0, handletextpad=0, borderpad=0.1, labelspacing=0.2, fontsize=7)
+    ax.legend(handles=handles, loc='upper right', frameon=False, handlelength=0, handletextpad=0, borderpad=0.1, labelspacing=0.2, fontsize=CELL_VALUE_FONT_SIZE)
 
 def _paired_permutation_plot_tests(groups, paired_stats):
     if paired_stats is None:
@@ -887,7 +903,7 @@ def _plot_cross_subject_distribution(pairwise, out_dir, paired_stats=None):
     if paired_stats is not None and paired_stats.get('complete_subjects'):
         lookup = _distance_lookup(_metric_pairwise_rows(pairwise))
         subject_values = _subject_level_similarity_values(paired_stats['complete_subjects'], lookup)
-    (fig, ax) = plt.subplots(figsize=(4.7, 4.15))
+    (fig, ax) = plt.subplots(figsize=(5.8, 5.2))
     positions = [pos for (_, pos, _) in groups]
     violins = ax.violinplot([values for (_, _, values) in groups], positions=positions, widths=0.74, showmeans=False, showmedians=False, showextrema=False)
     for (body, (name, _, _)) in zip(violins['bodies'], groups):
@@ -929,17 +945,19 @@ def _plot_cross_subject_distribution(pairwise, out_dir, paired_stats=None):
     y_max = float(np.max(y_values))
     y_span = max(y_max - y_min, 1e-06)
     significant_count = sum(1 for test in group_tests if test['stars'])
-    upper_padding = 0.14 if significant_count == 0 else 0.22 + 0.08 * significant_count
+    upper_padding = 0.14 if significant_count == 0 else 0.12 + 0.06 * significant_count
     ax.set_ylim(y_min - 0.05 * y_span, y_max + upper_padding * y_span)
     _add_significance_stars(ax, groups, group_tests, y_max, y_span)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
+    _apply_paper_typography(fig, [ax])
     fig.tight_layout()
     out_dir.mkdir(parents=True, exist_ok=True)
     png_path = out_dir / 'cross_subject_only_laplacian_spectral_distance_signed_distribution.png'
     pdf_path = png_path.with_suffix('.pdf')
-    fig.savefig(png_path, dpi=190, bbox_inches='tight', pad_inches=0.04)
-    fig.savefig(pdf_path, bbox_inches='tight', pad_inches=0.04)
+    with plt.rc_context({'pdf.fonttype': 42, 'ps.fonttype': 42}):
+        fig.savefig(png_path, dpi=190, bbox_inches='tight', pad_inches=0.04)
+        fig.savefig(pdf_path, bbox_inches='tight', pad_inches=0.04)
     plt.close(fig)
     return png_path
 
@@ -1561,12 +1579,12 @@ def _plot_intra_between_fc(subject_deltas, results, out_dir):
     if subject_deltas.empty:
         raise RuntimeError('No complete OFF/ON subjects were available for intra-vs-between FC plotting')
     colors = {'off': '#4C78A8', 'on': '#E45756', 'delta': '#333333', 'summary': '#D62728'}
-    (fig, axes) = plt.subplots(1, 2, figsize=(8.0, 3.4), gridspec_kw={'width_ratios': [0.85, 1.15]})
+    (fig, axes) = plt.subplots(1, 2, figsize=(10.2, 4.7), gridspec_kw={'width_ratios': [0.85, 0.85]})
     rng = np.random.default_rng(0)
 
     paired_specs = [
         ('Intra-ROI', 'within_roi_off_r', 'within_roi_on_r', 0.0),
-        ('Between-ROI', 'between_roi_off_r', 'between_roi_on_r', 1.1),
+        ('Between-ROI', 'between_roi_off_r', 'between_roi_on_r', 0.68),
     ]
     for (_, off_column, on_column, offset) in paired_specs:
         off_values = subject_deltas[off_column].to_numpy(dtype=np.float64)
@@ -1575,18 +1593,20 @@ def _plot_intra_between_fc(subject_deltas, results, out_dir):
             axes[0].plot([offset, offset + 0.32], [off_value, on_value], color='#b3b3b3', linewidth=0.55, alpha=0.35, zorder=1)
         axes[0].scatter(rng.normal(offset, 0.018, off_values.size), off_values, s=20, marker='o', color=colors['off'], edgecolor='white', linewidth=0.35, zorder=2, label='OFF' if offset == 0.0 else None)
         axes[0].scatter(rng.normal(offset + 0.32, 0.018, on_values.size), on_values, s=22, marker='s', color=colors['on'], edgecolor='white', linewidth=0.35, zorder=2, label='ON' if offset == 0.0 else None)
-    axes[0].set_xticks([0.16, 1.26])
+    axes[0].set_xticks([item[3] + 0.16 for item in paired_specs])
     axes[0].set_xticklabels([item[0] for item in paired_specs])
+    axes[0].set_xlim(-0.08, paired_specs[-1][3] + 0.40)
     axes[0].set_ylabel('Mean FC per subject')
-    axes[0].legend(frameon=False, fontsize=8, loc='best')
+    axes[0].legend(frameon=False, fontsize=CELL_VALUE_FONT_SIZE, loc='best')
 
     delta_specs = [
-        ('Intra-ROI', 'within_roi_delta_z_on_minus_off', 'within_roi_on_minus_off', 0.0),
-        ('Between-ROI', 'between_roi_delta_z_on_minus_off', 'between_roi_on_minus_off', 1.0),
+        ('Intra-ROI', 'within_roi_delta_z_on_minus_off', 'within_roi_on_minus_off', 0.45),
+        ('Between-ROI', 'between_roi_delta_z_on_minus_off', 'between_roi_on_minus_off', 0.55),
     ]
+    delta_positions = [item[3] for item in delta_specs]
     for (_, row) in subject_deltas.iterrows():
         values = [row['within_roi_delta_z_on_minus_off'], row['between_roi_delta_z_on_minus_off']]
-        axes[1].plot([0, 1], values, color='#b3b3b3', linewidth=0.55, alpha=0.35, zorder=1)
+        axes[1].plot(delta_positions, values, color='#b3b3b3', linewidth=0.55, alpha=0.35, zorder=1)
     summary_bounds = []
     for (_, column, analysis_key, x_value) in delta_specs:
         values = subject_deltas[column].to_numpy(dtype=np.float64)
@@ -1602,8 +1622,10 @@ def _plot_intra_between_fc(subject_deltas, results, out_dir):
         else:
             axes[1].scatter([x_value], [mean_value], s=26, color=colors['summary'], zorder=3)
     axes[1].axhline(0, color='#666666', linewidth=0.8, linestyle='--')
-    axes[1].set_xticks([item[3] for item in delta_specs])
+    axes[1].set_xticks(delta_positions)
     axes[1].set_xticklabels([item[0] for item in delta_specs])
+    x_pad = 0.11
+    axes[1].set_xlim(min(delta_positions) - x_pad, max(delta_positions) + x_pad)
     axes[1].set_ylabel('FC difference (On-Off)')
     p_value = results.get('within_minus_between_delta', {}).get('paired_t_p_value_two_sided', np.nan)
     all_delta_values = subject_deltas[['within_roi_delta_z_on_minus_off', 'between_roi_delta_z_on_minus_off']].to_numpy(dtype=np.float64).ravel()
@@ -1618,9 +1640,9 @@ def _plot_intra_between_fc(subject_deltas, results, out_dir):
         y_range = 1.0
     bracket_y = y_max + 0.09 * y_range
     bracket_h = 0.04 * y_range
-    axes[1].plot([0, 0, 1, 1], [bracket_y, bracket_y + bracket_h, bracket_y + bracket_h, bracket_y], color='#333333', linewidth=0.8, clip_on=False)
+    axes[1].plot([delta_positions[0], delta_positions[0], delta_positions[1], delta_positions[1]], [bracket_y, bracket_y + bracket_h, bracket_y + bracket_h, bracket_y], color='#333333', linewidth=0.8, clip_on=False)
     p_text = 'n/a' if not np.isfinite(float(p_value)) else ('<0.001' if float(p_value) < 0.001 else f'{float(p_value):.3f}')
-    axes[1].text(0.5, bracket_y + bracket_h + 0.025 * y_range, f'paired contrast: p = {p_text}', ha='center', va='bottom', fontsize=8.5)
+    axes[1].text(float(np.mean(delta_positions)), bracket_y + bracket_h + 0.025 * y_range, f'paired contrast: p = {p_text}', ha='center', va='bottom', fontsize=CELL_VALUE_FONT_SIZE)
     axes[1].set_ylim(y_min - 0.08 * y_range, bracket_y + bracket_h + 0.18 * y_range)
 
     for (label, ax) in zip(('A', 'B'), axes):
@@ -1628,14 +1650,16 @@ def _plot_intra_between_fc(subject_deltas, results, out_dir):
         ax.set_axisbelow(True)
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
-        ax.tick_params(labelsize=8.5)
-        ax.text(-0.12, 1.04, label, transform=ax.transAxes, fontsize=11, fontweight='bold', ha='left', va='bottom')
+        ax.tick_params(labelsize=AXIS_TICK_FONT_SIZE)
+        ax.text(-0.12, 1.04, label, transform=ax.transAxes, fontsize=TITLE_FONT_SIZE, fontweight='bold', ha='left', va='bottom')
+    _apply_paper_typography(fig, axes)
     fig.tight_layout()
     out_dir.mkdir(parents=True, exist_ok=True)
     png_path = out_dir / 'intra_vs_between_fc_medication_change.png'
     pdf_path = png_path.with_suffix('.pdf')
-    fig.savefig(png_path, dpi=320, bbox_inches='tight', pad_inches=0.04)
-    fig.savefig(pdf_path, bbox_inches='tight', pad_inches=0.04)
+    with plt.rc_context({'pdf.fonttype': 42, 'ps.fonttype': 42}):
+        fig.savefig(png_path, dpi=320, bbox_inches='tight', pad_inches=0.04)
+        fig.savefig(pdf_path, bbox_inches='tight', pad_inches=0.04)
     plt.close(fig)
     return png_path
 
