@@ -13,10 +13,10 @@ import matplotlib
 warnings.filterwarnings("ignore", message="Unable to import Axes3D.*")
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
 import nibabel as nib
 import numpy as np
 import pandas as pd
+from scipy import stats
 import statsmodels.formula.api as smf
 
 
@@ -32,11 +32,11 @@ DEFAULT_OUT_DIR = ROOT / "figures" / "projected_RT"
 PROJECTION_TRIAL_CHUNK_SIZE = 8
 PROJECTION_VOXEL_CHUNK_SIZE = 4096
 VARIABILITY_AXIS_LABEL = "Consecutive-trial variability"
-BEHAVIOUR_COLOR = "#3B7EA1"
-PROJECTION_COLOR = "#B36B3C"
-DIFFERENCE_COLOR = "#6E5A9A"
-SUBJECT_MARKER_SIZE = 22
-MEAN_MARKER = "^"
+BEHAVIOUR_COLOR = "#0072B2"
+PROJECTION_COLOR = "#D55E00"
+DIFFERENCE_COLOR = "#009E73"
+SUBJECT_MARKER_SIZE = 15
+MEAN_MARKER = "D"
 
 BETA_RE = re.compile(
     r"cleaned_beta_volume_(?P<sub>sub-pd\d+)_ses-(?P<ses>\d+)_run-(?P<run>\d+)\.npy$"
@@ -405,6 +405,54 @@ def _expanded_limits(values: np.ndarray, pad_fraction: float = 0.08, force_zero:
     return low - pad, high + pad
 
 
+def _mean_ci(values: np.ndarray, confidence: float = 0.95) -> tuple[float, float, float]:
+    finite_values = np.asarray(values, dtype=np.float64)
+    finite_values = finite_values[np.isfinite(finite_values)]
+    if finite_values.size == 0:
+        return np.nan, np.nan, np.nan
+
+    mean = float(np.mean(finite_values))
+    if finite_values.size < 2:
+        return mean, np.nan, np.nan
+
+    sem = float(stats.sem(finite_values))
+    if not np.isfinite(sem):
+        return mean, mean, mean
+    half_width = float(stats.t.ppf(0.5 + confidence / 2.0, finite_values.size - 1) * sem)
+    return mean, mean - half_width, mean + half_width
+
+
+def _format_p_value(p_value: float) -> str:
+    if not np.isfinite(p_value):
+        return "p = n/a"
+    if p_value < 0.001:
+        return "p < 0.001"
+    return f"p = {p_value:.3f}"
+
+
+def _draw_mean_ci(ax: plt.Axes, x: float, values: np.ndarray, color: str, markersize: float = 5.2) -> tuple[float, float, float]:
+    mean, ci_low, ci_high = _mean_ci(values)
+    yerr = None
+    if np.isfinite(ci_low) and np.isfinite(ci_high):
+        yerr = np.array([[mean - ci_low], [ci_high - mean]], dtype=np.float64)
+    ax.errorbar(
+        [x],
+        [mean],
+        yerr=yerr,
+        fmt=MEAN_MARKER,
+        markersize=markersize,
+        markerfacecolor="white",
+        markeredgecolor=color,
+        markeredgewidth=1.15,
+        ecolor=color,
+        elinewidth=1.15,
+        capsize=3.2,
+        capthick=1.0,
+        zorder=5,
+    )
+    return mean, ci_low, ci_high
+
+
 def _subject_level_pairs(paired_df: pd.DataFrame) -> pd.DataFrame:
     subject_df = (
         paired_df.groupby("sub_tag", as_index=False)
@@ -417,60 +465,47 @@ def _subject_level_pairs(paired_df: pd.DataFrame) -> pd.DataFrame:
     subject_df["_sort_key"] = subject_df["sub_tag"].astype(str).map(_category_sort_key)
     subject_df = subject_df.sort_values("_sort_key").drop(columns="_sort_key").reset_index(drop=True)
     subject_df["projection_minus_behavior"] = subject_df["projection_raw"] - subject_df["behavior_raw"]
+    subject_df["behaviour_minus_projection"] = subject_df["behavior_raw"] - subject_df["projection_raw"]
     return subject_df
 
 
-def _plot_paired_box_with_connections(
+def _plot_paired_estimation(
     ax: plt.Axes,
     subject_df: pd.DataFrame,
     y_limits: tuple[float, float],
 ) -> None:
-    behavior_values = subject_df["behavior_raw"].to_numpy(dtype=np.float64)
-    projection_values = subject_df["projection_raw"].to_numpy(dtype=np.float64)
-    box = ax.boxplot(
-        [behavior_values, projection_values],
-        positions=[0.0, 1.0],
-        widths=0.42,
-        patch_artist=True,
-        showfliers=False,
-        showmeans=True,
-        meanprops={"marker": MEAN_MARKER, "markerfacecolor": "0.05", "markeredgecolor": "0.05", "markersize": 4.2},
-        medianprops={"color": "0.05", "linewidth": 1.15},
-        zorder=1,
-    )
-    for patch, color in zip(box["boxes"], [BEHAVIOUR_COLOR, PROJECTION_COLOR]):
-        patch.set(facecolor=color, edgecolor=color, linewidth=1.0, alpha=0.16)
-    for item in box["whiskers"] + box["caps"]:
-        item.set(color="0.42", linewidth=0.85)
-
-    rng = np.random.default_rng(140)
-    jitter = rng.uniform(-0.045, 0.045, size=behavior_values.size)
+    plot_df = subject_df.sort_values("behaviour_minus_projection").reset_index(drop=True)
+    behavior_values = plot_df["behavior_raw"].to_numpy(dtype=np.float64)
+    projection_values = plot_df["projection_raw"].to_numpy(dtype=np.float64)
+    jitter = np.linspace(-0.045, 0.045, behavior_values.size) if behavior_values.size > 1 else np.array([0.0])
     x_behavior = jitter
     x_projection = 1.0 + jitter
     for x0, x1, y0, y1 in zip(x_behavior, x_projection, behavior_values, projection_values):
-        ax.plot([x0, x1], [y0, y1], color="0.62", linewidth=0.65, alpha=0.42, zorder=2)
+        ax.plot([x0, x1], [y0, y1], color="0.55", linewidth=0.55, alpha=0.28, zorder=1)
     ax.scatter(
         x_behavior,
         behavior_values,
         s=SUBJECT_MARKER_SIZE,
-        facecolors="0.05",
-        edgecolors="0.05",
-        linewidths=0.4,
-        alpha=0.95,
+        facecolors=BEHAVIOUR_COLOR,
+        edgecolors="white",
+        linewidths=0.25,
+        alpha=0.72,
         zorder=3,
     )
     ax.scatter(
         x_projection,
         projection_values,
         s=SUBJECT_MARKER_SIZE,
-        facecolors="0.05",
-        edgecolors="0.05",
-        linewidths=0.4,
-        alpha=0.95,
+        facecolors=PROJECTION_COLOR,
+        edgecolors="white",
+        linewidths=0.25,
+        alpha=0.72,
         zorder=3,
     )
+    _draw_mean_ci(ax, 0.0, behavior_values, BEHAVIOUR_COLOR)
+    _draw_mean_ci(ax, 1.0, projection_values, PROJECTION_COLOR)
 
-    ax.set_xlim(-0.45, 1.45)
+    ax.set_xlim(-0.38, 1.38)
     ax.set_ylim(y_limits)
     ax.set_xticks([0.0, 1.0])
     ax.set_xticklabels(["Behaviour", "Projection"])
@@ -480,73 +515,48 @@ def _plot_paired_box_with_connections(
     ax.spines["right"].set_visible(False)
     ax.spines["left"].set_color("0.25")
     ax.spines["bottom"].set_color("0.25")
-    ax.legend(
-        handles=[
-            Line2D([0], [0], marker="o", color="0.05", linestyle="", markersize=3.4, label="Subject"),
-            Line2D([0], [0], marker=MEAN_MARKER, color="0.05", linestyle="", markersize=4.0, label="Mean"),
-        ],
-        loc="lower left",
-        frameon=False,
-        fontsize=6.6,
-        handlelength=1.0,
-        borderpad=0.1,
-        labelspacing=0.2,
-    )
 
 
-def _plot_projection_minus_behavior(ax: plt.Axes, subject_df: pd.DataFrame) -> None:
-    differences = subject_df["projection_minus_behavior"].to_numpy(dtype=np.float64)
-    box = ax.boxplot(
-        [differences],
-        positions=[0.0],
-        widths=0.42,
-        patch_artist=True,
-        showfliers=False,
-        showmeans=True,
-        meanprops={"marker": MEAN_MARKER, "markerfacecolor": "0.05", "markeredgecolor": "0.05", "markersize": 4.2},
-        medianprops={"color": "0.05", "linewidth": 1.15},
-        zorder=1,
-    )
-    for patch in box["boxes"]:
-        patch.set(facecolor=DIFFERENCE_COLOR, edgecolor=DIFFERENCE_COLOR, linewidth=1.0, alpha=0.16)
-    for item in box["whiskers"] + box["caps"]:
-        item.set(color="0.42", linewidth=0.85)
-
+def _plot_behaviour_minus_projection(ax: plt.Axes, subject_df: pd.DataFrame) -> None:
+    reductions = subject_df["behaviour_minus_projection"].to_numpy(dtype=np.float64)
+    finite_reductions = reductions[np.isfinite(reductions)]
     rng = np.random.default_rng(141)
-    x = rng.uniform(-0.055, 0.055, size=differences.size)
+    x = rng.uniform(-0.045, 0.045, size=reductions.size)
     ax.scatter(
         x,
-        differences,
+        reductions,
         s=SUBJECT_MARKER_SIZE,
-        facecolors="0.05",
-        alpha=0.95,
-        edgecolors="0.05",
-        linewidths=0.4,
+        facecolors=DIFFERENCE_COLOR,
+        alpha=0.74,
+        edgecolors="white",
+        linewidths=0.25,
         zorder=3,
     )
+    mean, ci_low, ci_high = _draw_mean_ci(ax, 0.18, reductions, "0.08", markersize=5.6)
+    p_value = stats.ttest_1samp(finite_reductions, 0.0).pvalue if finite_reductions.size > 1 else np.nan
+    y_low, y_high = _expanded_limits(reductions, force_zero=True)
+    y_high += (y_high - y_low) * 0.16
+
     ax.axhline(0.0, color="0.30", linestyle=(0, (4, 2)), linewidth=0.9, zorder=0)
-    ax.set_xlim(-0.45, 0.45)
-    ax.set_ylim(_expanded_limits(differences, force_zero=True))
-    ax.set_xticks([0.0])
-    ax.set_xticklabels(["Difference"])
-    ax.set_ylabel("Projection - behaviour variability")
+    ax.set_xlim(-0.18, 0.32)
+    ax.set_ylim((y_low, y_high))
+    ax.set_xticks([0.0, 0.18])
+    ax.set_xticklabels(["Subjects", "Mean"])
+    ax.set_ylabel("Reduction in variability\n(Behaviour - Projection)")
     ax.grid(axis="y", linestyle="-", linewidth=0.45, alpha=0.18)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.spines["left"].set_color("0.25")
     ax.spines["bottom"].set_color("0.25")
-    ax.legend(
-        handles=[
-            Line2D([0], [0], marker="o", color="0.05", linestyle="", markersize=3.4, label="Subject"),
-            Line2D([0], [0], marker=MEAN_MARKER, color="0.05", linestyle="", markersize=4.0, label="Mean"),
-            Line2D([0, 1], [0, 0], color="0.30", linestyle=(0, (4, 2)), linewidth=0.9, label="Zero"),
-        ],
-        loc="lower left",
-        frameon=False,
-        fontsize=6.6,
-        handlelength=1.5,
-        borderpad=0.1,
-        labelspacing=0.2,
+    ax.text(
+        0.98,
+        0.97,
+        f"Mean reduction = {mean:.1f}\n95% CI [{ci_low:.1f}, {ci_high:.1f}]\npaired t-test {_format_p_value(p_value)}",
+        transform=ax.transAxes,
+        ha="right",
+        va="top",
+        fontsize=6.7,
+        linespacing=1.25,
     )
 
 
@@ -587,11 +597,11 @@ def _save_behavior_projection_figure(metric_df: pd.DataFrame, out_dir: Path) -> 
         fig, axes = plt.subplots(
             1,
             2,
-            figsize=(6.2, 3.6),
-            gridspec_kw={"width_ratios": [1.65, 1.0], "wspace": 0.40},
+            figsize=(6.6, 3.55),
+            gridspec_kw={"width_ratios": [1.0, 1.25], "wspace": 0.42},
         )
-        _plot_paired_box_with_connections(axes[0], subject_df, y_limits)
-        _plot_projection_minus_behavior(axes[1], subject_df)
+        _plot_paired_estimation(axes[0], subject_df, y_limits)
+        _plot_behaviour_minus_projection(axes[1], subject_df)
         axes[0].text(0.01, 0.98, "A", transform=axes[0].transAxes, fontweight="bold", fontsize=10.0, va="top")
         axes[1].text(0.01, 0.98, "B", transform=axes[1].transAxes, fontweight="bold", fontsize=10.0, va="top")
         fig.subplots_adjust(left=0.10, right=0.98, bottom=0.15, top=0.995, wspace=0.40)
