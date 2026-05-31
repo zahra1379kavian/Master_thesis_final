@@ -981,7 +981,7 @@ def _write_motor_reward_roi_profile_plot(
                 if col_idx == len(COL_CONFIG) - 1 and is_new_group and group in group_display:
                     ax.annotate(
                         group_display[group],
-                        xy=(1.04, 0.5), xycoords="axes fraction",
+                        xy=(1.025, 0.5), xycoords="axes fraction",
                         fontsize=7.5, va="center", ha="left",
                         rotation=270, color="#555555", style="italic",
                         annotation_clip=False,
@@ -989,7 +989,7 @@ def _write_motor_reward_roi_profile_plot(
 
             prev_group = group
 
-        fig.tight_layout(rect=(0.02, 0, 0.94, 0.93), h_pad=0.35, w_pad=0.55)
+        fig.tight_layout(rect=(0.02, 0, 0.965, 0.93), h_pad=0.35, w_pad=0.55)
 
         # Column headers placed in figure coordinates (no set_title clash).
         axes_top = axes[0][0].get_position().y1
@@ -1044,7 +1044,7 @@ def _write_motor_reward_roi_profile_plot(
         fig.legend(
             handles,
             [handle.get_label() for handle in handles],
-            loc="upper right", bbox_to_anchor=(0.965, 0.99),
+            loc="upper left", bbox_to_anchor=(0.45, 0.99),
             ncol=4, frameon=False, fontsize=7.1,
             borderaxespad=0.0, handletextpad=0.55, columnspacing=0.9,
         )
@@ -1548,6 +1548,10 @@ def _draw_labeled_roi_cell(
     )
 
 
+def _session_number_labels(sessions: list[str]) -> list[str]:
+    return [re.sub(r"(?i)^GVS", "", str(session)) for session in sessions]
+
+
 def _draw_labeled_burden_axis(
     ax: plt.Axes,
     subset: pd.DataFrame,
@@ -1562,7 +1566,7 @@ def _draw_labeled_burden_axis(
     ax.set_xlim(-0.5, len(sessions) - 0.5)
     ax.set_ylim(len(subjects) - 0.5, -0.5)
     ax.set_xticks(np.arange(len(sessions)))
-    ax.set_xticklabels(sessions, fontsize=PAPER_AXIS_TICK_FONT_SIZE)
+    ax.set_xticklabels(_session_number_labels(sessions), fontsize=PAPER_AXIS_TICK_FONT_SIZE)
     ax.set_yticks(np.arange(len(subjects)))
     ax.set_yticklabels(subjects, fontsize=PAPER_AXIS_TICK_FONT_SIZE)
     ax.set_xticks(np.arange(-0.5, len(sessions), 1), minor=True)
@@ -1587,37 +1591,75 @@ def _draw_labeled_burden_axis(
         )
 
 
-ROI_ABBREVIATIONS = {
-    "Amygdala": "Amyg",
-    "Caudate": "Caud",
-    "Cerebellum": "Cer",
-    "Cingulate": "Cing",
-    "Frontal": "Front",
-    "Fusiform": "Fusi",
-    "Hippocampus": "Hipp",
-    "Occipital": "Occ",
-    "Olfactory": "Olf",
-    "Orbitofrontal": "OFC",
-    "ParaHippocampal": "PHip",
-    "Paracentral_Lobule": "ParCent",
-    "Parietal": "Par",
-    "Postcentral": "PostC",
-    "Precentral": "PreC",
-    "Putamen": "Put",
-    "Supp_Motor_Area": "SMA",
-    "Temporal": "Temp",
-    "Thalamus": "Thal",
+ROI_FULL_NAMES = {
+    "Amygdala": "Amygdala",
+    "Caudate": "Caudate",
+    "Cerebellum": "Cerebellum",
+    "Cingulate": "Cingulate",
+    "Frontal": "Frontal cortex",
+    "Fusiform": "Fusiform gyrus",
+    "Hippocampus": "Hippocampus",
+    "Occipital": "Occipital cortex",
+    "Olfactory": "Olfactory cortex",
+    "Orbitofrontal": "Orbitofrontal cortex",
+    "ParaHippocampal": "Parahippocampal gyrus",
+    "Paracentral_Lobule": "Paracentral lobule",
+    "Parietal": "Parietal cortex",
+    "Postcentral": "Postcentral gyrus",
+    "Precentral": "Precentral gyrus",
+    "Putamen": "Putamen",
+    "Supp_Motor_Area": "Supplementary motor area",
+    "Temporal": "Temporal cortex",
+    "Thalamus": "Thalamus",
 }
 
 
-def _roi_abbreviation(label: str) -> str:
+def _roi_full_name(label: str) -> str:
     clean = str(label).replace("*", "").strip()
     match = re.match(r"^(?P<base>.+)_(?P<hemi>[LR])$", clean)
     if match is None:
-        return ROI_ABBREVIATIONS.get(clean, clean)
+        return ROI_FULL_NAMES.get(clean, clean.replace("_", " "))
     base = match.group("base")
-    hemi = match.group("hemi")
-    return f"{ROI_ABBREVIATIONS.get(base, base)}_{hemi}"
+    hemi = "left" if match.group("hemi") == "L" else "right"
+    return f"{ROI_FULL_NAMES.get(base, base.replace('_', ' '))} ({hemi})"
+
+
+def _roi_full_names_combined(labels: list[str]) -> list[str]:
+    ordered_keys: list[tuple[str, str]] = []
+    hemis_by_base: dict[str, set[str]] = defaultdict(set)
+    plain_names: dict[str, str] = {}
+    for label in labels:
+        clean = str(label).replace("*", "").strip()
+        if not clean:
+            continue
+        match = re.match(r"^(?P<base>.+)_(?P<hemi>[LR])$", clean)
+        if match is None:
+            key = ("plain", clean)
+            if key not in ordered_keys:
+                ordered_keys.append(key)
+            plain_names[clean] = ROI_FULL_NAMES.get(clean, clean.replace("_", " "))
+            continue
+
+        base = match.group("base")
+        key = ("hemi", base)
+        if key not in ordered_keys:
+            ordered_keys.append(key)
+        hemis_by_base[base].add(match.group("hemi"))
+
+    combined_names: list[str] = []
+    for kind, key in ordered_keys:
+        if kind == "plain":
+            combined_names.append(plain_names[key])
+            continue
+
+        hemi_names = []
+        if "L" in hemis_by_base[key]:
+            hemi_names.append("left")
+        if "R" in hemis_by_base[key]:
+            hemi_names.append("right")
+        full_name = ROI_FULL_NAMES.get(key, key.replace("_", " "))
+        combined_names.append(f"{full_name} ({', '.join(hemi_names)})")
+    return combined_names
 
 
 def _compact_count_matrix(
@@ -1636,7 +1678,7 @@ def _compact_count_matrix(
             continue
         labels = _split_roi_labels(getattr(row, "shown_roi_labels", ""))
         counts[y_lookup[subject], x_lookup[session]] += len(labels)
-        details[(subject, session)].extend(_roi_abbreviation(label) for label in labels)
+        details[(subject, session)].extend(_roi_full_name(label) for label in labels)
     return counts, details
 
 
@@ -1652,7 +1694,7 @@ def _draw_compact_count_axis(
 ) -> Any:
     image = ax.imshow(counts, cmap=cmap, norm=norm, aspect="equal")
     ax.set_xticks(np.arange(len(sessions)))
-    ax.set_xticklabels(sessions, fontsize=PAPER_AXIS_TICK_FONT_SIZE)
+    ax.set_xticklabels(_session_number_labels(sessions), fontsize=PAPER_AXIS_TICK_FONT_SIZE)
     ax.set_yticks(np.arange(len(subjects)))
     ax.set_yticklabels(subjects if show_ylabel else [], fontsize=PAPER_AXIS_TICK_FONT_SIZE)
     ax.set_xticks(np.arange(-0.5, len(sessions), 1), minor=True)
@@ -1701,7 +1743,9 @@ def _detail_rows_for_compact_burden(
             else col,
         )
         for row in subset.itertuples(index=False):
-            labels = ", ".join(_roi_abbreviation(label) for label in _split_roi_labels(getattr(row, "shown_roi_labels", "")))
+            labels = ", ".join(
+                _roi_full_names_combined(_split_roi_labels(getattr(row, "shown_roi_labels", "")))
+            )
             rows.append(("body", f"{row.subject} {row.target_condition_label}: {labels}"))
     return rows
 
@@ -1711,19 +1755,8 @@ def _draw_compact_detail_axis(
     detail_rows: list[tuple[str, str]],
 ) -> None:
     ax.axis("off")
-    ax.text(
-        0.0,
-        1.0,
-        "ROI details",
-        transform=ax.transAxes,
-        ha="left",
-        va="top",
-        fontsize=PAPER_AXIS_TICK_FONT_SIZE,
-        fontweight="bold",
-        color="#111111",
-    )
-    y_top = 0.94
-    y_bottom = 0.13
+    y_top = 0.995
+    y_bottom = 0.03
     step = (y_top - y_bottom) / max(len(detail_rows), 1)
     y = y_top
     for kind, text in detail_rows:
@@ -1752,17 +1785,6 @@ def _draw_compact_detail_axis(
                 color="#222222",
             )
         y -= step
-
-    ax.text(
-        0.0,
-        0.02,
-        "Legend: cell value = number of\nFDR-significant ROIs (q < 0.05).\nL/R = hemisphere.",
-        transform=ax.transAxes,
-        ha="left",
-        va="bottom",
-        fontsize=PAPER_FOOTER_FONT_SIZE,
-        color="#333333",
-    )
 
 
 def _write_combined_compact_burden_plot(
@@ -1793,14 +1815,14 @@ def _write_combined_compact_burden_plot(
     norm = colors.BoundaryNorm(boundaries, cmap.N)
     detail_rows = _detail_rows_for_compact_burden(combined_subsets, specs)
 
-    fig_width = max(15.2, 0.72 * len(combined_sessions) * len(combined_subsets) + 6.7)
-    fig_height = max(7.0, 0.50 * len(combined_subjects) + 3.0, 0.25 * len(detail_rows) + 1.8)
+    fig_width = max(10.8, 0.45 * len(combined_sessions) * len(combined_subsets) + 3.6)
+    fig_height = max(4.8, 0.35 * len(combined_subjects) + 1.5, 0.155 * len(detail_rows) + 0.9)
     fig = plt.figure(figsize=(fig_width, fig_height), facecolor="white")
     grid = fig.add_gridspec(
         1,
         len(combined_subsets) + 2,
-        width_ratios=[1.0] * len(combined_subsets) + [0.88, 0.055],
-        wspace=0.22,
+        width_ratios=[0.78] * len(combined_subsets) + [0.035, 1.0],
+        wspace=0.13,
     )
 
     image = None
@@ -1819,17 +1841,17 @@ def _write_combined_compact_burden_plot(
         panel_title = str(specs[prefix].get("panel_title", specs[prefix]["label"]))
         ax.set_title(panel_title, fontsize=PAPER_TITLE_FONT_SIZE, pad=11.0)
 
-    detail_ax = fig.add_subplot(grid[0, len(combined_subsets)])
-    _draw_compact_detail_axis(detail_ax, detail_rows)
-
     if image is not None:
-        cbar = fig.colorbar(image, cax=fig.add_subplot(grid[0, len(combined_subsets) + 1]))
+        cbar = fig.colorbar(image, cax=fig.add_subplot(grid[0, len(combined_subsets)]))
         cbar.ax.set_title("No. ROIs", fontsize=PAPER_CELL_COLORBAR_FONT_SIZE, pad=7)
         cbar.ax.tick_params(labelsize=PAPER_CELL_COLORBAR_FONT_SIZE, width=0.6, length=2.8, pad=2)
         cbar.set_ticks(np.arange(0, vmax + 1, dtype=int))
         cbar.outline.set_linewidth(0.6)
 
-    fig.subplots_adjust(left=0.055, right=0.985, top=0.90, bottom=0.10)
+    detail_ax = fig.add_subplot(grid[0, len(combined_subsets) + 1])
+    _draw_compact_detail_axis(detail_ax, detail_rows)
+
+    fig.subplots_adjust(left=0.06, right=0.985, top=0.91, bottom=0.10)
     pdf_path, png_path = _save_pdf_and_png(
         fig,
         plots_dir / "off_on_condition_minus_sham_subject_session_roi_burden_compact.pdf",
