@@ -848,7 +848,7 @@ def plot_spatial_similarity(map_specs: list[MapSpec], out_base: Path) -> None:
         ticks = np.linspace(mappable.norm.vmin, mappable.norm.vmax, 4)
         cbar.set_ticks(ticks)
         cbar.set_ticklabels([tick_format.format(tick) for tick in ticks])
-        cbar.set_label(label, fontsize=8, labelpad=2)
+        cbar.ax.set_title(label, fontsize=8, pad=8)
         cbar.ax.tick_params(labelsize=8, length=2, pad=1)
     fig.tight_layout()
     fig.savefig(f"{out_base}.png", dpi=300, bbox_inches="tight")

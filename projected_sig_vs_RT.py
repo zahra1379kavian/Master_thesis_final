@@ -13,6 +13,7 @@ import matplotlib
 warnings.filterwarnings("ignore", message="Unable to import Axes3D.*")
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import nibabel as nib
 import numpy as np
 import pandas as pd
@@ -414,9 +415,16 @@ def _subject_level_pairs(paired_df: pd.DataFrame) -> pd.DataFrame:
     return subject_df
 
 
+def _build_subject_color_map(values: pd.Series) -> dict[str, object]:
+    subjects = sorted({str(value) for value in values}, key=_category_sort_key)
+    palette = list(plt.get_cmap("tab20").colors)
+    return {subject: palette[idx % len(palette)] for idx, subject in enumerate(subjects)}
+
+
 def _plot_paired_box_with_connections(
     ax: plt.Axes,
     subject_df: pd.DataFrame,
+    color_map: dict[str, object],
     y_limits: tuple[float, float],
 ) -> None:
     behavior_values = subject_df["behavior_raw"].to_numpy(dtype=np.float64)
@@ -442,28 +450,25 @@ def _plot_paired_box_with_connections(
     jitter = rng.uniform(-0.06, 0.06, size=behavior_values.size)
     x_behavior = jitter
     x_projection = 1.0 + jitter
-    for x0, x1, y0, y1 in zip(x_behavior, x_projection, behavior_values, projection_values):
-        ax.plot([x0, x1], [y0, y1], color="0.58", linewidth=0.75, alpha=0.45, zorder=2)
-    ax.scatter(
+    for x0, x1, y0, y1, sub in zip(
         x_behavior,
-        behavior_values,
-        s=34,
-        color="#4C78A8",
-        alpha=0.88,
-        edgecolors="0.2",
-        linewidths=0.35,
-        zorder=3,
-    )
-    ax.scatter(
         x_projection,
+        behavior_values,
         projection_values,
-        s=34,
-        color="#D55E00",
-        alpha=0.88,
-        edgecolors="0.2",
-        linewidths=0.35,
-        zorder=3,
-    )
+        subject_df["sub_tag"].astype(str),
+    ):
+        color = color_map[sub]
+        ax.plot([x0, x1], [y0, y1], color=color, linewidth=0.75, alpha=0.32, zorder=2)
+        ax.scatter(
+            [x0, x1],
+            [y0, y1],
+            s=34,
+            color=color,
+            alpha=0.88,
+            edgecolors="0.2",
+            linewidths=0.35,
+            zorder=3,
+        )
 
     ax.set_xlim(-0.45, 1.45)
     ax.set_ylim(y_limits)
@@ -473,9 +478,26 @@ def _plot_paired_box_with_connections(
     ax.grid(axis="y", linestyle=":", linewidth=0.7, alpha=0.35)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
+    sample_color = next(iter(color_map.values()), "0.45")
+    ax.legend(
+        handles=[
+            Line2D([0, 1], [0, 0], color=sample_color, marker="o", linewidth=0.75, alpha=0.75, markersize=4.0, label="Subject color"),
+            Line2D([0], [0], marker="D", color="0.05", linestyle="", markersize=4.0, label="Mean"),
+        ],
+        loc="lower left",
+        fontsize=7.0,
+        frameon=False,
+        handlelength=1.5,
+        borderpad=0.2,
+        labelspacing=0.25,
+    )
 
 
-def _plot_projection_minus_behavior(ax: plt.Axes, subject_df: pd.DataFrame) -> None:
+def _plot_projection_minus_behavior(
+    ax: plt.Axes,
+    subject_df: pd.DataFrame,
+    color_map: dict[str, object],
+) -> None:
     differences = subject_df["projection_minus_behavior"].to_numpy(dtype=np.float64)
     box = ax.boxplot(
         [differences],
@@ -496,7 +518,7 @@ def _plot_projection_minus_behavior(ax: plt.Axes, subject_df: pd.DataFrame) -> N
 
     rng = np.random.default_rng(141)
     x = rng.uniform(-0.07, 0.07, size=differences.size)
-    colors = np.where(differences < 0.0, "#4C78A8", "#D55E00")
+    colors = [color_map[sub] for sub in subject_df["sub_tag"].astype(str)]
     ax.scatter(
         x,
         differences,
@@ -512,10 +534,24 @@ def _plot_projection_minus_behavior(ax: plt.Axes, subject_df: pd.DataFrame) -> N
     ax.set_ylim(_expanded_limits(differences, force_zero=True))
     ax.set_xticks([0.0])
     ax.set_xticklabels(["Difference"])
-    ax.set_ylabel("Projection - Behaviour")
+    ax.set_ylabel("projection-behaviour varaibility")
     ax.grid(axis="y", linestyle=":", linewidth=0.7, alpha=0.35)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
+    sample_color = next(iter(color_map.values()), "0.45")
+    ax.legend(
+        handles=[
+            Line2D([0], [0], marker="o", color=sample_color, linestyle="", markersize=4.5, label="Subject color"),
+            Line2D([0], [0], marker="D", color="0.05", linestyle="", markersize=4.0, label="Mean"),
+            Line2D([0, 1], [0, 0], color="0.2", linestyle="--", linewidth=0.9, label="Zero"),
+        ],
+        loc="lower left",
+        fontsize=7.0,
+        frameon=False,
+        handlelength=1.5,
+        borderpad=0.2,
+        labelspacing=0.25,
+    )
 
 
 def _save_pdf_and_png(fig: plt.Figure, pdf_path: Path, dpi: int) -> tuple[Path, Path]:
@@ -540,17 +576,7 @@ def _save_behavior_projection_figure(metric_df: pd.DataFrame, out_dir: Path) -> 
         [subject_df["behavior_raw"].to_numpy(dtype=np.float64), subject_df["projection_raw"].to_numpy(dtype=np.float64)]
     )
     y_limits = _expanded_limits(finite_values)
-    lme = _mixedlm_projection_effect(paired_df)
-
-    if np.isfinite(lme["lme_p_two_sided"]) and np.isfinite(lme["lme_z_projection_minus_behavior"]):
-        lme_text = (
-            "Run-level LME (Projection - Behaviour): "
-            f"beta={lme['lme_coef_projection_minus_behavior']:.3g}, "
-            f"z={lme['lme_z_projection_minus_behavior']:.3g}, "
-            f"p={lme['lme_p_two_sided']:.3g}"
-        )
-    else:
-        lme_text = "Run-level LME (Projection - Behaviour): fit unavailable"
+    color_map = _build_subject_color_map(subject_df["sub_tag"])
 
     fig, axes = plt.subplots(
         1,
@@ -558,10 +584,9 @@ def _save_behavior_projection_figure(metric_df: pd.DataFrame, out_dir: Path) -> 
         figsize=(7.2, 4.4),
         gridspec_kw={"width_ratios": [1.75, 1.0], "wspace": 0.42},
     )
-    _plot_paired_box_with_connections(axes[0], subject_df, y_limits)
-    _plot_projection_minus_behavior(axes[1], subject_df)
-    fig.suptitle(lme_text, fontsize=10.5, y=0.98)
-    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.93))
+    _plot_paired_box_with_connections(axes[0], subject_df, color_map, y_limits)
+    _plot_projection_minus_behavior(axes[1], subject_df, color_map)
+    fig.subplots_adjust(left=0.09, right=0.98, bottom=0.14, top=0.94, wspace=0.42)
     paths = _save_pdf_and_png(fig, out_dir / "projection_behavior_subject_panel(main).pdf", dpi=220)
     plt.close(fig)
     return paths

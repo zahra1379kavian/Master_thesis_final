@@ -516,7 +516,7 @@ def _plot_norm_diff_figure(
         axes[0].set_xticks(percentiles)
         axes[0].set_xticklabels([f"{int(p)}%" for p in percentiles])
         axes[0].set_xlabel("Variability percentile threshold")
-        axes[0].set_ylabel("Low-variability enrichment")
+        axes[0].set_ylabel("Vigour/control fraction ratio")
         finite_ratios = ratios[np.isfinite(ratios)]
         if finite_ratios.size:
             ratio_min = min(1.0, float(np.min(finite_ratios)))
@@ -526,11 +526,18 @@ def _plot_norm_diff_figure(
         else:
             axes[0].set_ylim(0.95, 1.1)
         axes[0].set_xlim(5.0, 95.0)
-        axes[0].legend(frameon=False, fontsize=12, loc="lower left")
+        axes[0].legend(frameon=False, fontsize=10, loc="lower left")
         _style_axis(axes[0])
 
         bins = min(40, max(16, int(np.sqrt(resampled_means.size))))
-        axes[1].axvspan(ci_low, ci_high, color=ci_color, alpha=0.24, linewidth=0)
+        axes[1].axvspan(
+            ci_low,
+            ci_high,
+            color=ci_color,
+            alpha=0.24,
+            linewidth=0,
+            label=f"95% CI [{ci_low:.2f}, {ci_high:.2f}]",
+        )
         axes[1].hist(
             resampled_means,
             bins=bins,
@@ -540,8 +547,20 @@ def _plot_norm_diff_figure(
             edgecolor="white",
             linewidth=0.4,
         )
-        axes[1].axvline(selected_mean, color=selected_color, linestyle="--", linewidth=1.8)
-        axes[1].axvline(resample_mean, color=reference_color, linestyle="--", linewidth=1.5)
+        axes[1].axvline(
+            selected_mean,
+            color=selected_color,
+            linestyle="--",
+            linewidth=1.8,
+            label=f"Vigour network mean = {selected_mean:.2f}",
+        )
+        axes[1].axvline(
+            resample_mean,
+            color=reference_color,
+            linestyle="--",
+            linewidth=1.5,
+            label=f"Control network mean = {resample_mean:.2f}",
+        )
         axes[1].set_xlabel("Consecutive trial variability")
         axes[1].set_ylabel("Density")
         axes[1].set_xlim(
@@ -550,42 +569,15 @@ def _plot_norm_diff_figure(
         )
         _style_axis(axes[1])
 
-        label_box = {"facecolor": "white", "edgecolor": "none", "alpha": 0.82, "pad": 1.5}
-        axes[1].annotate(
-            f"Selected mean = {selected_mean:.2f}",
-            xy=(selected_mean, 0.94),
-            xycoords=axes[1].get_xaxis_transform(),
-            xytext=(6, 0),
-            textcoords="offset points",
-            ha="left",
-            va="center",
-            color=selected_color,
-            fontsize=12,
-            bbox=label_box,
-        )
-        axes[1].annotate(
-            f"Control-resample mean = {resample_mean:.2f}",
-            xy=(resample_mean, 0.84),
-            xycoords=axes[1].get_xaxis_transform(),
-            xytext=(6, 0),
-            textcoords="offset points",
-            ha="left",
-            va="center",
-            color=reference_color,
-            fontsize=12,
-            bbox=label_box,
-        )
-        axes[1].annotate(
-            f"95% CI [{ci_low:.2f}, {ci_high:.2f}]",
-            xy=(ci_high, 0.94),
-            xycoords=axes[1].get_xaxis_transform(),
-            xytext=(-6, 0),
-            textcoords="offset points",
-            ha="right",
-            va="center",
-            color=reference_color,
-            fontsize=12,
-            bbox=label_box,
+        axes[1].legend(
+            frameon=True,
+            facecolor="white",
+            edgecolor="none",
+            framealpha=0.78,
+            fontsize=9,
+            loc="upper right",
+            borderaxespad=0.35,
+            handlelength=2.4,
         )
 
         fig.tight_layout(w_pad=2.0)
