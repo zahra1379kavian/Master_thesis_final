@@ -23,6 +23,8 @@ DEFAULT_WEIGHT_PERCENTILES = (80.0, 90.0)
 DEFAULT_MIN_REPORT_VOXELS = 25
 DEFAULT_HEATMAP_MIN_ROW_PERCENT = 2.0
 DEFAULT_ATLAS_CACHE_DIR = Path('/home/zkavian/nilearn_data')
+PAPER_FONT_FAMILY = 'Liberation Sans'
+PAPER_BASE_FONT_SIZE = 13
 MapSpec = namedtuple('MapSpec', ('method', 'path', 'kind'))
 MaskSpec = namedtuple('MaskSpec', ('method', 'mask_name', 'family', 'threshold_definition', 'threshold_value', 'values', 'mask'))
 
@@ -203,22 +205,39 @@ def _plot_overlap_heatmap(overlap_df, mask_names, out_base):
         if row.mask_a in matrix.index and row.mask_b in matrix.columns:
             matrix.loc[row.mask_a, row.mask_b] = row.dice
             matrix.loc[row.mask_b, row.mask_a] = row.dice
-    (fig, ax) = plt.subplots(figsize=(8.4, 7.2), facecolor='white')
-    values = matrix.to_numpy(dtype=float)
-    im = ax.imshow(values, vmin=0, vmax=1, cmap='Blues')
-    ax.set_xticks(np.arange(len(mask_names)))
-    ax.set_xticklabels([_short_mask_label(name) for name in mask_names], rotation=35, ha='right')
-    ax.set_yticks(np.arange(len(mask_names)))
-    ax.set_yticklabels([_short_mask_label(name) for name in mask_names])
-    for row in range(values.shape[0]):
-        for col in range(values.shape[1]):
-            ax.text(col, row, f'{values[row, col]:.2f}', ha='center', va='center', fontsize=8, color='white' if values[row, col] >= 0.55 else 'black')
-    cbar = fig.colorbar(im, ax=ax, fraction=0.035, pad=0.02)
-    cbar.set_ticks(np.linspace(0, 1, 6))
-    fig.tight_layout()
-    fig.savefig(f'{out_base}_overlap_heatmap.png', dpi=220, bbox_inches='tight', pad_inches=0.04)
-    fig.savefig(f'{out_base}_overlap_heatmap.pdf', bbox_inches='tight', pad_inches=0.04)
-    plt.close(fig)
+    with plt.rc_context({'font.family': 'sans-serif', 'font.sans-serif': [PAPER_FONT_FAMILY, 'Arial', 'Helvetica', 'DejaVu Sans'], 'font.size': PAPER_BASE_FONT_SIZE, 'pdf.fonttype': 42, 'ps.fonttype': 42}):
+        (fig, ax) = plt.subplots(figsize=(7.6, 6.8), facecolor='white')
+        values = matrix.to_numpy(dtype=float)
+        display_values = values.copy()
+        np.fill_diagonal(display_values, np.nan)
+        cmap = plt.get_cmap('Blues').copy()
+        cmap.set_bad('#eeeeee')
+        im = ax.imshow(display_values, vmin=0, vmax=1, cmap=cmap)
+        ax.set_xticks(np.arange(len(mask_names)))
+        ax.set_xticklabels([_short_mask_label(name) for name in mask_names], rotation=35, ha='right', rotation_mode='anchor')
+        ax.set_yticks(np.arange(len(mask_names)))
+        ax.set_yticklabels([_short_mask_label(name) for name in mask_names])
+        ax.set_xticks(np.arange(-0.5, len(mask_names), 1), minor=True)
+        ax.set_yticks(np.arange(-0.5, len(mask_names), 1), minor=True)
+        ax.grid(which='minor', color='white', linewidth=1.4)
+        ax.tick_params(which='minor', bottom=False, left=False)
+        optimization_positions = [index for (index, name) in enumerate(mask_names) if name.startswith('Optimization')]
+        if optimization_positions:
+            split_position = min(optimization_positions) - 0.5
+            ax.axhline(split_position, color='#222222', linewidth=1.6)
+            ax.axvline(split_position, color='#222222', linewidth=1.6)
+        for row in range(values.shape[0]):
+            for col in range(values.shape[1]):
+                is_diagonal = row == col
+                ax.text(col, row, f'{values[row, col]:.2f}', ha='center', va='center', fontsize=12, color='black', fontweight='bold' if values[row, col] >= 0.55 and not is_diagonal else 'normal')
+        cbar = fig.colorbar(im, ax=ax, fraction=0.035, pad=0.025)
+        cbar.set_ticks(np.linspace(0, 1, 6))
+        cbar.ax.set_title('Dice', fontsize=10, pad=6)
+        cbar.ax.tick_params(labelsize=12)
+        fig.tight_layout()
+        fig.savefig(f'{out_base}_overlap_heatmap.png', dpi=220, bbox_inches='tight', pad_inches=0.04)
+        fig.savefig(f'{out_base}_overlap_heatmap.pdf', bbox_inches='tight', pad_inches=0.04)
+        plt.close(fig)
 
 def _top_region_bullets(region_df, mask_name, max_regions=8):
     rows = region_df[region_df['mask_name'].eq(mask_name) & region_df['present_for_report'] & ~region_df['roi_name'].eq(UNASSIGNED_ROI)].sort_values('n_voxels', ascending=False).head(max_regions)
