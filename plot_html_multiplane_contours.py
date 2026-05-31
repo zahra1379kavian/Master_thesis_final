@@ -10,6 +10,8 @@ from scipy.ndimage import binary_fill_holes
 
 src = Path("data/voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5_bold_thr90.html")
 base = Path("figures") / "voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5_bold_thr90_multiplane_contour_all_regions"
+overlay_fill = "#56b4e9"
+overlay_edge = "#0072b2"
 s = src.read_text()
 imgs = [np.asarray(Image.open(BytesIO(base64.b64decode(x))).convert("RGBA")) for x in re.findall(r'src="data:image/png;base64,([^"]+)"', s)]
 cfg = json.loads(re.search(r"brainsprite\((\{.*?\})\);", s).group(1))
@@ -60,6 +62,10 @@ def anat(a):
     r = plt.cm.gray(np.clip(a / mx, 0, 1))
     r[~brain, 3] = 0
     return r
+def overlay(ax, m):
+    if np.any(m):
+        ax.contourf(m.astype(float), levels=[0.5, 1.5], colors=[overlay_fill], alpha=0.34, antialiased=True)
+        ax.contour(m.astype(float), levels=[0.5], colors=overlay_edge, linewidths=0.8)
 base.parent.mkdir(exist_ok=True)
 fig, axes = plt.subplots(5, 6, figsize=(15.1, 12.3), facecolor="white")
 items = [(mode, cut) for mode in "xyz" for cut in cuts[mode]]
@@ -68,7 +74,7 @@ for i, (ax, (mode, cut)) in enumerate(zip(axes.ravel(), items)):
     ax.set_facecolor("none")
     ax.patch.set_alpha(0)
     ax.imshow(anat(a), interpolation="nearest")
-    ax.contour(m.astype(float), levels=[0.5], colors="#dc2626", linewidths=1.8)
+    overlay(ax, m)
     ax.set_axis_off()
 fig.subplots_adjust(left=0.005, right=0.995, bottom=0.005, top=0.995, wspace=-0.04, hspace=0.01)
 for ax in axes.ravel()[:6]:

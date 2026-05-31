@@ -21,7 +21,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 import nibabel as nib
 import numpy as np
 import pandas as pd
@@ -1104,9 +1104,18 @@ def _coord_mm(affine: np.ndarray, axis: int, index: int) -> float:
     return float(affine[axis, axis] * (index + 1) + affine[axis, 3])
 
 
-def _add_contour(ax: plt.Axes, mask: np.ndarray, color: str, linewidth: float) -> None:
+def _add_mask_overlay(
+    ax: plt.Axes,
+    mask: np.ndarray,
+    color: str,
+    linewidth: float,
+    fill_alpha: float,
+) -> None:
     if np.any(mask):
-        ax.contour(mask.astype(float), levels=[0.5], colors=color, linewidths=linewidth)
+        values = mask.astype(float)
+        if fill_alpha > 0:
+            ax.contourf(values, levels=[0.5, 1.5], colors=[color], alpha=fill_alpha, antialiased=True)
+        ax.contour(values, levels=[0.5], colors=color, linewidths=linewidth)
 
 
 def plot_full_vs_task_only_anatomy(
@@ -1201,9 +1210,9 @@ def plot_full_vs_task_only_anatomy(
     summary.to_csv(f"{out_base}_summary.csv", index=False)
 
     colors = {
-        "full": "#dc2626",
-        "task": "#2563eb",
-        "shared": "#c026d3",
+        "full": "#0072b2",
+        "task": "#009e73",
+        "shared": "#cc79a7",
     }
     full_bg = np.nan_to_num(full_bg, nan=0.0)
     vmax = float(np.percentile(full_bg[full_bg > 0], 99.5)) if np.any(full_bg > 0) else 1.0
@@ -1221,18 +1230,18 @@ def plot_full_vs_task_only_anatomy(
             bg_slice, mask_slices = _crop_slices(
                 _plane_slice(full_bg, axis, index),
                 [
-                    _plane_slice(full_mask, axis, index),
-                    _plane_slice(task_mask, axis, index),
+                    _plane_slice(full_only_mask, axis, index),
+                    _plane_slice(task_only_unique_mask, axis, index),
                     _plane_slice(shared_mask, axis, index),
                     _plane_slice(motor_shared_mask, axis, index),
                 ],
             )
-            full_slice, task_slice, shared_slice, motor_shared_slice = mask_slices
+            full_only_slice, task_only_unique_slice, shared_slice, motor_shared_slice = mask_slices
             ax.imshow(_anatomy_rgba(bg_slice, vmax), interpolation="nearest")
-            _add_contour(ax, full_slice, colors["full"], 0.85)
-            _add_contour(ax, task_slice, colors["task"], 0.85)
-            _add_contour(ax, shared_slice, colors["shared"], 0.95)
-            _add_contour(ax, motor_shared_slice, colors["shared"], 2.35)
+            _add_mask_overlay(ax, full_only_slice, colors["full"], 0.55, 0.24)
+            _add_mask_overlay(ax, task_only_unique_slice, colors["task"], 0.55, 0.22)
+            _add_mask_overlay(ax, shared_slice, colors["shared"], 0.75, 0.42)
+            _add_mask_overlay(ax, motor_shared_slice, colors["shared"], 1.8, 0.0)
             coord = _coord_mm(html_affine, axis, index)
             ax.text(0.02, -0.03, f"{mode}={coord:g}", transform=ax.transAxes, ha="left", va="top", fontsize=5.6)
             if mode in {"y", "z"}:
@@ -1243,9 +1252,9 @@ def plot_full_vs_task_only_anatomy(
             ax.set_axis_off()
 
     handles = [
-        Line2D([0], [0], color=colors["full"], lw=1.0, label=f"Full model (red; {n_full:,})"),
-        Line2D([0], [0], color=colors["task"], lw=1.0, label=f"Standard GLM z>={task_z_threshold:g} (blue; {n_task:,})"),
-        Line2D([0], [0], color=colors["shared"], lw=1.0, label=f"Overlap (purple; {n_shared:,})"),
+        Patch(facecolor=colors["full"], edgecolor=colors["full"], alpha=0.34, label=f"Full model only ({np.count_nonzero(full_only_mask):,})"),
+        Patch(facecolor=colors["task"], edgecolor=colors["task"], alpha=0.34, label=f"Standard GLM only, z>={task_z_threshold:g} ({np.count_nonzero(task_only_unique_mask):,})"),
+        Patch(facecolor=colors["shared"], edgecolor=colors["shared"], alpha=0.48, label=f"Overlap ({n_shared:,})"),
     ]
     fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False, fontsize=6.2, bbox_to_anchor=(0.5, 0.01))
     fig.subplots_adjust(left=0.01, right=0.995, top=0.995, bottom=0.12, wspace=0.02, hspace=0.18)
@@ -1372,7 +1381,7 @@ def write_report(
         "- The final-weight SLURM log contains the `task=1, bold=0.6, beta=0.6, smooth=1.25, gamma=1.5` full model plus no-task/no-BOLD/no-beta and single-term baselines, but no final-weight no-smooth metrics.",
         "- `slurm-11445550.out` is mixed; only the parameter-independent task-only and no-objective baselines were retained. The unrelated `task=1, bold=1, beta=0.75, smooth=1.8` sweep was excluded.",
         "- Balanced scores were computed within the final-weight analysis group using inverse ranges of candidate-mean score components.",
-        f"- The focused full-vs-task-only anatomy figure uses the selected-voxel overlay embedded in the full-model thresholded HTML map and `{DEFAULT_TASK_ONLY_MAP}` thresholded at z >= {DEFAULT_TASK_ONLY_Z_THRESHOLD:g}; brainstem contours are suppressed, red contours show the full model, blue contours show the standard GLM map, and purple contours show overlap with stronger line weight over motor ROIs.",
+        f"- The focused full-vs-task-only anatomy figure uses the selected-voxel overlay embedded in the full-model thresholded HTML map and `{DEFAULT_TASK_ONLY_MAP}` thresholded at z >= {DEFAULT_TASK_ONLY_Z_THRESHOLD:g}; brainstem contours are suppressed, filled blue overlays show full-model-only voxels, filled green overlays show standard-GLM-only voxels, and filled magenta overlays show overlap with stronger line weight over motor ROIs.",
         "",
         "## Balanced-Score Weights",
         "",
