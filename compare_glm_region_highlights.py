@@ -24,7 +24,12 @@ DEFAULT_MIN_REPORT_VOXELS = 25
 DEFAULT_HEATMAP_MIN_ROW_PERCENT = 2.0
 DEFAULT_ATLAS_CACHE_DIR = Path('/home/zkavian/nilearn_data')
 PAPER_FONT_FAMILY = 'Liberation Sans'
-PAPER_BASE_FONT_SIZE = 13
+PAPER_TITLE_FONT_SIZE = 18
+PAPER_TAKEAWAY_FONT_SIZE = 13
+PAPER_AXIS_TICK_FONT_SIZE = 13
+PAPER_CELL_COLORBAR_FONT_SIZE = 12
+PAPER_FOOTER_FONT_SIZE = 11
+PAPER_BASE_FONT_SIZE = PAPER_AXIS_TICK_FONT_SIZE
 MapSpec = namedtuple('MapSpec', ('method', 'path', 'kind'))
 MaskSpec = namedtuple('MaskSpec', ('method', 'mask_name', 'family', 'threshold_definition', 'threshold_value', 'values', 'mask'))
 
@@ -174,26 +179,28 @@ def _plot_region_heatmap(region_df, mask_names, out_base, min_row_percent=DEFAUL
         filtered = wide[wide.max(axis=1) >= min_row_fraction]
         if not filtered.empty:
             wide = filtered
-    fig_height = max(5.8, 0.28 * len(wide) + 2.0)
-    (fig, ax) = plt.subplots(figsize=(11.8, fig_height), facecolor='white')
-    values = wide.to_numpy(dtype=float) * 100.0
-    im = ax.imshow(values, aspect='auto', cmap='Blues', vmin=0.0)
-    ax.set_xticks(np.arange(len(wide.columns)))
-    ax.set_xticklabels([_short_mask_label(name) for name in wide.columns], rotation=30, ha='right')
-    ax.set_yticks(np.arange(len(wide.index)))
-    ax.set_yticklabels([_display_region_name(name) for name in wide.index], fontsize=8)
-    for row in range(values.shape[0]):
-        for col in range(values.shape[1]):
-            value = values[row, col]
-            if value >= 2.0:
-                (r, g, b, _) = im.cmap(im.norm(value))
-                luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
-                ax.text(col, row, f'{value:.1f}', ha='center', va='center', fontsize=6.5, color='black' if luminance > 0.55 else 'white')
-    cbar = fig.colorbar(im, ax=ax, fraction=0.025, pad=0.02)
-    fig.tight_layout()
-    fig.savefig(f'{out_base}_region_heatmap.png', dpi=220, bbox_inches='tight', pad_inches=0.04)
-    fig.savefig(f'{out_base}_region_heatmap.pdf', bbox_inches='tight', pad_inches=0.04)
-    plt.close(fig)
+    fig_height = max(6.2, 0.46 * len(wide) + 2.2)
+    with plt.rc_context({'font.family': 'sans-serif', 'font.sans-serif': [PAPER_FONT_FAMILY, 'Arial', 'Helvetica', 'DejaVu Sans'], 'font.size': PAPER_AXIS_TICK_FONT_SIZE, 'axes.titlesize': PAPER_TITLE_FONT_SIZE, 'axes.labelsize': PAPER_AXIS_TICK_FONT_SIZE, 'xtick.labelsize': PAPER_AXIS_TICK_FONT_SIZE, 'ytick.labelsize': PAPER_AXIS_TICK_FONT_SIZE, 'pdf.fonttype': 42, 'ps.fonttype': 42}):
+        (fig, ax) = plt.subplots(figsize=(11.8, fig_height), facecolor='white')
+        values = wide.to_numpy(dtype=float) * 100.0
+        im = ax.imshow(values, aspect='auto', cmap='Blues', vmin=0.0)
+        ax.set_xticks(np.arange(len(wide.columns)))
+        ax.set_xticklabels([_short_mask_label(name) for name in wide.columns], rotation=30, ha='right')
+        ax.set_yticks(np.arange(len(wide.index)))
+        ax.set_yticklabels([_display_region_name(name) for name in wide.index])
+        ax.tick_params(axis='both', labelsize=PAPER_AXIS_TICK_FONT_SIZE)
+        for row in range(values.shape[0]):
+            for col in range(values.shape[1]):
+                value = values[row, col]
+                if value >= 2.0:
+                    ax.text(col, row, f'{value:.1f}', ha='center', va='center', fontsize=PAPER_CELL_COLORBAR_FONT_SIZE, color='black')
+        cbar = fig.colorbar(im, ax=ax, fraction=0.025, pad=0.02)
+        cbar.ax.set_title('Percent\nof map', fontsize=PAPER_CELL_COLORBAR_FONT_SIZE, pad=6)
+        cbar.ax.tick_params(labelsize=PAPER_CELL_COLORBAR_FONT_SIZE, colors='black')
+        fig.tight_layout()
+        fig.savefig(f'{out_base}_region_heatmap.png', dpi=220, bbox_inches='tight', pad_inches=0.04)
+        fig.savefig(f'{out_base}_region_heatmap.pdf', bbox_inches='tight', pad_inches=0.04)
+        plt.close(fig)
 
 def _short_mask_label(name):
     replacements = {'Standard GLM positive z': 'Standard GLM', 'GLMsingle Type A positive z': 'GLMsingle A', 'GLMsingle Type D positive z': 'GLMsingle D', 'Optimization p80': 'Opt. p80', 'Optimization p90': 'vigour-network'}

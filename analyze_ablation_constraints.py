@@ -1264,11 +1264,11 @@ def plot_full_vs_task_only_anatomy(
                 _add_mask_overlay(ax, motor_shared_slice, colors["shared"], 2.0, 0.0)
                 coord = _coord_mm(html_affine, axis, index)
                 ax.text(
-                    0.02,
+                    0.5,
                     -0.03,
                     f"{mode}={coord:g}",
                     transform=ax.transAxes,
-                    ha="left",
+                    ha="center",
                     va="top",
                     fontsize=PAPER_AXIS_TICK_FONT_SIZE,
                 )
@@ -1301,7 +1301,7 @@ def plot_full_vs_task_only_anatomy(
             Patch(facecolor=colors["shared"], edgecolor=colors["shared"], alpha=0.58, label="Overlap"),
         ]
         fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False, bbox_to_anchor=(0.5, 0.01))
-        fig.subplots_adjust(left=0.01, right=0.995, top=0.995, bottom=0.16, wspace=0.02, hspace=0.34)
+        fig.subplots_adjust(left=0.01, right=0.995, top=0.995, bottom=0.16, wspace=0.02, hspace=0.16)
         fig.savefig(f"{out_base}.png", dpi=300, bbox_inches="tight")
         fig.savefig(f"{out_base}.pdf", bbox_inches="tight")
         plt.close(fig)

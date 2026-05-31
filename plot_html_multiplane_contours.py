@@ -34,13 +34,13 @@ region_order = (
     "Limbic/subcortical",
 )
 region_colors = {
-    "Sensorimotor cortex": "#005ab5",
-    "Frontal cortex": "#4b0092",
-    "Parietal cortex": "#006d2c",
-    "Temporal cortex": "#7a4a00",
-    "Occipital cortex": "#d39200",
-    "Cerebellum": "#a00078",
-    "Limbic/subcortical": "#8f1d21",
+    "Sensorimotor cortex": "#4E79A7",
+    "Frontal cortex": "#F28E2B",
+    "Parietal cortex": "#59A14F",
+    "Temporal cortex": "#9C755F",
+    "Occipital cortex": "#EDC948",
+    "Cerebellum": "#B07AA1",
+    "Limbic/subcortical": "#E15759",
 }
 s = src.read_text()
 imgs = [np.asarray(Image.open(BytesIO(base64.b64decode(x))).convert("RGBA")) for x in re.findall(r'src="data:image/png;base64,([^"]+)"', s)]
