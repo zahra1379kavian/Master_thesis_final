@@ -651,7 +651,7 @@ def _write_projected_signal_profile(
         )
         ax.axhline(0, color="k", linewidth=0.9)
         ax.set_xticks(x_values)
-        ax.set_xticklabels(subset["stim_short"], fontsize=9)
+        ax.set_xticklabels([f"gvs{int(stim_id) - 1}" for stim_id in subset["stim_id"]], fontsize=9)
         ax.set_xlabel("GVS condition", fontsize=11)
         ax.set_title(
             f"Medication {medication}",
@@ -659,7 +659,7 @@ def _write_projected_signal_profile(
             fontweight="bold",
             color=PROJECTED_SIGNAL_MED_COLORS[medication],
         )
-        ax.set_ylabel("Projected signal delta vs sham (a.u.)" if medication == "OFF" else "", fontsize=10)
+        ax.set_ylabel("Projected signal delta vs sham" if medication == "OFF" else "", fontsize=10)
         for x_value, row in zip(x_values, subset.itertuples(index=False), strict=True):
             y_value = max(float(row.mean_delta_proj) + float(row.se_delta_proj) + 0.005, 0.005)
             _add_projected_signal_sig_stars(ax, float(x_value), y_value, float(row.p_value))
@@ -667,11 +667,6 @@ def _write_projected_signal_profile(
             ax.spines[spine].set_visible(False)
         ax.grid(axis="y", alpha=0.3, linestyle="--")
 
-    fig.suptitle(
-        "Projected signal delta vs sham per GVS condition\n"
-        "(P = <weight, beta> using top-10% weight voxels [bold_thr90])",
-        fontsize=12,
-    )
     fig.tight_layout()
     paths = _save_pdf_and_png(fig, out_dir / "B_projected_signal_profile.pdf", dpi=200)
     plt.close(fig)
