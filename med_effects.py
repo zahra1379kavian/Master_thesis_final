@@ -1579,40 +1579,43 @@ def _plot_intra_between_fc(subject_deltas, results, out_dir):
     if subject_deltas.empty:
         raise RuntimeError('No complete OFF/ON subjects were available for intra-vs-between FC plotting')
     colors = {'off': '#4C78A8', 'on': '#E45756', 'delta': '#333333', 'summary': '#D62728'}
-    (fig, axes) = plt.subplots(1, 2, figsize=(10.2, 4.7), gridspec_kw={'width_ratios': [0.85, 0.85]})
+    (fig, axes) = plt.subplots(1, 2, figsize=(9.0, 4.7), gridspec_kw={'width_ratios': [0.68, 0.85], 'wspace': 0.28})
     rng = np.random.default_rng(0)
 
+    state_offset = 0.22
     paired_specs = [
         ('Intra-ROI', 'within_roi_off_r', 'within_roi_on_r', 0.0),
-        ('Between-ROI', 'between_roi_off_r', 'between_roi_on_r', 0.68),
+        ('Between-ROI', 'between_roi_off_r', 'between_roi_on_r', 0.52),
     ]
     for (_, off_column, on_column, offset) in paired_specs:
         off_values = subject_deltas[off_column].to_numpy(dtype=np.float64)
         on_values = subject_deltas[on_column].to_numpy(dtype=np.float64)
         for (off_value, on_value) in zip(off_values, on_values):
-            axes[0].plot([offset, offset + 0.32], [off_value, on_value], color='#b3b3b3', linewidth=0.55, alpha=0.35, zorder=1)
+            axes[0].plot([offset, offset + state_offset], [off_value, on_value], color='#b3b3b3', linewidth=0.55, alpha=0.35, zorder=1)
         axes[0].scatter(rng.normal(offset, 0.018, off_values.size), off_values, s=20, marker='o', color=colors['off'], edgecolor='white', linewidth=0.35, zorder=2, label='OFF' if offset == 0.0 else None)
-        axes[0].scatter(rng.normal(offset + 0.32, 0.018, on_values.size), on_values, s=22, marker='s', color=colors['on'], edgecolor='white', linewidth=0.35, zorder=2, label='ON' if offset == 0.0 else None)
-    axes[0].set_xticks([item[3] + 0.16 for item in paired_specs])
+        axes[0].scatter(rng.normal(offset + state_offset, 0.018, on_values.size), on_values, s=22, marker='s', color=colors['on'], edgecolor='white', linewidth=0.35, zorder=2, label='ON' if offset == 0.0 else None)
+    axes[0].set_xticks([item[3] + state_offset / 2.0 for item in paired_specs])
     axes[0].set_xticklabels([item[0] for item in paired_specs])
-    axes[0].set_xlim(-0.08, paired_specs[-1][3] + 0.40)
+    axes[0].set_xlim(-0.07, paired_specs[-1][3] + state_offset + 0.08)
     axes[0].set_ylabel('Mean FC per subject')
     axes[0].legend(frameon=False, fontsize=CELL_VALUE_FONT_SIZE, loc='best')
 
     delta_specs = [
-        ('Intra-ROI', 'within_roi_delta_z_on_minus_off', 'within_roi_on_minus_off', 0.45),
-        ('Between-ROI', 'between_roi_delta_z_on_minus_off', 'between_roi_on_minus_off', 0.55),
+        ('Intra-ROI', 'within_roi_delta_z_on_minus_off', 'within_roi_on_minus_off', 0.0),
+        ('Between-ROI', 'between_roi_delta_z_on_minus_off', 'between_roi_on_minus_off', 1.0),
     ]
     delta_positions = [item[3] for item in delta_specs]
     for (_, row) in subject_deltas.iterrows():
         values = [row['within_roi_delta_z_on_minus_off'], row['between_roi_delta_z_on_minus_off']]
         axes[1].plot(delta_positions, values, color='#b3b3b3', linewidth=0.55, alpha=0.35, zorder=1)
     summary_bounds = []
+    summary_means = []
     for (_, column, analysis_key, x_value) in delta_specs:
         values = subject_deltas[column].to_numpy(dtype=np.float64)
         axes[1].scatter(rng.normal(x_value, 0.025, values.size), values, s=22, color=colors['delta'], edgecolor='white', linewidth=0.35, zorder=2)
         summary = results.get(analysis_key, {})
         mean_value = float(summary.get('mean', np.nanmean(values)))
+        summary_means.append((x_value, mean_value))
         ci_low = float(summary.get('ci95_low', np.nan))
         ci_high = float(summary.get('ci95_high', np.nan))
         if np.isfinite(ci_low) and np.isfinite(ci_high):
@@ -1621,10 +1624,12 @@ def _plot_intra_between_fc(subject_deltas, results, out_dir):
             summary_bounds.extend([ci_low, ci_high])
         else:
             axes[1].scatter([x_value], [mean_value], s=26, color=colors['summary'], zorder=3)
-    axes[1].axhline(0, color='#666666', linewidth=0.8, linestyle='--')
+    finite_summary_means = [(x_value, mean_value) for (x_value, mean_value) in summary_means if np.isfinite(mean_value)]
+    if len(finite_summary_means) == len(summary_means):
+        axes[1].plot([item[0] for item in summary_means], [item[1] for item in summary_means], color=colors['summary'], linewidth=2.0, zorder=3)
     axes[1].set_xticks(delta_positions)
     axes[1].set_xticklabels([item[0] for item in delta_specs])
-    x_pad = 0.11
+    x_pad = 0.28
     axes[1].set_xlim(min(delta_positions) - x_pad, max(delta_positions) + x_pad)
     axes[1].set_ylabel('FC difference (On-Off)')
     p_value = results.get('within_minus_between_delta', {}).get('paired_t_p_value_two_sided', np.nan)
@@ -1638,22 +1643,20 @@ def _plot_intra_between_fc(subject_deltas, results, out_dir):
     y_range = y_max - y_min
     if not np.isfinite(y_range) or y_range <= 0:
         y_range = 1.0
-    bracket_y = y_max + 0.09 * y_range
-    bracket_h = 0.04 * y_range
-    axes[1].plot([delta_positions[0], delta_positions[0], delta_positions[1], delta_positions[1]], [bracket_y, bracket_y + bracket_h, bracket_y + bracket_h, bracket_y], color='#333333', linewidth=0.8, clip_on=False)
+    line_y = y_max + 0.10 * y_range
+    axes[1].plot(delta_positions, [line_y, line_y], color='#333333', linewidth=0.8, clip_on=False)
     p_text = 'n/a' if not np.isfinite(float(p_value)) else ('<0.001' if float(p_value) < 0.001 else f'{float(p_value):.3f}')
-    axes[1].text(float(np.mean(delta_positions)), bracket_y + bracket_h + 0.025 * y_range, f'paired contrast: p = {p_text}', ha='center', va='bottom', fontsize=CELL_VALUE_FONT_SIZE)
-    axes[1].set_ylim(y_min - 0.08 * y_range, bracket_y + bracket_h + 0.18 * y_range)
+    axes[1].text(float(np.mean(delta_positions)), line_y + 0.025 * y_range, f'paired contrast: p = {p_text}', ha='center', va='bottom', fontsize=CELL_VALUE_FONT_SIZE)
+    axes[1].set_ylim(y_min - 0.08 * y_range, line_y + 0.16 * y_range)
 
     for (label, ax) in zip(('A', 'B'), axes):
-        ax.grid(axis='y', color='#dddddd', linewidth=0.55, alpha=0.8)
         ax.set_axisbelow(True)
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.tick_params(labelsize=AXIS_TICK_FONT_SIZE)
         ax.text(-0.12, 1.04, label, transform=ax.transAxes, fontsize=TITLE_FONT_SIZE, fontweight='bold', ha='left', va='bottom')
     _apply_paper_typography(fig, axes)
-    fig.tight_layout()
+    fig.subplots_adjust(wspace=0.28)
     out_dir.mkdir(parents=True, exist_ok=True)
     png_path = out_dir / 'intra_vs_between_fc_medication_change.png'
     pdf_path = png_path.with_suffix('.pdf')

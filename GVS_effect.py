@@ -848,10 +848,6 @@ def _write_motor_reward_roi_profile_plot(
         for hemi in COL_CONFIG
         if f"{base_name}_{hemi}" in rois
     ]
-    roi_display_names = [
-        f"{re.sub(r'_[LR]$', '', roi).replace('_', ' ')} {roi[-1]}"
-        for roi in plot_rois
-    ]
     x_values = np.arange(len(ROI_PROFILE_ACTIVE_LABELS))
 
     y_limits_by_group: dict[str, float] = {}
@@ -866,10 +862,6 @@ def _write_motor_reward_roi_profile_plot(
         finite = finite[np.isfinite(finite)]
         y_limits_by_group[group] = max(float(np.max(np.abs(finite))) * 1.12, 0.05) if finite.size else 0.05
 
-    heat_max = results.loc[results["roi"].isin(plot_rois), "mean_delta"].abs().max()
-    heat_max = max(float(heat_max) if pd.notna(heat_max) else 0.05, 0.05)
-    heat_norm = matplotlib.colors.TwoSlopeNorm(vmin=-heat_max, vcenter=0.0, vmax=heat_max)
-
     with plt.rc_context({
         "font.family": "sans-serif",
         "font.sans-serif": ["Arial", "Helvetica Neue", "Helvetica", "DejaVu Sans"],
@@ -879,103 +871,13 @@ def _write_motor_reward_roi_profile_plot(
         "xtick.major.size": 2.5,
         "ytick.major.size": 2.5,
     }):
-        heatmap_height = max(2.7, 0.22 * len(plot_rois) + 0.75)
-        fig = plt.figure(figsize=(7.2, heatmap_height + n_rows * 0.92 + 1.0))
+        fig, axes = plt.subplots(
+            n_rows, 2,
+            figsize=(6.8, n_rows * 1.0 + 0.95),
+            sharey=False,
+            squeeze=False,
+        )
         fig.patch.set_facecolor("white")
-        grid = fig.add_gridspec(
-            n_rows + 2,
-            3,
-            height_ratios=[heatmap_height, 0.22] + [1.0] * n_rows,
-            width_ratios=[1.0, 1.0, 0.045],
-            hspace=0.42,
-            wspace=0.28,
-        )
-        heat_axes = [fig.add_subplot(grid[0, col_idx]) for col_idx in range(2)]
-        cbar_ax = fig.add_subplot(grid[0, 2])
-        for col_idx, hemi_label in enumerate(["Left Hemisphere", "Right Hemisphere"]):
-            header_ax = fig.add_subplot(grid[1, col_idx])
-            header_ax.axis("off")
-            header_ax.text(
-                0.5,
-                0.5,
-                hemi_label,
-                ha="center",
-                va="center",
-                fontsize=8.8,
-                fontweight="bold",
-                color="#333333",
-            )
-        axes = np.array(
-            [
-                [fig.add_subplot(grid[row_idx + 2, col_idx]) for col_idx in range(2)]
-                for row_idx in range(n_rows)
-            ],
-            dtype=object,
-        )
-
-        heat_image = None
-        for col_idx, medication in enumerate(MEDICATION_ORDER):
-            ax = heat_axes[col_idx]
-            heat_rows = (
-                results
-                .loc[results["roi"].isin(plot_rois) & results["medication"].eq(medication)]
-                .pivot(index="roi", columns="condition", values="mean_delta")
-                .reindex(index=plot_rois, columns=ROI_PROFILE_ACTIVE_LABELS)
-            )
-            heat_image = ax.imshow(
-                heat_rows.to_numpy(dtype=np.float64),
-                aspect="auto",
-                cmap="RdBu_r",
-                norm=heat_norm,
-            )
-            ax.set_title(f"Med. {medication}", fontsize=8.5, fontweight="bold", pad=5)
-            ax.set_xticks(x_values)
-            ax.set_xticklabels(stim_labels, rotation=35, ha="right", fontsize=6.6)
-            ax.set_yticks(np.arange(len(plot_rois)))
-            if col_idx == 0:
-                ax.set_yticklabels(roi_display_names, fontsize=6.6)
-            else:
-                ax.set_yticklabels([])
-                ax.tick_params(axis="y", length=0)
-            ax.tick_params(axis="x", pad=1.5)
-            ax.set_xlim(-0.5, len(ROI_PROFILE_ACTIVE_LABELS) - 0.5)
-            ax.set_ylim(len(plot_rois) - 0.5, -0.5)
-            ax.set_facecolor("#f7f7f7")
-
-            med_rows = results.loc[results["medication"].eq(medication)].set_index(["roi", "condition"])
-            for roi_idx, roi in enumerate(plot_rois):
-                for condition_idx, condition in enumerate(ROI_PROFILE_ACTIVE_LABELS):
-                    if not bool(med_rows.get("sig_fdr_within_roi_med", pd.Series(dtype=bool)).get((roi, condition), False)):
-                        continue
-                    ax.scatter(
-                        condition_idx,
-                        roi_idx,
-                        s=25,
-                        facecolors="none",
-                        edgecolors="#111111",
-                        linewidths=0.8,
-                    )
-
-            for spine in ax.spines.values():
-                spine.set_visible(False)
-            ax.set_xticks(np.arange(-0.5, len(ROI_PROFILE_ACTIVE_LABELS), 1), minor=True)
-            ax.set_yticks(np.arange(-0.5, len(plot_rois), 1), minor=True)
-            ax.grid(which="minor", color="white", linewidth=0.6)
-            ax.tick_params(which="minor", bottom=False, left=False)
-
-            boundary = 0
-            for group_name, group_items in pd.Series(plot_rois).groupby(
-                [roi_to_group.get(roi, "") for roi in plot_rois],
-                sort=False,
-            ):
-                boundary += len(group_items)
-                if boundary < len(plot_rois):
-                    ax.axhline(boundary - 0.5, color="#555555", linewidth=0.7)
-
-        if heat_image is not None:
-            cbar = fig.colorbar(heat_image, cax=cbar_ax)
-            cbar.set_label("Mean delta vs sham", fontsize=7)
-            cbar.ax.tick_params(labelsize=6.5, width=0.6, length=2.5)
 
         prev_group: str = ""
         for row_idx, base_name in enumerate(present_base_names):
@@ -1019,6 +921,17 @@ def _write_motor_reward_roi_profile_plot(
                         alpha=0.95,
                         label=medication if row_idx == 0 and col_idx == 0 else "_nolegend_",
                     )
+                    fdr_mask = subset["sig_fdr_within_roi_med"].fillna(False).astype(bool)
+                    if fdr_mask.any():
+                        ax.scatter(
+                            x_values[fdr_mask.to_numpy(dtype=bool)] + offsets[med_idx],
+                            subset.loc[fdr_mask, "mean_delta"],
+                            s=30,
+                            facecolors="none",
+                            edgecolors="#111111",
+                            linewidths=0.8,
+                            zorder=4,
+                        )
                 ax.axhline(0, color="#555555", linewidth=0.6, zorder=0)
                 ax.set_xticks(x_values)
                 if row_idx == n_rows - 1:
@@ -1068,14 +981,19 @@ def _write_motor_reward_roi_profile_plot(
 
             prev_group = group
 
-        fig.subplots_adjust(
-            left=0.13,
-            right=0.90,
-            top=0.91,
-            bottom=0.06,
-            hspace=0.45,
-            wspace=0.30,
-        )
+        fig.tight_layout(rect=(0.02, 0, 0.87, 0.93), h_pad=0.35, w_pad=0.55)
+
+        # Column headers placed in figure coordinates (no set_title clash).
+        axes_top = axes[0][0].get_position().y1
+        hemi_y = axes_top + 0.012
+
+        for col_idx, hemi_label in enumerate(["Left Hemisphere", "Right Hemisphere"]):
+            x_mid = (axes[0][col_idx].get_position().x0 + axes[0][col_idx].get_position().x1) / 2
+            fig.text(
+                x_mid, hemi_y, hemi_label,
+                ha="center", va="bottom",
+                fontsize=9, fontweight="bold", color="#333333",
+            )
 
         handles = [
             matplotlib.lines.Line2D(
@@ -1118,8 +1036,9 @@ def _write_motor_reward_roi_profile_plot(
         fig.legend(
             handles,
             [handle.get_label() for handle in handles],
-            loc="upper center", bbox_to_anchor=(0.5, 0.992),
-            ncol=4, frameon=False, fontsize=7.3,
+            loc="upper right", bbox_to_anchor=(0.985, 0.965),
+            ncol=1, frameon=False, fontsize=7.3,
+            borderaxespad=0.0, handletextpad=0.7, labelspacing=0.55,
         )
 
         paths = _save_pdf_and_png(fig, out_dir / "C_motor_reward_roi_gvs_profiles.pdf", dpi=300)
