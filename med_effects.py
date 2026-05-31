@@ -867,8 +867,8 @@ def _plot_cross_subject_distribution(pairwise, out_dir, paired_stats=None):
     complete_labels = _complete_subject_labels_from_stats(paired_stats)
     if complete_labels is not None:
         subset = subset.loc[subset['label_a'].isin(complete_labels) & subset['label_b'].isin(complete_labels)].copy()
-    class_order = [('OFF-OFF', 'off-off'), ('ON-ON', 'on-on'), ('OFF-ON', 'off-on')]
-    colors_by_name = {'OFF-OFF': '#4c78a8', 'ON-ON': '#e9a3a3', 'OFF-ON': '#54a24b'}
+    class_order = [('OFF-OFF', 'off-off'), ('ON-ON', 'on-on')]
+    colors_by_name = {'OFF-OFF': '#4c78a8', 'ON-ON': '#d65f5f'}
     groups = [(name, idx * 1.15, subset.loc[subset['pair_label'] == key, 'raw_score'].to_numpy(dtype=np.float64)) for (idx, (name, key)) in enumerate(class_order)]
     groups = [(name, pos, values[np.isfinite(values)]) for (name, pos, values) in groups if np.isfinite(values).any()]
     if not groups:
@@ -876,28 +876,58 @@ def _plot_cross_subject_distribution(pairwise, out_dir, paired_stats=None):
     group_tests = _pairwise_group_tests(subset, class_order, groups)
     if not any(np.isfinite(float(test.get('p_value', np.nan))) for test in group_tests):
         group_tests = _paired_permutation_plot_tests(groups, paired_stats)
-    (fig, ax) = plt.subplots(figsize=(5.2, 4.1))
-    box = ax.boxplot([values for (_, _, values) in groups], positions=[pos for (_, pos, _) in groups], widths=0.56, patch_artist=True, flierprops={'markeredgecolor': '#444444', 'markerfacecolor': '#444444', 'markersize': 2.5})
+    subject_values = None
+    if paired_stats is not None and paired_stats.get('complete_subjects'):
+        lookup = _distance_lookup(_metric_pairwise_rows(pairwise))
+        subject_values = _subject_level_similarity_values(paired_stats['complete_subjects'], lookup)
+    (fig, ax) = plt.subplots(figsize=(4.7, 4.15))
+    positions = [pos for (_, pos, _) in groups]
+    violins = ax.violinplot([values for (_, _, values) in groups], positions=positions, widths=0.74, showmeans=False, showmedians=False, showextrema=False)
+    for (body, (name, _, _)) in zip(violins['bodies'], groups):
+        body.set_facecolor(colors_by_name.get(name, '#7f7f7f'))
+        body.set_edgecolor('none')
+        body.set_alpha(0.16)
+    box = ax.boxplot([values for (_, _, values) in groups], positions=positions, widths=0.28, patch_artist=True, showfliers=False, medianprops={'color': '#ffffff', 'linewidth': 1.5}, whiskerprops={'color': '#555555', 'linewidth': 1.0}, capprops={'color': '#555555', 'linewidth': 1.0})
     for (patch, (name, _, _)) in zip(box['boxes'], groups):
         patch.set_facecolor(colors_by_name.get(name, '#7f7f7f'))
-        patch.set_alpha(0.55)
+        patch.set_alpha(0.82)
+        patch.set_edgecolor('#333333')
+        patch.set_linewidth(0.9)
     rng = np.random.default_rng(0)
-    for (_, pos, values) in groups:
-        ax.scatter(rng.normal(loc=pos, scale=0.04, size=values.size), values, s=14, alpha=0.55, color='black', linewidths=0.0)
-    positions = [pos for (_, pos, _) in groups]
+    for (name, pos, values) in groups:
+        ax.scatter(rng.normal(loc=pos, scale=0.055, size=values.size), values, s=10, alpha=0.18, color=colors_by_name.get(name, '#7f7f7f'), linewidths=0.0, zorder=2)
+    if subject_values is not None and not subject_values.empty and {'off_mean_to_other_off', 'on_mean_to_other_on'} <= set(subject_values.columns):
+        off_values = subject_values['off_mean_to_other_off'].to_numpy(dtype=np.float64)
+        on_values = subject_values['on_mean_to_other_on'].to_numpy(dtype=np.float64)
+        valid = np.isfinite(off_values) & np.isfinite(on_values)
+        off_values = off_values[valid]
+        on_values = on_values[valid]
+        if off_values.size:
+            for (off_value, on_value) in zip(off_values, on_values):
+                ax.plot([positions[0], positions[1]], [off_value, on_value], color='#4b5563', alpha=0.38, linewidth=0.8, zorder=3)
+            ax.scatter(np.full(off_values.size, positions[0]), off_values, s=28, facecolor='#ffffff', edgecolor=colors_by_name['OFF-OFF'], linewidth=1.1, zorder=4)
+            ax.scatter(np.full(on_values.size, positions[1]), on_values, s=28, facecolor='#ffffff', edgecolor=colors_by_name['ON-ON'], linewidth=1.1, zorder=4)
+            ax.scatter([positions[0], positions[1]], [float(np.mean(off_values)), float(np.mean(on_values))], s=46, marker='D', color='#111111', zorder=5)
     ax.set_xticks(positions)
     ax.set_xticklabels([name for (name, _, _) in groups])
-    ax.set_xlim(min(positions) - 0.48, max(positions) + 0.48)
-    ax.set_ylabel('Laplacian spectral distance')
+    ax.set_xlim(min(positions) - 0.42, max(positions) + 0.42)
+    ax.set_ylabel('cross-subject distance')
     y_values = np.concatenate([values for (_, _, values) in groups])
+    if subject_values is not None and not subject_values.empty:
+        subject_plot_values = subject_values[['off_mean_to_other_off', 'on_mean_to_other_on']].to_numpy(dtype=np.float64).ravel()
+        y_values = np.concatenate([y_values, subject_plot_values[np.isfinite(subject_plot_values)]])
     y_min = float(np.min(y_values))
     y_max = float(np.max(y_values))
     y_span = max(y_max - y_min, 1e-06)
     significant_count = sum(1 for test in group_tests if test['stars'])
-    upper_padding = 0.3 if significant_count == 0 else 0.18 + 0.095 * significant_count
+    upper_padding = 0.14 if significant_count == 0 else 0.22 + 0.08 * significant_count
     ax.set_ylim(y_min - 0.05 * y_span, y_max + upper_padding * y_span)
     _add_significance_stars(ax, groups, group_tests, y_max, y_span)
-    _add_star_legend(ax, group_tests)
+    if significant_count:
+        ax.text(0.98, 0.98, '*** p < .001', transform=ax.transAxes, ha='right', va='top', fontsize=8, color='#333333')
+    ax.grid(axis='y', color='#d9d9d9', linewidth=0.7, alpha=0.75)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
     fig.tight_layout()
     out_dir.mkdir(parents=True, exist_ok=True)
     png_path = out_dir / 'cross_subject_only_laplacian_spectral_distance_signed_distribution.png'
@@ -1689,7 +1719,7 @@ def _print_dry_run(args):
     print(f'5. Compute {CONNECTIVITY_METRIC} ROI-edge matrices for each subject/session.')
     print(f'6. Compute {COMPARISON_METRIC} for all session pairs.')
     print('7. Compute paired OFF/ON subject-level, bootstrap, label-swap, and Mantel-style similarity tests.')
-    print('8. Plot cross-subject-only OFF-OFF, ON-ON, and OFF-ON distance distributions.')
+    print('8. Plot cross-subject-only OFF-OFF and ON-ON distance distributions.')
     print(f'9. Compute paired {_connectivity_metric_label()} node-strength summaries and plot the top {args.node_strength_top_n} ROI panels.')
     print(f'10. Compute within-hemisphere vs between-hemisphere {_connectivity_metric_label()} edge-change summaries.')
     print('11. Compute intra-ROI voxel FC vs between-ROI FC medication-change summaries.')

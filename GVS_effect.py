@@ -832,9 +832,7 @@ def _write_motor_reward_roi_profile_plot(
         "basal_ganglia_thalamus": "Basal Ganglia\n& Thalamus",
         "reward_limbic": "Reward\n& Limbic",
     }
-    stim_labels = [
-        ROI_PROFILE_STIM_SHORT[c].replace("\n", " ") for c in ROI_PROFILE_ACTIVE_LABELS
-    ]
+    stim_labels = [c.lower() for c in ROI_PROFILE_ACTIVE_LABELS]
 
     # Build ordered list of unique base ROI names (strip _L / _R suffix)
     present_base_names: list[str] = []
@@ -846,8 +844,9 @@ def _write_motor_reward_roi_profile_plot(
             present_base_names.append(base)
 
     n_rows = len(present_base_names)
-    # 4 columns: L-OFF, L-ON, R-OFF, R-ON
-    COL_CONFIG: list[tuple[str, str]] = [("L", "OFF"), ("L", "ON"), ("R", "OFF"), ("R", "ON")]
+    # 2 columns: left and right hemisphere; medication state is encoded by color.
+    COL_CONFIG = ("L", "R")
+    MEDICATION_ORDER = ("OFF", "ON")
 
     with plt.rc_context({
         "font.family": "sans-serif",
@@ -859,8 +858,8 @@ def _write_motor_reward_roi_profile_plot(
         "ytick.major.size": 2.5,
     }):
         fig, axes = plt.subplots(
-            n_rows, 4,
-            figsize=(10.0, n_rows * 1.3 + 1.8),
+            n_rows, 2,
+            figsize=(6.8, n_rows * 1.05 + 0.85),
             sharey=False,
             squeeze=False,
         )
@@ -872,57 +871,66 @@ def _write_motor_reward_roi_profile_plot(
             bg = group_bg.get(group, "#f8f8f8")
             is_new_group = group != prev_group
 
-            for col_idx, (hemi, medication) in enumerate(COL_CONFIG):
+            for col_idx, hemi in enumerate(COL_CONFIG):
                 roi = f"{base_name}_{hemi}"
                 ax = axes[row_idx][col_idx]
                 ax.set_facecolor(bg)
 
-                subset = (
-                    results
-                    .loc[results["roi"].eq(roi) & results["medication"].eq(medication)]
-                    .set_index("condition")
-                    .reindex(ROI_PROFILE_ACTIVE_LABELS)
-                    .reset_index()
-                )
-                x_values = np.arange(len(subset))
-                bar_colors = [
-                    PROJECTED_SIGNAL_MED_COLORS[medication] if bool(sig) else "#d0d0d0"
-                    for sig in subset["sig_uncorrected"].fillna(False)
+                med_subsets = [
+                    (
+                        medication,
+                        results
+                        .loc[results["roi"].eq(roi) & results["medication"].eq(medication)]
+                        .set_index("condition")
+                        .reindex(ROI_PROFILE_ACTIVE_LABELS)
+                        .reset_index(),
+                    )
+                    for medication in MEDICATION_ORDER
                 ]
-                ax.bar(
-                    x_values, subset["mean_delta"],
-                    yerr=subset["se_delta"],
-                    color=bar_colors,
-                    edgecolor="#333333", linewidth=0.35,
-                    error_kw={"elinewidth": 0.8, "capsize": 2.0, "ecolor": "#444444"},
-                    alpha=0.90, width=0.68,
-                )
+                x_values = np.arange(len(ROI_PROFILE_ACTIVE_LABELS))
+                bar_width = 0.32
+                offsets = np.linspace(-0.18, 0.18, len(MEDICATION_ORDER))
+                for med_idx, (medication, subset) in enumerate(med_subsets):
+                    ax.bar(
+                        x_values + offsets[med_idx],
+                        subset["mean_delta"],
+                        yerr=subset["se_delta"],
+                        color=PROJECTED_SIGNAL_MED_COLORS[medication],
+                        edgecolor="#333333", linewidth=0.35,
+                        error_kw={"elinewidth": 0.8, "capsize": 1.8, "ecolor": "#444444"},
+                        alpha=0.90, width=bar_width,
+                        label=medication if row_idx == 0 and col_idx == 0 else "_nolegend_",
+                    )
                 ax.axhline(0, color="#555555", linewidth=0.6, zorder=0)
                 ax.set_xticks(x_values)
-                ax.set_xticklabels(stim_labels, rotation=35, ha="right", fontsize=7)
+                ax.set_xticklabels(stim_labels, rotation=0, ha="center", fontsize=7)
 
                 if col_idx == 0:
                     ax.set_ylabel(base_name.replace("_", " "), fontsize=8.5, labelpad=3)
 
                 finite_vals = pd.concat(
-                    [subset["mean_delta"].abs(), subset["se_delta"].abs()]
+                    [
+                        subset["mean_delta"].abs() + subset["se_delta"].abs().fillna(0)
+                        for _, subset in med_subsets
+                    ]
                 ).dropna()
                 y_range = max(float(finite_vals.max()) if not finite_vals.empty else 0.01, 0.01)
                 ax.set_ylim(-1.45 * y_range, 1.65 * y_range)
                 star_off = 0.1 * y_range
 
-                for x_val, row in subset.iterrows():
-                    lbl = _roi_profile_star_label(float(row["p_value"])) if pd.notna(row["p_value"]) else ""
-                    if not lbl:
-                        continue
-                    y_base = float(row["mean_delta"])
-                    se = float(row["se_delta"]) if pd.notna(row["se_delta"]) else 0.0
-                    sign = 1.0 if y_base >= 0 else -1.0
-                    ax.text(
-                        x_val, y_base + sign * (se + star_off), lbl,
-                        ha="center", va="bottom" if sign > 0 else "top",
-                        fontsize=9, color="#c0392b", fontweight="bold",
-                    )
+                for med_idx, (_, subset) in enumerate(med_subsets):
+                    for x_val, row in subset.iterrows():
+                        lbl = _roi_profile_star_label(float(row["p_value"])) if pd.notna(row["p_value"]) else ""
+                        if not lbl or pd.isna(row["mean_delta"]):
+                            continue
+                        y_base = float(row["mean_delta"])
+                        se = float(row["se_delta"]) if pd.notna(row["se_delta"]) else 0.0
+                        sign = 1.0 if y_base >= 0 else -1.0
+                        ax.text(
+                            x_val + offsets[med_idx], y_base + sign * (se + star_off), lbl,
+                            ha="center", va="bottom" if sign > 0 else "top",
+                            fontsize=9, color="#c0392b", fontweight="bold",
+                        )
 
                 ax.grid(axis="y", alpha=0.25, linestyle="--", linewidth=0.45, zorder=0)
                 for spine in ("top", "right"):
@@ -931,7 +939,7 @@ def _write_motor_reward_roi_profile_plot(
                     ax.spines[spine].set_linewidth(0.6)
 
                 # Rotated group label at the first ROI of each anatomical group (last column)
-                if col_idx == 3 and is_new_group and group in group_display:
+                if col_idx == len(COL_CONFIG) - 1 and is_new_group and group in group_display:
                     ax.annotate(
                         group_display[group],
                         xy=(1.04, 0.5), xycoords="axes fraction",
@@ -942,52 +950,26 @@ def _write_motor_reward_roi_profile_plot(
 
             prev_group = group
 
-        # Shared y-axis label
-        fig.text(
-            0.01, 0.5, r"$\Delta$ Beta vs. sham",
-            va="center", ha="center", rotation=90,
-            fontsize=9, color="#333333",
-        )
-        fig.suptitle(
-            "Motor / Reward-circuit ROI GVS Effects",
-            fontsize=11, fontweight="bold", y=0.995,
-        )
-        fig.tight_layout(rect=(0.04, 0, 0.92, 0.90), h_pad=0.4, w_pad=0.6)
+        fig.tight_layout(rect=(0.02, 0, 0.94, 0.93), h_pad=0.35, w_pad=0.55)
 
-        # All column headers placed in figure coordinates (no set_title clash)
-        import matplotlib.lines as mlines
-
+        # Column headers placed in figure coordinates (no set_title clash)
         axes_top = axes[0][0].get_position().y1
-        med_y = axes_top + 0.012     # "Med. OFF / ON" tier
-        hemi_y = axes_top + 0.048   # "Left / Right Hemisphere" tier
+        hemi_y = axes_top + 0.012
 
-        for col_idx, (hemi, med) in enumerate(COL_CONFIG):
-            x_col = (axes[0][col_idx].get_position().x0 + axes[0][col_idx].get_position().x1) / 2
-            fig.text(
-                x_col, med_y,
-                f"Med. {'OFF' if med == 'OFF' else 'ON'}",
-                ha="center", va="bottom",
-                fontsize=9, fontweight="bold",
-                color=PROJECTED_SIGNAL_MED_COLORS[med],
-            )
-
-        for hemi_label, col_a, col_b in [("Left Hemisphere", 0, 1), ("Right Hemisphere", 2, 3)]:
-            x_mid = (axes[0][col_a].get_position().x0 + axes[0][col_b].get_position().x1) / 2
+        for col_idx, hemi_label in enumerate(["Left Hemisphere", "Right Hemisphere"]):
+            x_mid = (axes[0][col_idx].get_position().x0 + axes[0][col_idx].get_position().x1) / 2
             fig.text(
                 x_mid, hemi_y, hemi_label,
                 ha="center", va="bottom",
-                fontsize=10, fontweight="bold", color="#333333",
+                fontsize=9, fontweight="bold", color="#333333",
             )
 
-        # Vertical separator between L columns (0–1) and R columns (2–3)
-        x_left = axes[0][1].get_position().x1
-        x_right = axes[0][2].get_position().x0
-        x_sep = (x_left + x_right) / 2
-        fig.add_artist(mlines.Line2D(
-            [x_sep, x_sep], [0.02, hemi_y + 0.02],
-            transform=fig.transFigure,
-            color="#aaaaaa", linewidth=0.9, linestyle="--",
-        ))
+        handles, labels = axes[0][0].get_legend_handles_labels()
+        fig.legend(
+            handles, [f"Med. {label}" for label in labels],
+            loc="upper center", bbox_to_anchor=(0.5, 0.995),
+            ncol=2, frameon=False, fontsize=8,
+        )
 
         paths = _save_pdf_and_png(fig, out_dir / "C_motor_reward_roi_gvs_profiles.pdf", dpi=220)
         plt.close(fig)
@@ -1583,6 +1565,8 @@ def _write_labeled_compact_burden_plot(
                 combined_color_map,
                 show_ylabel=index == 0,
             )
+            panel_title = str(specs[_prefix].get("panel_title", specs[_prefix]["label"]))
+            ax.set_title(panel_title, fontsize=10.5, pad=8.0)
         fig.tight_layout(w_pad=2.0)
         pdf_path, png_path = _save_pdf_and_png(
             fig,
@@ -1618,6 +1602,7 @@ def _write_compact_burden_plot(
     specs = {
         "off_condition_minus_sham_off_roi_mean_delta": {
             "label": "OFF - sham OFF",
+            "panel_title": "Session 1 (medication off)",
             "color": "#2F6FAE",
             "marker": "o",
             "boxstyle": "round,pad=0.25,rounding_size=0.18",
@@ -1625,6 +1610,7 @@ def _write_compact_burden_plot(
         },
         "on_condition_minus_sham_on_roi_mean_delta": {
             "label": "ON - sham ON",
+            "panel_title": "Session 2 (medication on)",
             "color": "#D87924",
             "marker": "s",
             "boxstyle": "square,pad=0.25",

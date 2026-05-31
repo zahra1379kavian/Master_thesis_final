@@ -39,9 +39,8 @@ from threshold_robustness_voxel_network import (
 
 DEFAULT_MAIN_MAP = Path("data/voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5.nii.gz")
 DEFAULT_FULL_MODEL_HTML = Path("data/voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5_bold_thr90.html")
-DEFAULT_TASK_ONLY_HTML = Path(
-    "data/ablation/voxel_weights_mean_foldavg_sub9_ses1_task1_bold0_beta0_smooth0_gamma1.5_bold_thr90.html"
-)
+DEFAULT_TASK_ONLY_MAP = Path("data/z_valu_standard_glm.nii.gz")
+DEFAULT_TASK_ONLY_Z_THRESHOLD = 3.1
 DEFAULT_ABLATION_DIR = Path("data/ablation")
 DEFAULT_OUT_DIR = Path("figures/ablation")
 DEFAULT_LOGS = (
@@ -1044,23 +1043,29 @@ def _add_contour(ax: plt.Axes, mask: np.ndarray, color: str, linewidth: float) -
 def plot_full_vs_task_only_anatomy(
     reference_map: Path,
     full_html: Path,
-    task_only_html: Path,
+    task_only_map: Path,
     out_base: Path,
+    task_z_threshold: float = DEFAULT_TASK_ONLY_Z_THRESHOLD,
 ) -> pd.DataFrame:
-    if not full_html.exists() or not task_only_html.exists():
+    if not full_html.exists() or not task_only_map.exists():
         return pd.DataFrame()
 
     reference_img, _ = _load_data(reference_map)
     full_bg, full_mask, html_affine = _html_sprite_volumes(full_html)
-    _, task_mask, task_affine = _html_sprite_volumes(task_only_html)
+    task_img, task_data = _load_data(task_only_map)
     if full_mask.shape != reference_img.shape[:3]:
         raise RuntimeError(
             f"{full_html} overlay shape {full_mask.shape} does not match reference shape {reference_img.shape[:3]}."
         )
-    if task_mask.shape != full_mask.shape:
-        raise RuntimeError(f"{task_only_html} overlay shape {task_mask.shape} differs from {full_html}.")
-    if not np.allclose(task_affine, html_affine):
-        raise RuntimeError(f"{task_only_html} affine differs from {full_html}.")
+    if task_img.shape[:3] != full_mask.shape:
+        raise RuntimeError(f"{task_only_map} shape {task_img.shape[:3]} differs from {full_html}.")
+
+    task_mask = np.isfinite(task_data) & (task_data >= task_z_threshold)
+    for axis in range(3):
+        task_step = float(task_img.affine[axis, axis])
+        html_step = float(html_affine[axis, axis])
+        if task_step != 0.0 and html_step != 0.0 and np.sign(task_step) != np.sign(html_step):
+            task_mask = np.flip(task_mask, axis=axis)
 
     union_mask = full_mask | task_mask
     if not np.any(union_mask):
@@ -1084,7 +1089,8 @@ def plot_full_vs_task_only_anatomy(
         [
             {
                 "full_model_html": str(full_html),
-                "task_only_html": str(task_only_html),
+                "task_only_map": str(task_only_map),
+                "task_only_threshold": f"z >= {task_z_threshold:g}",
                 "full_model_voxels": n_full,
                 "task_only_voxels": n_task,
                 "shared_voxels": n_shared,
@@ -1141,7 +1147,7 @@ def plot_full_vs_task_only_anatomy(
 
     handles = [
         Line2D([0], [0], color=colors["full"], lw=1.0, label=f"Full model (red; {n_full:,})"),
-        Line2D([0], [0], color=colors["task"], lw=1.0, label=f"Task-only map (blue; {n_task:,})"),
+        Line2D([0], [0], color=colors["task"], lw=1.0, label=f"Standard GLM z>={task_z_threshold:g} (blue; {n_task:,})"),
         Line2D([0], [0], color=colors["shared"], lw=1.0, label=f"Overlap (magenta; {n_shared:,})"),
     ]
     fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False, fontsize=6.2, bbox_to_anchor=(0.5, 0.01))
@@ -1261,7 +1267,7 @@ def write_report(
         "- `ablation_roi_regions.csv`: AAL coarse ROI composition by map.",
         "- `ablation_publication_summary.{png,pdf}`: compact multi-panel publication figure.",
         "- `ablation_map_montage.{png,pdf}`: axial slice overview of available maps.",
-        "- `ablation_full_vs_task_only_anatomy.{png,pdf}`: Figure-3-style sagittal/coronal/axial contour montage for the supplied full-model and task-only thresholded HTML maps.",
+        "- `ablation_full_vs_task_only_anatomy.{png,pdf}`: Figure-3-style sagittal/coronal/axial contour montage for the supplied full-model HTML map and standard-GLM z map.",
         "- `ablation_full_vs_task_only_anatomy_summary.csv`: voxel counts and overlap for the focused full-vs-task-only anatomy figure.",
         "",
         "## Notes",
@@ -1269,7 +1275,7 @@ def write_report(
         "- The final-weight SLURM log contains the `task=1, bold=0.6, beta=0.6, smooth=1.25, gamma=1.5` full model plus no-task/no-BOLD/no-beta and single-term baselines, but no final-weight no-smooth metrics.",
         "- `slurm-11445550.out` is mixed; only the parameter-independent task-only and no-objective baselines were retained. The unrelated `task=1, bold=1, beta=0.75, smooth=1.8` sweep was excluded.",
         "- Balanced scores were computed within the final-weight analysis group using inverse ranges of candidate-mean score components.",
-        "- The focused full-vs-task-only anatomy figure uses the selected-voxel overlays embedded in the two thresholded HTML maps; red contours show the full model, blue contours show the task-only map, and magenta contours show overlap.",
+        f"- The focused full-vs-task-only anatomy figure uses the selected-voxel overlay embedded in the full-model thresholded HTML map and `{DEFAULT_TASK_ONLY_MAP}` thresholded at z >= {DEFAULT_TASK_ONLY_Z_THRESHOLD:g}; red contours show the full model, blue contours show the standard GLM map, and magenta contours show overlap.",
         "",
         "## Balanced-Score Weights",
         "",
@@ -1347,7 +1353,7 @@ def main() -> None:
     plot_full_vs_task_only_anatomy(
         args.main_map,
         DEFAULT_FULL_MODEL_HTML,
-        DEFAULT_TASK_ONLY_HTML,
+        DEFAULT_TASK_ONLY_MAP,
         args.out_dir / "ablation_full_vs_task_only_anatomy",
     )
     plot_map_montage(map_specs, args.out_dir / "ablation_map_montage")
