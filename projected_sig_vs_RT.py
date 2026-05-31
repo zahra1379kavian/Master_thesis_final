@@ -442,6 +442,10 @@ def _p_value_stars(p_value: float) -> str:
     return "n.s."
 
 
+def _significance_label(p_value: float) -> str:
+    return f"{_p_value_stars(p_value)} ({_format_p_value(p_value)})"
+
+
 def _draw_mean_ci(ax: plt.Axes, x: float, values: np.ndarray, color: str, markersize: float = 5.2) -> tuple[float, float, float]:
     mean, ci_low, ci_high = _mean_ci(values)
     yerr = None
@@ -562,7 +566,7 @@ def _plot_paired_estimation(
         color="0.10",
         linewidth=1.0,
     )
-    ax.text(0.5, star_y, _p_value_stars(p_value), ha="center", va="bottom", fontsize=9.0, color="0.10")
+    ax.text(0.5, star_y, _significance_label(p_value), ha="center", va="bottom", fontsize=8.0, color="0.10")
 
     ax.set_xlim(-0.38, 1.38)
     ax.set_ylim((y_low, y_high))
@@ -601,8 +605,8 @@ def _plot_behaviour_minus_projection(ax: plt.Axes, subject_df: pd.DataFrame) -> 
     ax.set_xlim(-0.30, 0.30)
     ax.set_ylim((y_low, y_high))
     ax.set_xticks([0.0])
-    ax.set_xticklabels(["Subjects"])
-    ax.set_ylabel("Reduction in variability\n(Behaviour - Projection)")
+    ax.set_xticklabels(["Difference"])
+    ax.set_ylabel("Behaviour - Projection\nvariability")
     ax.grid(axis="y", linestyle="-", linewidth=0.45, alpha=0.18)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -611,7 +615,7 @@ def _plot_behaviour_minus_projection(ax: plt.Axes, subject_df: pd.DataFrame) -> 
     ax.text(
         0.98,
         0.97,
-        f"Mean reduction = {mean:.1f}\n95% CI [{ci_low:.1f}, {ci_high:.1f}]\npaired t-test {_format_p_value(p_value)}",
+        f"Mean difference = {mean:.1f}\n95% CI [{ci_low:.1f}, {ci_high:.1f}]\npaired t-test {_format_p_value(p_value)}",
         transform=ax.transAxes,
         ha="right",
         va="top",
@@ -654,9 +658,15 @@ def _save_behavior_projection_figure(metric_df: pd.DataFrame, out_dir: Path) -> 
             "ps.fonttype": 42,
         }
     ):
-        fig, ax = plt.subplots(1, 1, figsize=(3.4, 3.55))
-        _plot_paired_estimation(ax, subject_df, y_limits)
-        fig.subplots_adjust(left=0.20, right=0.98, bottom=0.15, top=0.995)
+        fig, axes = plt.subplots(
+            1,
+            2,
+            figsize=(6.2, 3.55),
+            gridspec_kw={"width_ratios": [1.45, 1.0]},
+        )
+        _plot_paired_estimation(axes[0], subject_df, y_limits)
+        _plot_behaviour_minus_projection(axes[1], subject_df)
+        fig.subplots_adjust(left=0.115, right=0.985, bottom=0.15, top=0.985, wspace=0.46)
         paths = _save_pdf_and_png(fig, out_dir / "projection_behavior_subject_panel(main).pdf", dpi=300)
         plt.close(fig)
         return paths
