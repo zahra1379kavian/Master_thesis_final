@@ -40,7 +40,7 @@ from threshold_robustness_voxel_network import (
 DEFAULT_MAIN_MAP = Path("data/voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5.nii.gz")
 DEFAULT_FULL_MODEL_HTML = Path("data/voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5_bold_thr90.html")
 DEFAULT_TASK_ONLY_MAP = Path("data/z_valu_standard_glm.nii.gz")
-DEFAULT_TASK_ONLY_Z_THRESHOLD = 3.1
+DEFAULT_TASK_ONLY_Z_THRESHOLD = 3.5
 DEFAULT_ABLATION_DIR = Path("data/ablation")
 DEFAULT_OUT_DIR = Path("figures/ablation")
 DEFAULT_LOGS = (
@@ -50,6 +50,17 @@ DEFAULT_LOGS = (
 DEFAULT_ATLAS_CACHE_DIR = Path("/home/zkavian/nilearn_data")
 REFERENCE_PERCENTILE = 90.0
 EPS = 1e-8
+HARVARD_OXFORD_SUBCORTICAL_ATLAS = "sub-maxprob-thr25-2mm"
+BRAINSTEM_ATLAS_LABELS = ("Brain-Stem",)
+BRAINSTEM_AAL_ROIS = ("VTA", "SN_pc", "SN_pr", "Red_N", "LC", "Raphe")
+BRAINSTEM_MNI_BOUNDS_MM = {
+    "x_abs": 20.0,
+    "y_min": -50.0,
+    "y_max": -4.0,
+    "z_min": -36.0,
+    "z_max": 10.0,
+}
+MOTOR_CONTOUR_ROIS = ("Precentral", "Supp_Motor_Area", "Paracentral_Lobule", "Postcentral")
 MIXED_LOG_FINAL_CANDIDATE_KEYS = {
     (0.0, 0.0, 0.0, 0.0, 1.5),
     (1.0, 0.0, 0.0, 0.0, 1.5),
@@ -976,6 +987,64 @@ def _html_overlay_mask(html_path: Path, reference_img: nib.Nifti1Image) -> np.nd
     return mask
 
 
+def _resampled_label_mask(
+    label_img: nib.Nifti1Image,
+    label_values: list[int],
+    reference_img: nib.Nifti1Image,
+) -> np.ndarray:
+    if label_img.shape[:3] == reference_img.shape[:3] and np.allclose(label_img.affine, reference_img.affine):
+        data = np.rint(label_img.get_fdata()).astype(np.int32, copy=False)
+    else:
+        resampled = image.resample_to_img(
+            label_img,
+            reference_img,
+            interpolation="nearest",
+            force_resample=True,
+            copy_header=True,
+        )
+        data = np.rint(resampled.get_fdata()).astype(np.int32, copy=False)
+    return np.isin(data, label_values)
+
+
+def _atlas_roi_mask(reference_img: nib.Nifti1Image, roi_names: tuple[str, ...]) -> np.ndarray:
+    groups, _ = _build_roi_groups(reference_img, DEFAULT_AAL_VERSION, DEFAULT_ATLAS_CACHE_DIR)
+    mask = np.zeros(reference_img.shape[:3], dtype=bool)
+    requested = set(roi_names)
+    for group in groups:
+        if group.name in requested:
+            mask |= group.mask
+    return mask
+
+
+def _mni_box_mask(reference_img: nib.Nifti1Image, bounds: dict[str, float]) -> np.ndarray:
+    coords_ijk = np.column_stack(np.nonzero(np.ones(reference_img.shape[:3], dtype=bool)))
+    coords_mm = nib.affines.apply_affine(reference_img.affine, coords_ijk)
+    in_box = (
+        (np.abs(coords_mm[:, 0]) <= bounds["x_abs"])
+        & (coords_mm[:, 1] >= bounds["y_min"])
+        & (coords_mm[:, 1] <= bounds["y_max"])
+        & (coords_mm[:, 2] >= bounds["z_min"])
+        & (coords_mm[:, 2] <= bounds["z_max"])
+    )
+    mask = np.zeros(reference_img.shape[:3], dtype=bool)
+    mask[tuple(coords_ijk[in_box].T)] = True
+    return mask
+
+
+def _brainstem_mask(reference_img: nib.Nifti1Image) -> np.ndarray:
+    atlas = datasets.fetch_atlas_harvard_oxford(
+        HARVARD_OXFORD_SUBCORTICAL_ATLAS,
+        data_dir=str(DEFAULT_ATLAS_CACHE_DIR),
+        verbose=0,
+    )
+    atlas_img = atlas.maps if isinstance(atlas.maps, nib.Nifti1Image) else nib.load(atlas.maps)
+    label_values = [idx for idx, label in enumerate(atlas.labels) if str(label) in BRAINSTEM_ATLAS_LABELS]
+    mask = _resampled_label_mask(atlas_img, label_values, reference_img)
+    mask |= _atlas_roi_mask(reference_img, BRAINSTEM_AAL_ROIS)
+    mask |= _mni_box_mask(reference_img, BRAINSTEM_MNI_BOUNDS_MM)
+    return mask
+
+
 def _cut_indices_for_mask(mask: np.ndarray, axis: int, n_cuts: int = 6, min_gap: int = 5) -> list[int]:
     counts = mask.sum(axis=tuple(dim for dim in range(3) if dim != axis))
     selected: list[int] = []
@@ -1067,18 +1136,35 @@ def plot_full_vs_task_only_anatomy(
         if task_step != 0.0 and html_step != 0.0 and np.sign(task_step) != np.sign(html_step):
             task_mask = np.flip(task_mask, axis=axis)
 
+    display_img = nib.Nifti1Image(np.zeros(full_mask.shape, dtype=np.uint8), html_affine)
+    brainstem_mask = _brainstem_mask(display_img)
+    motor_mask = _atlas_roi_mask(display_img, MOTOR_CONTOUR_ROIS)
+
+    raw_full_mask = full_mask.copy()
+    raw_task_mask = task_mask.copy()
+    raw_shared_mask = raw_full_mask & raw_task_mask
+    full_mask &= ~brainstem_mask
+    task_mask &= ~brainstem_mask
     union_mask = full_mask | task_mask
     if not np.any(union_mask):
         return pd.DataFrame()
 
     shared_mask = full_mask & task_mask
+    motor_shared_mask = shared_mask & motor_mask
     full_only_mask = full_mask & ~task_mask
     task_only_unique_mask = task_mask & ~full_mask
 
+    n_full_raw = int(np.count_nonzero(raw_full_mask))
+    n_task_raw = int(np.count_nonzero(raw_task_mask))
+    n_shared_raw = int(np.count_nonzero(raw_shared_mask))
     n_full = int(np.count_nonzero(full_mask))
     n_task = int(np.count_nonzero(task_mask))
     n_shared = int(np.count_nonzero(shared_mask))
     n_union = int(np.count_nonzero(union_mask))
+    n_brainstem_full = n_full_raw - n_full
+    n_brainstem_task = n_task_raw - n_task
+    n_brainstem_shared = n_shared_raw - n_shared
+    n_motor_shared = int(np.count_nonzero(motor_shared_mask))
     mode_specs = [("x", 0), ("y", 1), ("z", 2)]
     cuts_by_mode = {mode: _cut_indices_for_mask(union_mask, axis, n_cuts=9, min_gap=4) for mode, axis in mode_specs}
     cut_summary = "|".join(
@@ -1094,6 +1180,15 @@ def plot_full_vs_task_only_anatomy(
                 "full_model_voxels": n_full,
                 "task_only_voxels": n_task,
                 "shared_voxels": n_shared,
+                "raw_full_model_voxels": n_full_raw,
+                "raw_task_only_voxels": n_task_raw,
+                "raw_shared_voxels": n_shared_raw,
+                "brainstem_suppressed_full_model_voxels": n_brainstem_full,
+                "brainstem_suppressed_task_only_voxels": n_brainstem_task,
+                "brainstem_suppressed_shared_voxels": n_brainstem_shared,
+                "motor_overlap_voxels": n_motor_shared,
+                "brainstem_mask_source": "Harvard-Oxford Brain-Stem + AAL3 brainstem nuclei + MNI brainstem box",
+                "motor_overlap_rois": ";".join(MOTOR_CONTOUR_ROIS),
                 "full_only_voxels": int(np.count_nonzero(full_only_mask)),
                 "task_only_unique_voxels": int(np.count_nonzero(task_only_unique_mask)),
                 "union_voxels": n_union,
@@ -1129,13 +1224,15 @@ def plot_full_vs_task_only_anatomy(
                     _plane_slice(full_mask, axis, index),
                     _plane_slice(task_mask, axis, index),
                     _plane_slice(shared_mask, axis, index),
+                    _plane_slice(motor_shared_mask, axis, index),
                 ],
             )
-            full_slice, task_slice, shared_slice = mask_slices
+            full_slice, task_slice, shared_slice, motor_shared_slice = mask_slices
             ax.imshow(_anatomy_rgba(bg_slice, vmax), interpolation="nearest")
             _add_contour(ax, full_slice, colors["full"], 0.85)
             _add_contour(ax, task_slice, colors["task"], 0.85)
             _add_contour(ax, shared_slice, colors["shared"], 0.95)
+            _add_contour(ax, motor_shared_slice, colors["shared"], 2.35)
             coord = _coord_mm(html_affine, axis, index)
             ax.text(0.02, -0.03, f"{mode}={coord:g}", transform=ax.transAxes, ha="left", va="top", fontsize=5.6)
             if mode in {"y", "z"}:
@@ -1148,7 +1245,7 @@ def plot_full_vs_task_only_anatomy(
     handles = [
         Line2D([0], [0], color=colors["full"], lw=1.0, label=f"Full model (red; {n_full:,})"),
         Line2D([0], [0], color=colors["task"], lw=1.0, label=f"Standard GLM z>={task_z_threshold:g} (blue; {n_task:,})"),
-        Line2D([0], [0], color=colors["shared"], lw=1.0, label=f"Overlap (magenta; {n_shared:,})"),
+        Line2D([0], [0], color=colors["shared"], lw=1.0, label=f"Overlap (purple; {n_shared:,})"),
     ]
     fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False, fontsize=6.2, bbox_to_anchor=(0.5, 0.01))
     fig.subplots_adjust(left=0.01, right=0.995, top=0.995, bottom=0.12, wspace=0.02, hspace=0.18)
@@ -1275,7 +1372,7 @@ def write_report(
         "- The final-weight SLURM log contains the `task=1, bold=0.6, beta=0.6, smooth=1.25, gamma=1.5` full model plus no-task/no-BOLD/no-beta and single-term baselines, but no final-weight no-smooth metrics.",
         "- `slurm-11445550.out` is mixed; only the parameter-independent task-only and no-objective baselines were retained. The unrelated `task=1, bold=1, beta=0.75, smooth=1.8` sweep was excluded.",
         "- Balanced scores were computed within the final-weight analysis group using inverse ranges of candidate-mean score components.",
-        f"- The focused full-vs-task-only anatomy figure uses the selected-voxel overlay embedded in the full-model thresholded HTML map and `{DEFAULT_TASK_ONLY_MAP}` thresholded at z >= {DEFAULT_TASK_ONLY_Z_THRESHOLD:g}; red contours show the full model, blue contours show the standard GLM map, and magenta contours show overlap.",
+        f"- The focused full-vs-task-only anatomy figure uses the selected-voxel overlay embedded in the full-model thresholded HTML map and `{DEFAULT_TASK_ONLY_MAP}` thresholded at z >= {DEFAULT_TASK_ONLY_Z_THRESHOLD:g}; brainstem contours are suppressed, red contours show the full model, blue contours show the standard GLM map, and purple contours show overlap with stronger line weight over motor ROIs.",
         "",
         "## Balanced-Score Weights",
         "",

@@ -194,7 +194,7 @@ def _plot_region_heatmap(region_df, mask_names, out_base, min_row_percent=DEFAUL
     plt.close(fig)
 
 def _short_mask_label(name):
-    replacements = {'Standard GLM positive z': 'Standard GLM', 'GLMsingle Type A positive z': 'GLMsingle A', 'GLMsingle Type D positive z': 'GLMsingle D', 'Optimization p80': 'Opt. p80', 'Optimization p90': 'Opt. p90'}
+    replacements = {'Standard GLM positive z': 'Standard GLM', 'GLMsingle Type A positive z': 'GLMsingle A', 'GLMsingle Type D positive z': 'GLMsingle D', 'Optimization p80': 'Opt. p80', 'Optimization p90': 'vigour-network'}
     return replacements.get(name, name.replace('Optimization matched to ', 'Opt. matched\n'))
 
 def _plot_overlap_heatmap(overlap_df, mask_names, out_base):

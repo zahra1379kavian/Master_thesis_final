@@ -37,7 +37,7 @@ DEFAULT_AAL_VERSION = "3v2"
 DEFAULT_ATLAS_NAME = "AAL3v2 (Automated Anatomical Labeling 3)"
 UNASSIGNED_ROI = "Unassigned Active Voxels"
 BILATERAL_HEMISPHERE_LABEL = "Bilateral"
-EXCLUDED_MAIN_PLOT_REGIONS = {"Insula", "N_Acc", "Olfactory", "Rolandic_Oper"}
+EXCLUDED_MAIN_PLOT_REGIONS = {"N_Acc"}
 EXCLUDED_ATLAS_LABEL_REGIONS = {"Olfactory"}
 COARSE_AAL_GROUPS = (
     ("Cerebellum", ("Cerebellum", "Vermis"), ()),
@@ -427,26 +427,29 @@ def _plot_atlas_regions(
 
 
 def _plot_robustness(summary_df: pd.DataFrame, region_df: pd.DataFrame, out_base: Path, min_report_voxels: int) -> None:
-    report_regions = region_df.loc[
-        (region_df["n_voxels"] >= min_report_voxels) & ~region_df["roi_name"].eq(UNASSIGNED_ROI)
-    ].copy()
-    report_regions = report_regions.loc[~report_regions["node_name"].isin(EXCLUDED_MAIN_PLOT_REGIONS)]
+    assigned_regions = region_df.loc[~region_df["roi_name"].eq(UNASSIGNED_ROI)].copy()
+    ever_reportable_nodes = set(assigned_regions.loc[assigned_regions["n_voxels"] >= min_report_voxels, "node_name"])
+    assigned_regions = assigned_regions.loc[assigned_regions["node_name"].isin(ever_reportable_nodes)]
+    assigned_regions = assigned_regions.loc[~assigned_regions["node_name"].isin(EXCLUDED_MAIN_PLOT_REGIONS)]
     p90_counts = (
-        report_regions.loc[np.isclose(report_regions["percentile"], REFERENCE_THRESHOLD), ["node_name", "n_voxels"]]
+        assigned_regions.loc[np.isclose(assigned_regions["percentile"], REFERENCE_THRESHOLD), ["node_name", "n_voxels"]]
         .set_index("node_name")["n_voxels"]
         .to_dict()
     )
     order_df = (
-        report_regions.groupby("node_name", as_index=False)["n_voxels"]
+        assigned_regions.groupby("node_name", as_index=False)["n_voxels"]
         .max()
         .assign(p90_count=lambda df: df["node_name"].map(p90_counts).fillna(0))
         .sort_values(["p90_count", "n_voxels", "node_name"], ascending=[False, False, True])
     )
     node_order = order_df["node_name"].tolist()
     pivot = (
-        report_regions.pivot_table(index="node_name", columns="threshold_label", values="n_voxels", aggfunc="sum", fill_value=0)
+        assigned_regions.pivot_table(index="node_name", columns="threshold_label", values="n_voxels", aggfunc="sum", fill_value=0)
         .reindex(index=node_order, columns=[_pct_label(p) for p in summary_df["percentile"]])
+        .fillna(0)
+        .astype(int)
     )
+    reportable = pivot >= min_report_voxels
 
     fig = plt.figure(figsize=(10.8, max(7.6, 0.24 * max(1, len(node_order)) + 2.8)), facecolor="white")
     gs = fig.add_gridspec(
@@ -454,7 +457,7 @@ def _plot_robustness(summary_df: pd.DataFrame, region_df: pd.DataFrame, out_base
         3,
         width_ratios=[1.0, 1.0, 0.028],
         height_ratios=[1.35, max(2.2, 0.17 * max(1, len(node_order)))],
-        hspace=0.18,
+        hspace=0.34,
         wspace=0.015,
     )
     ax_vox = fig.add_subplot(gs[0, 0])
@@ -491,11 +494,26 @@ def _plot_robustness(summary_df: pd.DataFrame, region_df: pd.DataFrame, out_base
     ax_heat.set_yticks(np.arange(pivot.shape[0]))
     ax_heat.set_yticklabels([_display_region_name(name) for name in pivot.index.tolist()], fontsize=8)
     ax_heat.set_xlabel("Threshold")
+    ax_heat.set_title(
+        f"Rows are kept if they are reportable at any threshold; lower heatmap colors mark below-threshold cells (<{min_report_voxels} voxels).",
+        fontsize=8.5,
+        loc="left",
+        pad=10,
+        color="#374151",
+    )
     for row_idx in range(pivot.shape[0]):
         for col_idx in range(pivot.shape[1]):
-            value = int(pivot.iat[row_idx, col_idx])
-            if value:
-                ax_heat.text(col_idx, row_idx, str(value), ha="center", va="center", fontsize=6.5, color="white" if heat[row_idx, col_idx] > 2.1 else "black")
+            if bool(reportable.iat[row_idx, col_idx]):
+                value = int(pivot.iat[row_idx, col_idx])
+                ax_heat.text(
+                    col_idx,
+                    row_idx,
+                    str(value),
+                    ha="center",
+                    va="center",
+                    fontsize=6.5,
+                    color="black",
+                )
     cbar = fig.colorbar(im, cax=cax)
     cbar.set_label("log10(voxels + 1)")
     out_base.parent.mkdir(parents=True, exist_ok=True)
