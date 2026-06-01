@@ -25,6 +25,7 @@ DEFAULT_OUTPUT_BASE = (
     Path("figures")
     / "voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5_bold_thr90_multiplane_weights_colorbar"
 )
+DEFAULT_REQUIRED_Z_CUTS = (64, 66)
 AXIS_LABEL_FONTSIZE = 13
 COLORBAR_FONTSIZE = 12
 
@@ -47,6 +48,13 @@ def parse_args():
     parser.add_argument("--output-base", type=Path, default=DEFAULT_OUTPUT_BASE, help="Output path without extension.")
     parser.add_argument("--n-cuts", type=int, default=8, help="Number of cuts per plane.")
     parser.add_argument("--gap", type=int, default=4, help="Minimum voxel gap between selected cuts.")
+    parser.add_argument(
+        "--required-z-cuts",
+        type=int,
+        nargs="*",
+        default=DEFAULT_REQUIRED_Z_CUTS,
+        help="Axial z coordinates that must be included in the montage.",
+    )
     parser.add_argument("--scale", type=float, default=1000.0, help="Multiplier applied before color mapping.")
     parser.add_argument(
         "--colorbar-label",
@@ -120,6 +128,18 @@ def pick_cuts(mask, affine, mode, n_cuts, gap):
         if len(chosen) == n_cuts:
             break
     return [world_coord(affine, mode, index) for index in sorted(chosen)]
+
+
+def include_required_cuts(cuts, required_cuts, n_cuts):
+    required_cuts = list(dict.fromkeys(required_cuts))
+    merged = sorted(set(cuts).union(required_cuts))
+    while len(merged) > n_cuts:
+        candidates = [cut for cut in merged if cut not in required_cuts]
+        if not candidates:
+            break
+        drop = min(candidates, key=lambda cut: min(abs(cut - required) for required in required_cuts))
+        merged.remove(drop)
+    return merged
 
 
 def cut_index(affine, mode, cut):
@@ -204,6 +224,7 @@ def main():
 
     plane_specs = [("x", "Sagittal"), ("y", "Coronal"), ("z", "Axial")]
     cuts = {mode: pick_cuts(selected_mask, display_affine, mode, args.n_cuts, args.gap) for mode, _ in plane_specs}
+    cuts["z"] = include_required_cuts(cuts["z"], args.required_z_cuts, args.n_cuts)
     n_cols = max(len(mode_cuts) for mode_cuts in cuts.values())
 
     fig = plt.figure(figsize=(15.1, 5.35), facecolor="white")
