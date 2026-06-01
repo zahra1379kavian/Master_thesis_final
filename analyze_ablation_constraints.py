@@ -1177,11 +1177,15 @@ def _add_mask_overlay(
     linewidth: float,
     fill_alpha: float,
     edge_color: str | None = None,
+    halo_color: str | None = None,
+    halo_linewidth: float = 0.0,
 ) -> None:
     if np.any(mask):
         values = mask.astype(float)
         if fill_alpha > 0:
             ax.contourf(values, levels=[0.5, 1.5], colors=[color], alpha=fill_alpha, antialiased=True)
+        if halo_color and halo_linewidth > 0:
+            ax.contour(values, levels=[0.5], colors=halo_color, linewidths=halo_linewidth)
         ax.contour(values, levels=[0.5], colors=edge_color or color, linewidths=linewidth)
 
 
@@ -1287,8 +1291,9 @@ def plot_full_vs_task_only_anatomy(
     colors = {
         "full": "#0072B2",
         "task": "#D55E00",
-        "shared": "#F0E442",
-        "shared_edge": "#1A1A1A",
+        "shared": "#00A676",
+        "shared_edge": "#00A676",
+        "shared_halo": "#FFFFFF",
     }
     full_bg = np.nan_to_num(full_bg, nan=0.0)
     vmax = float(np.percentile(full_bg[full_bg > 0], 99.5)) if np.any(full_bg > 0) else 1.0
@@ -1341,25 +1346,31 @@ def plot_full_vs_task_only_anatomy(
                     ax,
                     motor_shared_display_slice,
                     colors["shared"],
-                    1.05,
-                    0.36,
+                    1.25,
+                    0.50,
                     edge_color=colors["shared_edge"],
+                    halo_color=colors["shared_halo"],
+                    halo_linewidth=2.45,
                 )
                 _add_mask_overlay(
                     ax,
                     shared_slice,
                     colors["shared"],
-                    1.1,
-                    0.68,
+                    1.55,
+                    0.90,
                     edge_color=colors["shared_edge"],
+                    halo_color=colors["shared_halo"],
+                    halo_linewidth=2.85,
                 )
                 _add_mask_overlay(
                     ax,
                     motor_shared_slice,
                     colors["shared"],
-                    2.2,
+                    2.6,
                     0.0,
                     edge_color=colors["shared_edge"],
+                    halo_color=colors["shared_halo"],
+                    halo_linewidth=3.6,
                 )
                 coord = _coord_mm(html_affine, axis, index)
                 ax.text(
@@ -1397,7 +1408,7 @@ def plot_full_vs_task_only_anatomy(
         handles = [
             Patch(facecolor=colors["full"], edgecolor=colors["full"], alpha=0.42, label="Vigour Network"),
             Patch(facecolor=colors["task"], edgecolor=colors["task"], alpha=0.46, label="Task-activation map"),
-            Patch(facecolor=colors["shared"], edgecolor=colors["shared_edge"], alpha=0.68, label="Overlap of networks"),
+            Patch(facecolor=colors["shared"], edgecolor=colors["shared_edge"], alpha=0.90, label="Overlap of networks"),
         ]
         fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False, bbox_to_anchor=(0.5, 0.01))
         fig.subplots_adjust(left=0.01, right=0.995, top=0.995, bottom=0.16, wspace=0.02, hspace=0.04)
@@ -1524,7 +1535,7 @@ def write_report(
         "- The final-weight SLURM log contains the `task=1, bold=0.6, beta=0.6, smooth=1.25, gamma=1.5` full model plus no-task/no-BOLD/no-beta and single-term baselines, but no final-weight no-smooth metrics.",
         "- `slurm-11445550.out` is mixed; only the parameter-independent task-only and no-objective baselines were retained. The unrelated `task=1, bold=1, beta=0.75, smooth=1.8` sweep was excluded.",
         "- Balanced scores were computed within the final-weight analysis group using inverse ranges of candidate-mean score components.",
-        f"- The focused full-vs-task-only anatomy figure uses the selected-voxel overlay embedded in the full-model thresholded HTML map and `{DEFAULT_TASK_ONLY_MAP}` thresholded at z >= {DEFAULT_TASK_ONLY_Z_THRESHOLD:g}; brainstem contours are suppressed, filled blue overlays show full-model-only voxels, filled vermillion overlays show standard-GLM-only voxels, and filled yellow overlays with black contours show overlap with stronger line weight over motor ROIs.",
+        f"- The focused full-vs-task-only anatomy figure uses the selected-voxel overlay embedded in the full-model thresholded HTML map and `{DEFAULT_TASK_ONLY_MAP}` thresholded at z >= {DEFAULT_TASK_ONLY_Z_THRESHOLD:g}; brainstem contours are suppressed, filled blue overlays show full-model-only voxels, filled vermillion overlays show standard-GLM-only voxels, and filled green overlays with a white halo show overlap with stronger line weight over motor ROIs.",
         "",
         "## Balanced-Score Weights",
         "",
