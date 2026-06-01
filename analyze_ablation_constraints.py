@@ -1176,12 +1176,13 @@ def _add_mask_overlay(
     color: str,
     linewidth: float,
     fill_alpha: float,
+    edge_color: str | None = None,
 ) -> None:
     if np.any(mask):
         values = mask.astype(float)
         if fill_alpha > 0:
             ax.contourf(values, levels=[0.5, 1.5], colors=[color], alpha=fill_alpha, antialiased=True)
-        ax.contour(values, levels=[0.5], colors=color, linewidths=linewidth)
+        ax.contour(values, levels=[0.5], colors=edge_color or color, linewidths=linewidth)
 
 
 def plot_full_vs_task_only_anatomy(
@@ -1284,9 +1285,10 @@ def plot_full_vs_task_only_anatomy(
     summary.to_csv(f"{out_base}_summary.csv", index=False)
 
     colors = {
-        "full": "#004488",
-        "task": "#44AA99",
-        "shared": "#AA3377",
+        "full": "#0072B2",
+        "task": "#D55E00",
+        "shared": "#F0E442",
+        "shared_edge": "#1A1A1A",
     }
     full_bg = np.nan_to_num(full_bg, nan=0.0)
     vmax = float(np.percentile(full_bg[full_bg > 0], 99.5)) if np.any(full_bg > 0) else 1.0
@@ -1333,11 +1335,32 @@ def plot_full_vs_task_only_anatomy(
                 )
                 full_only_slice, task_only_unique_slice, motor_shared_display_slice, shared_slice, motor_shared_slice = mask_slices
                 ax.imshow(_anatomy_rgba(bg_slice, vmax), interpolation="nearest")
-                _add_mask_overlay(ax, full_only_slice, colors["full"], 0.75, 0.36)
-                _add_mask_overlay(ax, task_only_unique_slice, colors["task"], 0.75, 0.34)
-                _add_mask_overlay(ax, motor_shared_display_slice, colors["shared"], 1.05, 0.30)
-                _add_mask_overlay(ax, shared_slice, colors["shared"], 0.95, 0.52)
-                _add_mask_overlay(ax, motor_shared_slice, colors["shared"], 2.0, 0.0)
+                _add_mask_overlay(ax, full_only_slice, colors["full"], 0.95, 0.42)
+                _add_mask_overlay(ax, task_only_unique_slice, colors["task"], 0.95, 0.46)
+                _add_mask_overlay(
+                    ax,
+                    motor_shared_display_slice,
+                    colors["shared"],
+                    1.05,
+                    0.36,
+                    edge_color=colors["shared_edge"],
+                )
+                _add_mask_overlay(
+                    ax,
+                    shared_slice,
+                    colors["shared"],
+                    1.1,
+                    0.68,
+                    edge_color=colors["shared_edge"],
+                )
+                _add_mask_overlay(
+                    ax,
+                    motor_shared_slice,
+                    colors["shared"],
+                    2.2,
+                    0.0,
+                    edge_color=colors["shared_edge"],
+                )
                 coord = _coord_mm(html_affine, axis, index)
                 ax.text(
                     0.5,
@@ -1372,9 +1395,9 @@ def plot_full_vs_task_only_anatomy(
                 ax.set_axis_off()
 
         handles = [
-            Patch(facecolor=colors["full"], edgecolor=colors["full"], alpha=0.46, label="Vigour Network"),
-            Patch(facecolor=colors["task"], edgecolor=colors["task"], alpha=0.44, label="Task-activation map"),
-            Patch(facecolor=colors["shared"], edgecolor=colors["shared"], alpha=0.58, label="Overlap of networks"),
+            Patch(facecolor=colors["full"], edgecolor=colors["full"], alpha=0.42, label="Vigour Network"),
+            Patch(facecolor=colors["task"], edgecolor=colors["task"], alpha=0.46, label="Task-activation map"),
+            Patch(facecolor=colors["shared"], edgecolor=colors["shared_edge"], alpha=0.68, label="Overlap of networks"),
         ]
         fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False, bbox_to_anchor=(0.5, 0.01))
         fig.subplots_adjust(left=0.01, right=0.995, top=0.995, bottom=0.16, wspace=0.02, hspace=0.04)
@@ -1501,7 +1524,7 @@ def write_report(
         "- The final-weight SLURM log contains the `task=1, bold=0.6, beta=0.6, smooth=1.25, gamma=1.5` full model plus no-task/no-BOLD/no-beta and single-term baselines, but no final-weight no-smooth metrics.",
         "- `slurm-11445550.out` is mixed; only the parameter-independent task-only and no-objective baselines were retained. The unrelated `task=1, bold=1, beta=0.75, smooth=1.8` sweep was excluded.",
         "- Balanced scores were computed within the final-weight analysis group using inverse ranges of candidate-mean score components.",
-        f"- The focused full-vs-task-only anatomy figure uses the selected-voxel overlay embedded in the full-model thresholded HTML map and `{DEFAULT_TASK_ONLY_MAP}` thresholded at z >= {DEFAULT_TASK_ONLY_Z_THRESHOLD:g}; brainstem contours are suppressed, filled blue overlays show full-model-only voxels, filled green overlays show standard-GLM-only voxels, and filled magenta overlays show overlap with stronger line weight over motor ROIs.",
+        f"- The focused full-vs-task-only anatomy figure uses the selected-voxel overlay embedded in the full-model thresholded HTML map and `{DEFAULT_TASK_ONLY_MAP}` thresholded at z >= {DEFAULT_TASK_ONLY_Z_THRESHOLD:g}; brainstem contours are suppressed, filled blue overlays show full-model-only voxels, filled vermillion overlays show standard-GLM-only voxels, and filled yellow overlays with black contours show overlap with stronger line weight over motor ROIs.",
         "",
         "## Balanced-Score Weights",
         "",

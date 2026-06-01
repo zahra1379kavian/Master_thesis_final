@@ -18,7 +18,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib import colors, ticker
+from matplotlib import colors, patches, ticker
 import nibabel as nib
 import numpy as np
 import pandas as pd
@@ -951,10 +951,34 @@ def _write_motor_reward_roi_profile_plot(
 
                 y_limit = y_limits_by_row.get(base_name, 0.05)
                 ax.set_ylim(-y_limit, y_limit)
+                ax.set_xlim(-0.55, len(ROI_PROFILE_ACTIVE_LABELS) - 0.45)
                 ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.2f"))
                 for tick_label in ax.get_yticklabels():
                     tick_label.set_horizontalalignment("right")
                 star_off = 0.06 * y_limit
+
+                sig_box_width = 0.34
+                sig_box_height = 0.22 * y_limit
+                for med_idx, (_, subset) in enumerate(med_subsets):
+                    sig_mask = subset["sig_uncorrected"].fillna(False).astype(bool)
+                    for x_val, row in subset.loc[sig_mask].iterrows():
+                        if pd.isna(row["mean_delta"]):
+                            continue
+                        center_x = float(x_val) + float(offsets[med_idx])
+                        y_bottom = float(row["mean_delta"]) - sig_box_height / 2.0
+                        y_bottom = min(max(y_bottom, -0.96 * y_limit), 0.96 * y_limit - sig_box_height)
+                        ax.add_patch(
+                            patches.Rectangle(
+                                (center_x - sig_box_width / 2.0, y_bottom),
+                                sig_box_width,
+                                sig_box_height,
+                                fill=False,
+                                edgecolor="#000000",
+                                linewidth=0.75,
+                                linestyle=(0, (2.4, 1.8)),
+                                zorder=5,
+                            )
+                        )
 
                 for med_idx, (_, subset) in enumerate(med_subsets):
                     for x_val, row in subset.iterrows():
@@ -970,6 +994,7 @@ def _write_motor_reward_roi_profile_plot(
                             x_val + offsets[med_idx], y_star, lbl,
                             ha="center", va="bottom" if sign > 0 else "top",
                             fontsize=8.2, color="#c0392b", fontweight="bold",
+                            zorder=6,
                         )
 
                 for spine in ("top", "right"):
