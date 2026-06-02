@@ -49,55 +49,6 @@ def _roi_mean_timeseries_from_voxels(voxel_timeseries: dict[str, np.ndarray], ro
     return pd.DataFrame(columns)
 
 
-def _matched_nonvigour_candidate_mask(
-    weight_values: np.ndarray,
-    groups,
-    weighted_rois,
-    roi_threshold: float,
-) -> np.ndarray:
-    selected = np.isfinite(weight_values) & (weight_values != 0) & (weight_values >= roi_threshold)
-    group_lookup = {group.name: group for group in groups}
-    mask = np.zeros(weight_values.shape, dtype=bool)
-    for source_roi in weighted_rois:
-        if source_roi.name not in group_lookup:
-            raise RuntimeError(f"ROI {source_roi.name} was not found in the AAL grouping")
-        mask |= group_lookup[source_roi.name].mask & np.isfinite(weight_values) & ~selected
-    return mask
-
-
-def _add_finite_signal_voxels(finite_mask: np.ndarray, candidate_mask: np.ndarray, data, label: str) -> None:
-    if data.ndim != 4:
-        raise RuntimeError(f"{label} must be a 4D volume")
-    if tuple(data.shape[:3]) != tuple(finite_mask.shape):
-        raise RuntimeError(f"{label} shape {data.shape[:3]} differs from the weight-map grid {finite_mask.shape}")
-    active = candidate_mask & ~finite_mask
-    if not np.any(active):
-        return
-    finite_mask[active] = np.any(np.isfinite(data[active, :]), axis=1)
-
-
-def _finite_signal_candidate_mask(specs, reference_img, candidate_mask: np.ndarray) -> np.ndarray:
-    candidate_mask = np.asarray(candidate_mask, dtype=bool)
-    finite_mask = np.zeros(candidate_mask.shape, dtype=bool)
-    for spec in specs:
-        if spec.beta_paths:
-            for beta_path in spec.beta_paths:
-                data = np.load(beta_path, mmap_mode="r")
-                _add_finite_signal_voxels(finite_mask, candidate_mask, data, str(beta_path))
-            continue
-        if spec.bold_path is not None:
-            img = nib.load(str(spec.bold_path))
-            M._check_image_grid(reference_img, img, str(spec.bold_path))
-            data = img.get_fdata(dtype=np.float32)
-            _add_finite_signal_voxels(finite_mask, candidate_mask, data, str(spec.bold_path))
-            continue
-        raise RuntimeError(
-            f"{spec.label} has only ROI mean time series; matched non-vigour sampling "
-            "requires beta_path or bold_path input"
-        )
-    return finite_mask
-
-
 def _is_incomplete_roi_timeseries_error(exc: RuntimeError) -> bool:
     return str(exc) == "ROI time series has fewer than four complete time points"
 
@@ -138,7 +89,7 @@ def _single_randomization(
     seed: int,
     args: argparse.Namespace,
     reference_img,
-    sampling_weight_values: np.ndarray,
+    weight_values: np.ndarray,
     groups,
     weighted_rois,
     roi_threshold: float,
@@ -149,7 +100,7 @@ def _single_randomization(
     for attempt in range(int(args.max_sampling_attempts)):
         sample_state = int(seed) if attempt == 0 else int(rng.integers(0, np.iinfo(np.int32).max))
         rois = M._build_matched_nonvigour_rois(
-            weight_values=sampling_weight_values,
+            weight_values=weight_values,
             weighted_rois=weighted_rois,
             groups=groups,
             roi_threshold=roi_threshold,
@@ -184,6 +135,11 @@ def _single_randomization(
         except RuntimeError as exc:
             if _is_incomplete_roi_timeseries_error(exc):
                 last_error = exc
+                print(
+                    f"Seed {seed}: redraw {attempt + 1}/{int(args.max_sampling_attempts)} "
+                    "because sampled ROIs had fewer than four complete time points",
+                    flush=True,
+                )
                 continue
             raise
         break
@@ -344,11 +300,11 @@ def _write_summary_outputs(values_path: Path, out_dir: Path, actual: dict[str, f
         "# Matched Non-Vigour Null Distribution\n\n"
         "For each randomization seed, non-vigour voxels were sampled without replacement from the same "
         "lateralized AAL ROIs as the final vigour network. The number of sampled voxels was matched to "
-        "the final vigour-network voxel count separately within each ROI. Candidate non-vigour voxels "
-        "with no finite beta/BOLD values in any input run or session were excluded before sampling. "
-        "If a draw still yielded fewer than four complete ROI time points, that seed was redrawn up to "
-        "the configured attempt limit. The medication analyses were then rerun once for that sampled "
-        "network, and only the seed-level effect estimates were stored. "
+        "the final vigour-network voxel count separately within each ROI. Within each sampled ROI, "
+        "finite voxel values were averaged at each time point. If a draw yielded fewer than four "
+        "complete ROI time points, that seed was redrawn up to the configured attempt limit. The "
+        "medication analyses were then rerun once for that sampled network, and only the seed-level "
+        "effect estimates were stored. "
         "P-values are not averaged across seeds; inference is based on the empirical null distribution "
         "of effect sizes and the location of the actual vigour-network effect within that distribution.\n"
     )
@@ -436,15 +392,6 @@ def main() -> int:
         min_roi_voxels=min_roi_voxels,
     )
     specs = M._load_session_specs(args)
-    candidate_mask = _matched_nonvigour_candidate_mask(weight_values, groups, weighted_rois, roi_threshold)
-    finite_signal_mask = _finite_signal_candidate_mask(specs, reference_img, candidate_mask)
-    sampling_weight_values = weight_values.copy()
-    sampling_weight_values[~finite_signal_mask] = np.nan
-    print(
-        "Matched non-vigour candidate voxels with finite signal: "
-        f"{int(np.count_nonzero(finite_signal_mask))}/{int(np.count_nonzero(candidate_mask))}",
-        flush=True,
-    )
 
     rows = existing.to_dict("records") if not existing.empty else []
     seeds = range(int(args.start_seed), int(args.start_seed) + int(args.n_randomizations))
@@ -455,7 +402,7 @@ def main() -> int:
             seed=seed,
             args=args,
             reference_img=reference_img,
-            sampling_weight_values=sampling_weight_values,
+            weight_values=weight_values,
             groups=groups,
             weighted_rois=weighted_rois,
             roi_threshold=roi_threshold,
