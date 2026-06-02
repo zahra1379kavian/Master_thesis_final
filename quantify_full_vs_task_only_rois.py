@@ -556,9 +556,9 @@ def _roi_status(row: pd.Series) -> str:
     if int(row["vigour_network_voxels"]) > 0 and int(row["task_activation_voxels"]) > 0:
         return "Both maps in ROI, no shared voxels"
     if int(row["vigour_network_voxels"]) > 0:
-        return "Only vigour voxels in ROI"
+        return "Vigour network only in ROI"
     if int(row["task_activation_voxels"]) > 0:
-        return "Only task voxels in ROI"
+        return "Task activation network only in ROI"
     return "No selected voxels"
 
 
@@ -691,14 +691,14 @@ def _plot_clean_table_image(out_path: Path, clean_df: pd.DataFrame, totals: dict
         colLabels=[
             "ROI",
             "Shared voxel n (% ROI)",
-            "Vigour only n (% ROI)",
-            "Task only n (% ROI)",
+            "Vigour network n (% ROI)",
+            "Task activation network n (% ROI)",
             "Voxel-level relation",
         ],
         colLoc="center",
         cellLoc="center",
         loc="upper left",
-        colWidths=[0.16, 0.20, 0.18, 0.18, 0.28],
+        colWidths=[0.14, 0.19, 0.20, 0.23, 0.26],
     )
     table.auto_set_font_size(False)
     table.set_fontsize(7.9)
