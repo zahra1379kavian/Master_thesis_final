@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Whole-brain GVS contrast and searchlight analyses.
+"""Weighted p90-network GVS contrast analyses.
 
-This script avoids ROI partitioning. It builds subject-level GVS-minus-sham
-contrast maps from cleaned beta volumes, runs second-level permutation/TFCE
-tests, and computes a run-split searchlight pattern-similarity analysis.
+This script avoids ROI partitioning. It keeps only the p90 positive-weight
+network voxels, multiplies beta values by the voxel weights, builds
+subject-level GVS-minus-sham contrast maps from both runs within each session,
+and runs second-level permutation/TFCE tests.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import warnings
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -44,6 +46,8 @@ from GVS_effect import (
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_OUT_DIR = ROOT / "figures" / "GVS_effects" / "wholebrain_methods"
+DEFAULT_NETWORK_HTML = ROOT / "data" / "voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5_bold_thr90.html"
+DEFAULT_NETWORK_WEIGHT_PERCENTILE = 90.0
 ACTIVE_CONDITION_CODES = tuple(f"gvs-{index:02d}" for index in range(2, 10))
 SHAM_CONDITION_CODE = "gvs-01"
 CONTRAST_SPECS = {
@@ -53,17 +57,14 @@ CONTRAST_SPECS = {
     "gvs6_alpha": ("gvs-07",),
 }
 PRIMARY_GROUP_TESTS = (
-    ("wholebrain_active_mean_OFF", "wholebrain", "active_mean", "OFF"),
-    ("wholebrain_active_mean_ON", "wholebrain", "active_mean", "ON"),
-    ("wholebrain_active_mean_ON_minus_OFF", "wholebrain", "active_mean", "ON_minus_OFF"),
-    ("searchlight_active_mean_OFF", "searchlight", "active_mean", "OFF"),
-    ("searchlight_active_mean_ON", "searchlight", "active_mean", "ON"),
-    ("searchlight_active_mean_ON_minus_OFF", "searchlight", "active_mean", "ON_minus_OFF"),
+    ("weighted_network_active_mean_OFF", "weighted_network", "active_mean", "OFF"),
+    ("weighted_network_active_mean_ON", "weighted_network", "active_mean", "ON"),
+    ("weighted_network_active_mean_ON_minus_OFF", "weighted_network", "active_mean", "ON_minus_OFF"),
 )
 EXPLORATORY_GROUP_TESTS = (
-    ("wholebrain_gvs2_dc_plus_1_OFF", "wholebrain", "gvs2_dc_plus_1", "OFF"),
-    ("wholebrain_gvs5_theta_OFF", "wholebrain", "gvs5_theta", "OFF"),
-    ("wholebrain_gvs6_alpha_OFF", "wholebrain", "gvs6_alpha", "OFF"),
+    ("weighted_network_gvs2_dc_plus_1_OFF", "weighted_network", "gvs2_dc_plus_1", "OFF"),
+    ("weighted_network_gvs5_theta_OFF", "weighted_network", "gvs5_theta", "OFF"),
+    ("weighted_network_gvs6_alpha_OFF", "weighted_network", "gvs6_alpha", "OFF"),
 )
 FWE_ALPHA = 0.05
 UNCORRECTED_CLUSTER_P = 0.001
@@ -75,15 +76,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--beta-root", type=Path, default=DEFAULT_BETA_ROOT)
     parser.add_argument("--gvs-order", type=Path, default=DEFAULT_GVS_ORDER)
     parser.add_argument("--weight-map", type=Path, default=DEFAULT_WEIGHT_MAP)
+    parser.add_argument("--network-html", type=Path, default=DEFAULT_NETWORK_HTML)
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     parser.add_argument("--trials-per-condition", type=int, default=DEFAULT_TRIALS_PER_CONDITION)
+    parser.add_argument("--network-weight-percentile", type=float, default=DEFAULT_NETWORK_WEIGHT_PERCENTILE)
     parser.add_argument("--n-perm", type=int, default=2000)
     parser.add_argument("--n-jobs", type=int, default=4)
     parser.add_argument("--random-state", type=int, default=1301)
     parser.add_argument("--no-tfce", action="store_true")
-    parser.add_argument("--searchlight-radius-mm", type=float, default=6.0)
-    parser.add_argument("--searchlight-min-voxels", type=int, default=20)
-    parser.add_argument("--skip-searchlight", action="store_true")
+    parser.add_argument("--searchlight-radius-mm", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--searchlight-min-voxels", type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--skip-searchlight", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--include-exploratory", action="store_true")
     parser.add_argument("--reuse-existing", action="store_true")
     parser.add_argument("--subjects", nargs="+", default=None)
@@ -94,13 +97,14 @@ def _prepare_args(args: argparse.Namespace) -> argparse.Namespace:
     args.beta_root = _resolve_path(args.beta_root)
     args.gvs_order = _resolve_path(args.gvs_order)
     args.weight_map = _resolve_path(args.weight_map)
+    args.network_html = _resolve_path(args.network_html)
     args.out_dir = _resolve_path(args.out_dir)
     if int(args.trials_per_condition) <= 0:
         raise ValueError("--trials-per-condition must be positive.")
     if int(args.n_perm) <= 0:
         raise ValueError("--n-perm must be positive.")
-    if float(args.searchlight_radius_mm) <= 0:
-        raise ValueError("--searchlight-radius-mm must be positive.")
+    if not (0.0 <= float(args.network_weight_percentile) <= 100.0):
+        raise ValueError("--network-weight-percentile must be between 0 and 100.")
     return args
 
 
@@ -128,9 +132,33 @@ def _load_maps_from_manifest(path: Path) -> tuple[dict[tuple[str, int, str], np.
     return maps, manifest
 
 
+def _network_weight_mask(
+    weight_values: np.ndarray,
+    percentile: float,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    weights = np.asarray(weight_values, dtype=np.float32).ravel()
+    positive = np.isfinite(weights) & (weights > 0)
+    if not np.any(positive):
+        raise RuntimeError("Weighted-network analysis requires at least one positive finite weight.")
+
+    threshold = float(np.percentile(weights[positive], float(percentile)))
+    mask = positive & (weights >= threshold)
+    if not np.any(mask):
+        raise RuntimeError("Weighted-network analysis selected zero voxels.")
+
+    metadata = {
+        "network_weight_percentile": float(percentile),
+        "network_weight_threshold": threshold,
+        "n_positive_weight_voxels": int(np.sum(positive)),
+        "n_network_voxels": int(np.sum(mask)),
+    }
+    return mask, weights, metadata
+
+
 def _condition_means_for_run(
     beta_path: Path,
     stim_order: tuple[int, ...],
+    network_mask_flat: np.ndarray,
     *,
     trials_per_condition: int,
 ) -> dict[str, np.ndarray]:
@@ -138,14 +166,20 @@ def _condition_means_for_run(
     if beta.ndim != 4:
         raise RuntimeError(f"{beta_path} must be 4D, got shape {beta.shape}.")
     flat = beta.reshape(-1, int(beta.shape[-1]))
+    if flat.shape[0] != int(network_mask_flat.size):
+        raise RuntimeError(
+            f"{beta_path} has {flat.shape[0]} voxels but the weight-map mask has {network_mask_flat.size}."
+        )
     means: dict[str, np.ndarray] = {}
     for condition_code, start, stop in _iter_condition_slices(
         int(beta.shape[-1]),
         stim_order,
         int(trials_per_condition),
     ):
-        with np.errstate(invalid="ignore", divide="ignore"):
-            means[condition_code] = np.nanmean(flat[:, int(start) : int(stop)], axis=1).astype(np.float32)
+        selected = np.asarray(flat[network_mask_flat, int(start) : int(stop)], dtype=np.float32)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            means[condition_code] = np.nanmean(selected, axis=1).astype(np.float32)
     return means
 
 
@@ -166,12 +200,14 @@ def _mean_available(arrays: list[np.ndarray]) -> np.ndarray:
 
 def _build_subject_contrasts(
     run_specs: list[Any],
+    network_mask_flat: np.ndarray,
+    network_weight_flat: np.ndarray,
     *,
     trials_per_condition: int,
-) -> tuple[dict[tuple[str, int, str], np.ndarray], dict[tuple[str, int, int], np.ndarray], pd.DataFrame]:
+) -> tuple[dict[tuple[str, int, str], np.ndarray], pd.DataFrame]:
     run_contrast_parts: dict[tuple[str, int, str], list[np.ndarray]] = defaultdict(list)
-    run_active_delta: dict[tuple[str, int, int], np.ndarray] = {}
     rows: list[dict[str, Any]] = []
+    selected_weights = np.asarray(network_weight_flat[network_mask_flat], dtype=np.float32)
     for index, spec in enumerate(run_specs, start=1):
         print(
             f"Computing run contrasts {index}/{len(run_specs)}: "
@@ -181,6 +217,7 @@ def _build_subject_contrasts(
         means = _condition_means_for_run(
             spec.beta_path,
             spec.stim_order,
+            network_mask_flat,
             trials_per_condition=trials_per_condition,
         )
         sham = means.get(SHAM_CONDITION_CODE)
@@ -191,10 +228,10 @@ def _build_subject_contrasts(
             if not available:
                 continue
             active_mean = _mean_available(available)
-            delta = (active_mean - sham).astype(np.float32)
-            run_contrast_parts[(spec.subject, int(spec.session), contrast_name)].append(delta)
-            if contrast_name == "active_mean":
-                run_active_delta[(spec.subject, int(spec.session), int(spec.run))] = delta
+            weighted_delta = ((active_mean - sham) * selected_weights).astype(np.float32)
+            full_delta = np.full(network_mask_flat.shape, np.nan, dtype=np.float32)
+            full_delta[network_mask_flat] = weighted_delta
+            run_contrast_parts[(spec.subject, int(spec.session), contrast_name)].append(full_delta)
             rows.append(
                 {
                     "subject": spec.subject,
@@ -205,6 +242,8 @@ def _build_subject_contrasts(
                     "condition_codes": ",".join(condition_codes),
                     "condition_labels": ",".join(_condition_display_name(code) for code in condition_codes),
                     "n_condition_means": int(len(available)),
+                    "n_network_voxels": int(np.sum(network_mask_flat)),
+                    "beta_weighting": "voxel_beta_times_network_weight",
                     "source_beta_path": str(spec.beta_path),
                 }
             )
@@ -214,7 +253,7 @@ def _build_subject_contrasts(
         for key, parts in run_contrast_parts.items()
         if parts
     }
-    return subject_contrasts, run_active_delta, pd.DataFrame(rows)
+    return subject_contrasts, pd.DataFrame(rows)
 
 
 def _common_finite_mask(arrays: list[np.ndarray]) -> np.ndarray:
@@ -255,109 +294,6 @@ def _write_subject_contrast_images(
     df = pd.DataFrame(rows)
     df.to_csv(out_dir / "subject_contrast_manifest.csv", index=False)
     return df
-
-
-def _searchlight_kernel(radius_mm: float, affine: np.ndarray) -> np.ndarray:
-    voxel_sizes = np.sqrt(np.sum(np.asarray(affine[:3, :3], dtype=float) ** 2, axis=0))
-    radius_voxels = np.maximum(1, np.ceil(float(radius_mm) / voxel_sizes).astype(int))
-    grid = np.meshgrid(
-        *[np.arange(-radius, radius + 1) for radius in radius_voxels],
-        indexing="ij",
-    )
-    distance_mm = np.zeros_like(grid[0], dtype=float)
-    for axis, coords in enumerate(grid):
-        distance_mm += (coords * voxel_sizes[axis]) ** 2
-    kernel = distance_mm <= float(radius_mm) ** 2
-    return kernel.astype(np.float32)
-
-
-def _local_pattern_similarity(
-    first: np.ndarray,
-    second: np.ndarray,
-    mask_flat: np.ndarray,
-    shape: tuple[int, int, int],
-    kernel: np.ndarray,
-    min_voxels: int,
-) -> np.ndarray:
-    first_img = first.reshape(shape)
-    second_img = second.reshape(shape)
-    valid_img = (mask_flat & np.isfinite(first) & np.isfinite(second)).reshape(shape)
-    first_zero = np.where(valid_img, first_img, 0.0).astype(np.float32)
-    second_zero = np.where(valid_img, second_img, 0.0).astype(np.float32)
-    valid_float = valid_img.astype(np.float32)
-
-    numerator = ndimage.convolve(first_zero * second_zero, kernel, mode="constant", cval=0.0)
-    norm_first = ndimage.convolve(first_zero * first_zero, kernel, mode="constant", cval=0.0)
-    norm_second = ndimage.convolve(second_zero * second_zero, kernel, mode="constant", cval=0.0)
-    counts = ndimage.convolve(valid_float, kernel, mode="constant", cval=0.0)
-    denom = np.sqrt(norm_first * norm_second)
-    score = np.full(shape, np.nan, dtype=np.float32)
-    ok = (counts >= int(min_voxels)) & (denom > 0.0) & valid_img
-    score[ok] = numerator[ok] / denom[ok]
-    score = np.clip(score, -0.999999, 0.999999)
-    z_score = np.full(shape, np.nan, dtype=np.float32)
-    z_score[ok] = np.arctanh(score[ok]).astype(np.float32)
-    return z_score.ravel()
-
-
-def _compute_searchlight_maps(
-    run_active_delta: dict[tuple[str, int, int], np.ndarray],
-    subject_contrasts: dict[tuple[str, int, str], np.ndarray],
-    mask_flat: np.ndarray,
-    out_dir: Path,
-    shape: tuple[int, int, int],
-    affine: np.ndarray,
-    *,
-    radius_mm: float,
-    min_voxels: int,
-) -> tuple[dict[tuple[str, int, str], np.ndarray], pd.DataFrame]:
-    kernel = _searchlight_kernel(radius_mm, affine)
-    searchlight_maps: dict[tuple[str, int, str], np.ndarray] = {}
-    rows: list[dict[str, Any]] = []
-    session_keys = sorted(
-        {(subject, session) for subject, session, _run in run_active_delta},
-        key=lambda item: (_subject_sort_key(item[0]), item[1]),
-    )
-    for index, (subject, session) in enumerate(session_keys, start=1):
-        run_keys = sorted(
-            key for key in run_active_delta if key[0] == subject and key[1] == session
-        )
-        if len(run_keys) != 2:
-            continue
-        print(
-            f"Computing searchlight map {index}/{len(session_keys)}: {subject} ses-{session}",
-            flush=True,
-        )
-        first = run_active_delta[run_keys[0]]
-        second = run_active_delta[run_keys[1]]
-        z_map = _local_pattern_similarity(
-            first,
-            second,
-            mask_flat,
-            shape,
-            kernel,
-            min_voxels,
-        )
-        searchlight_maps[(subject, int(session), "active_mean")] = z_map
-        path = out_dir / "searchlight_run_split" / f"{subject}_ses-{session}_active_mean_pattern_similarity_z.nii.gz"
-        _save_flat_img(z_map, path, shape, affine)
-        rows.append(
-            {
-                "subject": subject,
-                "session": int(session),
-                "medication": _medication_from_session(int(session)),
-                "contrast": "active_mean",
-                "path": str(path),
-                "radius_mm": float(radius_mm),
-                "kernel_voxels": int(kernel.sum()),
-                "finite_voxels": int(np.isfinite(z_map).sum()),
-                "mean_z": float(np.nanmean(z_map)),
-                "std_z": float(np.nanstd(z_map)),
-            }
-        )
-    df = pd.DataFrame(rows)
-    df.to_csv(out_dir / "searchlight_manifest.csv", index=False)
-    return searchlight_maps, df
 
 
 def _arrays_for_group_test(
@@ -629,8 +565,20 @@ def main() -> int:
     weight_img = nib.load(str(args.weight_map))
     shape = tuple(int(value) for value in weight_img.shape[:3])
     affine = np.asarray(weight_img.affine)
+    weight_values = np.asarray(weight_img.get_fdata(dtype=np.float32))
+    network_mask_flat, network_weight_flat, network_metadata = _network_weight_mask(
+        weight_values,
+        float(args.network_weight_percentile),
+    )
+    network_mask_img = nib.Nifti1Image(network_mask_flat.reshape(shape).astype(np.uint8), affine)
+    nib.save(network_mask_img, str(out_dir / "weighted_network_mask_p90.nii.gz"))
+    _save_flat_img(
+        np.where(network_mask_flat, network_weight_flat, NAN_FILL).astype(np.float32),
+        out_dir / "weighted_network_weights_p90.nii.gz",
+        shape,
+        affine,
+    )
     run_specs: list[Any] = []
-    run_active_delta: dict[tuple[str, int, int], np.ndarray] = {}
     if bool(args.reuse_existing):
         subject_contrasts, subject_manifest = _load_maps_from_manifest(out_dir / "subject_contrast_manifest.csv")
         run_manifest = (
@@ -641,8 +589,10 @@ def main() -> int:
     else:
         gvs_order = _load_gvs_order(args.gvs_order)
         run_specs = _discover_run_specs(args.beta_root, gvs_order, args.subjects)
-        subject_contrasts, run_active_delta, run_manifest = _build_subject_contrasts(
+        subject_contrasts, run_manifest = _build_subject_contrasts(
             run_specs,
+            network_mask_flat,
+            network_weight_flat,
             trials_per_condition=int(args.trials_per_condition),
         )
         run_manifest.to_csv(out_dir / "run_contrast_manifest.csv", index=False)
@@ -653,25 +603,10 @@ def main() -> int:
         for (subject, session, contrast), array in subject_contrasts.items()
         if contrast == "active_mean"
     ]
-    mask_flat = _common_finite_mask(primary_arrays)
+    mask_flat = network_mask_flat.copy()
+    mask_flat &= _common_finite_mask(primary_arrays)
     mask_img = nib.Nifti1Image(mask_flat.reshape(shape).astype(np.uint8), affine)
-    nib.save(mask_img, str(out_dir / "wholebrain_common_mask.nii.gz"))
-
-    searchlight_maps: dict[tuple[str, int, str], np.ndarray] = {}
-    searchlight_manifest = pd.DataFrame()
-    if not args.skip_searchlight and bool(args.reuse_existing):
-        searchlight_maps, searchlight_manifest = _load_maps_from_manifest(out_dir / "searchlight_manifest.csv")
-    elif not args.skip_searchlight:
-        searchlight_maps, searchlight_manifest = _compute_searchlight_maps(
-            run_active_delta,
-            subject_contrasts,
-            mask_flat,
-            out_dir,
-            shape,
-            affine,
-            radius_mm=float(args.searchlight_radius_mm),
-            min_voxels=int(args.searchlight_min_voxels),
-        )
+    nib.save(mask_img, str(out_dir / "weighted_network_common_mask.nii.gz"))
 
     tests = list(PRIMARY_GROUP_TESTS)
     if bool(args.include_exploratory):
@@ -679,9 +614,7 @@ def main() -> int:
     group_rows: list[dict[str, Any]] = []
     cluster_rows: list[dict[str, Any]] = []
     for offset, (test_name, map_kind, contrast, group) in enumerate(tests):
-        if map_kind == "searchlight" and args.skip_searchlight:
-            continue
-        maps = subject_contrasts if map_kind == "wholebrain" else searchlight_maps
+        maps = subject_contrasts
         subjects, arrays = _arrays_for_group_test(maps, contrast, group)
         if len(arrays) < 3:
             continue
@@ -712,31 +645,31 @@ def main() -> int:
 
     manifest = {
         "method": {
-            "wholebrain": (
-                "Run-level voxelwise condition means were computed from cleaned beta volumes. "
-                "For each run, each GVS condition mean was subtracted from same-run sham. "
-                "Run contrasts were averaged within subject/session, then tested with "
-                "one-sample two-sided permutation/TFCE inference."
-            ),
-            "searchlight": (
-                "For active_mean only, run 1 and run 2 GVS-minus-sham contrast patterns were "
-                "compared locally with a spherical searchlight. The saved score is Fisher-z "
-                "local pattern correlation, tested at group level with the same TFCE procedure."
+            "weighted_network": (
+                "Only positive p90 voxel-weight network voxels were analyzed. Run-level "
+                "condition means were computed from cleaned beta volumes inside this network. "
+                "For each run, active GVS-minus-same-run-sham contrasts were multiplied by "
+                "the voxel weights, then both runs were averaged within subject/session. "
+                "Subject/session weighted-network maps were tested with one-sample two-sided "
+                "permutation/TFCE inference."
             ),
         },
         "inputs": {
             "beta_root": str(args.beta_root),
             "gvs_order": str(args.gvs_order),
             "weight_map": str(args.weight_map),
+            "network_html_reference": str(args.network_html),
         },
         "parameters": {
             "trials_per_condition": int(args.trials_per_condition),
+            "network_weight_percentile": float(args.network_weight_percentile),
+            "network_weight_threshold": float(network_metadata["network_weight_threshold"]),
+            "n_positive_weight_voxels": int(network_metadata["n_positive_weight_voxels"]),
+            "n_network_voxels": int(network_metadata["n_network_voxels"]),
             "n_perm": int(args.n_perm),
             "n_jobs": int(args.n_jobs),
             "random_state": int(args.random_state),
             "tfce": not bool(args.no_tfce),
-            "searchlight_radius_mm": float(args.searchlight_radius_mm),
-            "searchlight_min_voxels": int(args.searchlight_min_voxels),
             "fwe_alpha": FWE_ALPHA,
             "uncorrected_cluster_p": UNCORRECTED_CLUSTER_P,
             "include_exploratory": bool(args.include_exploratory),
@@ -744,13 +677,14 @@ def main() -> int:
         "n_runs": int(len(run_specs)),
         "reuse_existing": bool(args.reuse_existing),
         "n_subject_session_contrasts": int(subject_manifest.shape[0]),
-        "n_searchlight_maps": int(searchlight_manifest.shape[0]) if not searchlight_manifest.empty else 0,
         "mask_voxels": int(mask_flat.sum()),
         "outputs": {
             "out_dir": str(out_dir),
             "run_contrast_manifest": str(out_dir / "run_contrast_manifest.csv"),
             "subject_contrast_manifest": str(out_dir / "subject_contrast_manifest.csv"),
-            "searchlight_manifest": str(out_dir / "searchlight_manifest.csv"),
+            "weighted_network_mask": str(out_dir / "weighted_network_mask_p90.nii.gz"),
+            "weighted_network_weights": str(out_dir / "weighted_network_weights_p90.nii.gz"),
+            "weighted_network_common_mask": str(out_dir / "weighted_network_common_mask.nii.gz"),
             "group_results_summary": str(out_dir / "group_results_summary.csv"),
             "uncorrected_cluster_summary": str(out_dir / "uncorrected_p001_cluster_summary_top20.csv"),
         },
