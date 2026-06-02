@@ -675,8 +675,8 @@ def _plot_clean_table_image(out_path: Path, clean_df: pd.DataFrame, totals: dict
         table_rows.append(
             [
                 row.roi_name,
-                _format_count_pct(row.vigour_only_voxels, row.vigour_only_pct_of_roi),
                 _format_count_pct(row.same_voxel_overlap_voxels, row.same_voxel_overlap_pct_of_roi),
+                _format_count_pct(row.vigour_only_voxels, row.vigour_only_pct_of_roi),
                 _format_count_pct(row.task_only_voxels, row.task_only_pct_of_roi),
                 row.roi_status,
             ]
@@ -690,15 +690,15 @@ def _plot_clean_table_image(out_path: Path, clean_df: pd.DataFrame, totals: dict
         cellText=table_rows,
         colLabels=[
             "ROI",
-            "Vigour only n (% ROI)",
             "Shared voxel n (% ROI)",
+            "Vigour only n (% ROI)",
             "Task only n (% ROI)",
             "Voxel-level relation",
         ],
         colLoc="center",
         cellLoc="center",
         loc="upper left",
-        colWidths=[0.16, 0.18, 0.20, 0.18, 0.28],
+        colWidths=[0.16, 0.20, 0.18, 0.18, 0.28],
     )
     table.auto_set_font_size(False)
     table.set_fontsize(7.9)
@@ -714,9 +714,9 @@ def _plot_clean_table_image(out_path: Path, clean_df: pd.DataFrame, totals: dict
         else:
             cell.set_facecolor("#FFFFFF" if row_idx % 2 else "#FAFAFA")
         if row_idx > 0 and col_idx == 1:
-            cell.get_text().set_color(COMPARISON_COLORS["vigour_only"])
-        if row_idx > 0 and col_idx == 2:
             cell.get_text().set_color(COMPARISON_COLORS["both"])
+        if row_idx > 0 and col_idx == 2:
+            cell.get_text().set_color(COMPARISON_COLORS["vigour_only"])
         if row_idx > 0 and col_idx == 3:
             cell.get_text().set_color(COMPARISON_COLORS["task_only"])
 
