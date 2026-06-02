@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import warnings
 from pathlib import Path
 
 import matplotlib
 
+warnings.filterwarnings("ignore", message="Unable to import Axes3D.*")
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import nibabel as nib
@@ -173,7 +175,7 @@ def _empirical_summary(null_values: np.ndarray, actual_value: float) -> dict[str
         "n": int(null_values.size),
         "actual": float(actual_value),
         "null_mean": float(np.mean(null_values)),
-        "null_sd": float(np.std(null_values, ddof=1)) if null_values.size > 1 else float("nan"),
+        "null_sd": float(np.std(null_values, ddof=1)) if null_values.size > 1 else None,
         "null_median": float(np.median(null_values)),
         "null_ci95_low": float(np.percentile(null_values, 2.5)),
         "null_ci95_high": float(np.percentile(null_values, 97.5)),
@@ -185,6 +187,21 @@ def _empirical_summary(null_values: np.ndarray, actual_value: float) -> dict[str
         "empirical_p_less": float((count_le + 1) / (null_values.size + 1)),
         "actual_percentile": float(100.0 * np.mean(null_values <= actual_value)),
     }
+
+
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating, float)):
+        numeric = float(value)
+        return numeric if np.isfinite(numeric) else None
+    return value
 
 
 def _plot_histogram(
@@ -240,19 +257,17 @@ def _write_summary_outputs(values_path: Path, out_dir: Path, actual: dict[str, f
             actual["spectral_primary_effect"],
         ),
     }
+    summary_payload = {
+        "method": "Repeated matched non-vigour same-ROI voxel randomization; one full medication analysis per seed.",
+        "n_requested_randomizations": int(args.n_randomizations),
+        "start_seed": int(args.start_seed),
+        "main_dir": str(args.main_dir),
+        "values_csv": str(values_path),
+        "actual_values": actual,
+        "summaries": summaries,
+    }
     (out_dir / "matched_nonvigour_null_distribution_summary.json").write_text(
-        json.dumps(
-            {
-                "method": "Repeated matched non-vigour same-ROI voxel randomization; one full medication analysis per seed.",
-                "n_requested_randomizations": int(args.n_randomizations),
-                "start_seed": int(args.start_seed),
-                "main_dir": str(args.main_dir),
-                "values_csv": str(values_path),
-                "actual_values": actual,
-                "summaries": summaries,
-            },
-            indent=2,
-        ),
+        json.dumps(_json_safe(summary_payload), indent=2, allow_nan=False),
         encoding="utf-8",
     )
     method = (
