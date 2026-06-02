@@ -19,7 +19,6 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.patheffects as path_effects
 
 from analyze_ablation_constraints import (
     DEFAULT_ATLAS_CACHE_DIR,
@@ -614,33 +613,6 @@ def _format_count_pct(count: int | float, pct: int | float) -> str:
     return f"{_format_count(count)} ({_format_pct_roi(pct)})"
 
 
-def _add_bar_pct_labels(
-    ax: plt.Axes,
-    y: np.ndarray,
-    left: np.ndarray,
-    width: np.ndarray,
-    y_offset: float,
-) -> None:
-    for idx, segment_width in enumerate(width):
-        if not np.isfinite(segment_width) or segment_width <= 0.0:
-            continue
-        x = float(left[idx] + segment_width / 2.0)
-        if left[idx] == 0.0:
-            x = max(x, min(1.2, segment_width))
-        text = ax.text(
-            x,
-            float(y[idx] + y_offset),
-            f"{segment_width:.2f}%",
-            ha="center",
-            va="center",
-            fontsize=8.8,
-            fontweight="semibold",
-            color="white",
-            clip_on=False,
-        )
-        text.set_path_effects([path_effects.withStroke(linewidth=1.8, foreground="#1A1A1A")])
-
-
 def _plot_summary_image(out_path: Path, clean_df: pd.DataFrame, totals: dict[str, int], atlas_mode: str) -> None:
     plot_df = clean_df[clean_df["union_voxels"].gt(0)].sort_values(
         ["vigour_only_pct_of_roi", "roi_name"],
@@ -676,10 +648,6 @@ def _plot_summary_image(out_path: Path, clean_df: pd.DataFrame, totals: dict[str
         loc="lower right",
         frameon=False,
     )
-    zeros = np.zeros_like(vigour_only)
-    _add_bar_pct_labels(ax, y, zeros, vigour_only, 0.22)
-    _add_bar_pct_labels(ax, y, vigour_only, both, 0.0)
-    _add_bar_pct_labels(ax, y, vigour_only + both, task_only, -0.22)
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=260, bbox_inches="tight")
@@ -715,14 +683,9 @@ def _plot_clean_table_image(out_path: Path, clean_df: pd.DataFrame, totals: dict
         )
 
     row_height = 0.26
-    fig_height = max(6.8, row_height * (len(table_rows) + 3.5))
+    fig_height = max(6.3, row_height * (len(table_rows) + 2.0))
     fig, ax = plt.subplots(figsize=(11.2, fig_height), facecolor="white")
     ax.axis("off")
-    title = "Clean ROI Table: Voxel Count and Percent of Each ROI"
-    subtitle = (
-        "White matter excluded. Numeric cells show voxel count (% of ROI); denominator is total voxels in that ROI."
-    )
-    ax.set_title(f"{title}\n{subtitle}", fontsize=13, loc="left", pad=16)
     table = ax.table(
         cellText=table_rows,
         colLabels=[
@@ -732,10 +695,10 @@ def _plot_clean_table_image(out_path: Path, clean_df: pd.DataFrame, totals: dict
             "Task only n (% ROI)",
             "Voxel-level relation",
         ],
-        colLoc="right",
-        cellLoc="right",
+        colLoc="center",
+        cellLoc="center",
         loc="upper left",
-        colWidths=[0.20, 0.17, 0.19, 0.17, 0.27],
+        colWidths=[0.16, 0.18, 0.20, 0.18, 0.28],
     )
     table.auto_set_font_size(False)
     table.set_fontsize(7.9)
@@ -744,13 +707,12 @@ def _plot_clean_table_image(out_path: Path, clean_df: pd.DataFrame, totals: dict
     for (row_idx, col_idx), cell in table.get_celld().items():
         cell.set_edgecolor("#D8D8D8")
         cell.set_linewidth(0.5)
+        cell.set_text_props(ha="center", va="center")
         if row_idx == 0:
             cell.set_facecolor("#F0F0F0")
-            cell.set_text_props(weight="bold", color="#222222")
+            cell.set_text_props(weight="bold", color="#222222", ha="center", va="center")
         else:
             cell.set_facecolor("#FFFFFF" if row_idx % 2 else "#FAFAFA")
-        if col_idx == 0:
-            cell.set_text_props(ha="left")
         if row_idx > 0 and col_idx == 1:
             cell.get_text().set_color(COMPARISON_COLORS["vigour_only"])
         if row_idx > 0 and col_idx == 2:
