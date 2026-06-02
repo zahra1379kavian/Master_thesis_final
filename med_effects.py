@@ -36,6 +36,14 @@ CONNECTIVITY_METRIC = 'mutual_information_ksg'
 CONNECTIVITY_METRICS = ('mutual_information_ksg', 'spearman_correlation')
 COMPARISON_METRIC = 'laplacian_spectral_distance_signed'
 INTRA_BETWEEN_FC_METRIC = 'pearson_fisher_z'
+VOXEL_SELECTION_WEIGHTED_VIGOUR = 'weighted-vigour'
+VOXEL_SELECTION_UNWEIGHTED_VIGOUR = 'unweighted-vigour'
+VOXEL_SELECTION_MATCHED_NONVIGOUR = 'matched-nonvigour'
+VOXEL_SELECTION_MODES = (
+    VOXEL_SELECTION_WEIGHTED_VIGOUR,
+    VOXEL_SELECTION_UNWEIGHTED_VIGOUR,
+    VOXEL_SELECTION_MATCHED_NONVIGOUR,
+)
 BETA_FILE_RE = re.compile('cleaned_beta_volume_(?P<subject>sub-pd\\d+)_ses-(?P<session>\\d+)_run-(?P<run>\\d+)\\.npy$')
 DEFAULT_SESSION_STATES = {'1': 'off', '2': 'on'}
 PAPER_FONT_FAMILY = 'Liberation Sans'
@@ -299,6 +307,40 @@ def _build_weighted_rois(weight_values, roi_names, groups, roi_percentile, min_r
     if len(rois) < 2:
         raise RuntimeError('At least two weighted ROI masks are required for edge-network analysis')
     return (rois, threshold)
+
+def _unit_weight_rois(rois):
+    return [WeightedROI(name=roi.name, mask=roi.mask, weights=np.ones(roi.n_voxels, dtype=np.float64), n_voxels=roi.n_voxels) for roi in rois]
+
+def _build_matched_nonvigour_rois(weight_values, weighted_rois, groups, roi_threshold, random_state):
+    selected = np.isfinite(weight_values) & (weight_values != 0) & (weight_values >= roi_threshold)
+    group_lookup = {group.name: group for group in groups}
+    rng = np.random.default_rng(random_state)
+    rois = []
+    for source_roi in weighted_rois:
+        if source_roi.name not in group_lookup:
+            raise RuntimeError(f'ROI {source_roi.name} was not found in the AAL grouping')
+        candidates = group_lookup[source_roi.name].mask & np.isfinite(weight_values) & ~selected
+        candidate_ijk = np.column_stack(np.nonzero(candidates))
+        if candidate_ijk.shape[0] < source_roi.n_voxels:
+            raise RuntimeError(f'ROI {source_roi.name} has only {candidate_ijk.shape[0]} non-vigour voxels available for {source_roi.n_voxels} matched vigour voxels')
+        sample_indices = rng.choice(candidate_ijk.shape[0], size=source_roi.n_voxels, replace=False)
+        sample_ijk = candidate_ijk[sample_indices]
+        mask = np.zeros(weight_values.shape, dtype=bool)
+        mask[tuple(sample_ijk.T)] = True
+        rois.append(WeightedROI(name=source_roi.name, mask=mask, weights=np.ones(source_roi.n_voxels, dtype=np.float64), n_voxels=source_roi.n_voxels))
+    if len(rois) < 2:
+        raise RuntimeError('At least two matched non-vigour ROI masks are required for edge-network analysis')
+    return rois
+
+def _build_analysis_rois(weight_values, roi_names, groups, roi_percentile, min_report_voxels, min_roi_voxels, voxel_selection, random_state):
+    (weighted_rois, roi_threshold) = _build_weighted_rois(weight_values=weight_values, roi_names=roi_names, groups=groups, roi_percentile=roi_percentile, min_report_voxels=min_report_voxels, min_roi_voxels=min_roi_voxels)
+    if voxel_selection == VOXEL_SELECTION_WEIGHTED_VIGOUR:
+        return (weighted_rois, roi_threshold, weighted_rois)
+    if voxel_selection == VOXEL_SELECTION_UNWEIGHTED_VIGOUR:
+        return (_unit_weight_rois(weighted_rois), roi_threshold, weighted_rois)
+    if voxel_selection == VOXEL_SELECTION_MATCHED_NONVIGOUR:
+        return (_build_matched_nonvigour_rois(weight_values, weighted_rois, groups, roi_threshold, random_state), roi_threshold, weighted_rois)
+    raise RuntimeError(f'Unknown voxel-selection mode: {voxel_selection}')
 
 def _check_image_grid(reference, img, label):
     if img.shape[:3] != reference.shape[:3]:
@@ -827,27 +869,35 @@ def _pairwise_group_tests(subset, class_order, groups):
         test['stars'] = _pvalue_stars(p_adjusted)
     return tests
 
-def _add_significance_stars(ax, groups, tests, y_max, y_span):
-    significant = [test for test in tests if test['stars']]
-    significant = sorted(significant, key=lambda test: (test['right'] - test['left'], test['left']))
-    if not significant:
+def _test_display_p_value(test):
+    p_value = float(test.get('p_value_holm', np.nan))
+    if not np.isfinite(p_value):
+        p_value = float(test.get('p_value', np.nan))
+    return p_value
+
+def _add_significance_stars(ax, groups, tests, y_max, y_span, include_non_significant=False):
+    selected = []
+    for test in tests:
+        if test.get('stars') or (include_non_significant and np.isfinite(_test_display_p_value(test))):
+            selected.append(test)
+    selected = sorted(selected, key=lambda test: (test['right'] - test['left'], test['left']))
+    if not selected:
         return
     positions = [pos for (_, pos, _) in groups]
     bracket_height = 0.025 * y_span
     baseline = y_max + 0.08 * y_span
     step = 0.075 * y_span
-    for (level, test) in enumerate(significant):
+    for (level, test) in enumerate(selected):
         x_left = positions[test['left']]
         x_right = positions[test['right']]
         y = baseline + level * step
         ax.plot([x_left, x_left, x_right, x_right], [y, y + bracket_height, y + bracket_height, y], color='#222222', linewidth=1.0, clip_on=False)
-        p_value = float(test.get('p_value_holm', np.nan))
-        if not np.isfinite(p_value):
-            p_value = float(test.get('p_value', np.nan))
+        p_value = _test_display_p_value(test)
         if np.isfinite(p_value):
-            label = f"{test['stars']} p = {p_value:.4f}"
+            stars = str(test.get('stars', ''))
+            label = f"{stars + ' ' if stars else ''}p = {p_value:.4f}"
         else:
-            label = test['stars']
+            label = test.get('stars', '')
         ax.text((x_left + x_right) / 2.0, y + bracket_height + 0.008 * y_span, label, ha='center', va='bottom', color='#222222', fontsize=CELL_VALUE_FONT_SIZE, clip_on=False)
 
 def _add_star_legend(ax, tests):
@@ -944,10 +994,10 @@ def _plot_cross_subject_distribution(pairwise, out_dir, paired_stats=None):
     y_min = float(np.min(y_values))
     y_max = float(np.max(y_values))
     y_span = max(y_max - y_min, 1e-06)
-    significant_count = sum(1 for test in group_tests if test['stars'])
-    upper_padding = 0.14 if significant_count == 0 else 0.12 + 0.06 * significant_count
+    annotation_count = sum(1 for test in group_tests if test.get('stars') or np.isfinite(_test_display_p_value(test)))
+    upper_padding = 0.14 if annotation_count == 0 else 0.12 + 0.06 * annotation_count
     ax.set_ylim(y_min - 0.05 * y_span, y_max + upper_padding * y_span)
-    _add_significance_stars(ax, groups, group_tests, y_max, y_span)
+    _add_significance_stars(ax, groups, group_tests, y_max, y_span, include_non_significant=True)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     _apply_paper_typography(fig, [ax])
@@ -1666,27 +1716,36 @@ def _plot_intra_between_fc(subject_deltas, results, out_dir):
     plt.close(fig)
     return png_path
 
-def _write_intra_between_method(path):
+def _intra_between_voxel_description(voxel_selection):
+    if voxel_selection == VOXEL_SELECTION_UNWEIGHTED_VIGOUR:
+        return ('the vigour-network voxels in each ROI with unit voxel weights', 'unweighted')
+    if voxel_selection == VOXEL_SELECTION_MATCHED_NONVIGOUR:
+        return ('a reproducible sample of non-vigour voxels in the same ROIs, matched to the vigour-network voxel count within each ROI', 'unweighted')
+    return ('the selected weighted voxels in each ROI', 'weighted by the product of the two optimization weights')
+
+def _write_intra_between_method(path, voxel_selection=VOXEL_SELECTION_WEIGHTED_VIGOUR):
+    (voxel_description, pair_weight_description) = _intra_between_voxel_description(voxel_selection)
+    roi_mean_description = 'weighted mean ROI beta-series' if voxel_selection == VOXEL_SELECTION_WEIGHTED_VIGOUR else 'unweighted mean ROI beta-series'
     text = (
         '# Intra-ROI vs Between-ROI FC Method\n\n'
-        'For each subject/session, beta-series were extracted from the selected weighted voxels in each ROI. '
+        f'For each subject/session, beta-series were extracted from {voxel_description}. '
         'Intra-ROI FC was defined as the mean Pearson correlation between voxel beta-series within the same ROI. '
         'Time points with missing values in any selected voxel of that ROI were excluded before voxel correlations '
         'were computed. If fewer than four complete common time points remained for an ROI, voxel correlations were '
         'computed with pairwise-complete observations instead. Voxel-pair correlations were Fisher z transformed '
-        'before averaging, and voxel-pair averages within an ROI were weighted by the product of the two optimization '
-        'weights. To avoid bias from unequal ROI sizes, voxel pairs were not pooled across ROIs: each ROI contributed '
+        f'before averaging, and voxel-pair averages within an ROI were {pair_weight_description}. '
+        'To avoid bias from unequal ROI sizes, voxel pairs were not pooled across ROIs: each ROI contributed '
         'one intra-ROI FC value, and the session-level intra-ROI FC was the unweighted mean of these ROI-level '
         'Fisher-z values.\n\n'
-        'Between-ROI FC was computed in the same Fisher-z Pearson-correlation scale using the weighted mean ROI '
-        'beta-series. Correlations were averaged across the upper triangle of the ROI-by-ROI correlation matrix. '
+        f'Between-ROI FC was computed in the same Fisher-z Pearson-correlation scale using the {roi_mean_description}. '
+        'Correlations were averaged across the upper triangle of the ROI-by-ROI correlation matrix. '
         'Medication effects were evaluated within complete subjects as ON minus OFF separately for intra-ROI and '
         'between-ROI FC. The primary comparison was the paired subject-level contrast '
         '(ON - OFF intra-ROI FC) - (ON - OFF between-ROI FC).\n'
     )
     path.write_text(text, encoding='utf-8')
 
-def _save_intra_between_fc_analysis(session_rows, roi_rows, out_dir):
+def _save_intra_between_fc_analysis(session_rows, roi_rows, out_dir, voxel_selection=VOXEL_SELECTION_WEIGHTED_VIGOUR):
     roi_values = pd.DataFrame(roi_rows)
     session_values = pd.DataFrame(session_rows).sort_values(['subject', 'session']).reset_index(drop=True)
     subject_deltas = _complete_intra_between_subject_deltas(session_values)
@@ -1695,6 +1754,7 @@ def _save_intra_between_fc_analysis(session_rows, roi_rows, out_dir):
     (results_table, results) = _intra_between_fc_test_rows(subject_deltas)
     result_summary = {
         'connectivity_metric': INTRA_BETWEEN_FC_METRIC,
+        'voxel_selection': voxel_selection,
         'method': 'intra-ROI voxel-pair FC and between-ROI FC are both summarized as Fisher-z Pearson correlations; intra-ROI session means average ROI-level values equally so ROIs with more voxels do not dominate.',
         'n_sessions': int(session_values.shape[0]),
         'n_complete_subjects': int(subject_deltas.shape[0]),
@@ -1711,7 +1771,7 @@ def _save_intra_between_fc_analysis(session_rows, roi_rows, out_dir):
     subject_deltas.to_csv(delta_path, index=False)
     results_table.to_csv(results_path, index=False)
     json_path.write_text(json.dumps(result_summary, indent=2), encoding='utf-8')
-    _write_intra_between_method(method_path)
+    _write_intra_between_method(method_path, voxel_selection=voxel_selection)
     figure_path = _plot_intra_between_fc(subject_deltas, results, out_dir)
     return {
         'summary': result_summary,
@@ -1742,6 +1802,7 @@ def build_parser():
     parser.add_argument('--subjects', nargs='+', default=None)
     parser.add_argument('--complete-subjects-only', action='store_true')
     parser.add_argument('--out-dir', type=Path, default=DEFAULT_OUT_DIR)
+    parser.add_argument('--voxel-selection', choices=VOXEL_SELECTION_MODES, default=VOXEL_SELECTION_WEIGHTED_VIGOUR)
     parser.add_argument('--split-hemispheres', action='store_true')
     parser.add_argument('--exclude-rois', nargs='*', default=())
     parser.add_argument('--min-lateralized-voxels', type=int, default=1)
@@ -1759,7 +1820,7 @@ def _print_dry_run(args):
     weight_img = nib.load(str(args.weight_map))
     weight_values = np.asarray(weight_img.get_fdata(), dtype=np.float64)
     (groups, _, roi_names, min_roi_voxels) = _analysis_roi_setup(args, weight_img)
-    (rois, roi_threshold) = _build_weighted_rois(weight_values=weight_values, roi_names=roi_names, groups=groups, roi_percentile=args.roi_percentile, min_report_voxels=args.min_report_voxels, min_roi_voxels=min_roi_voxels)
+    (rois, roi_threshold, weighted_rois) = _build_analysis_rois(weight_values=weight_values, roi_names=roi_names, groups=groups, roi_percentile=args.roi_percentile, min_report_voxels=args.min_report_voxels, min_roi_voxels=min_roi_voxels, voxel_selection=args.voxel_selection, random_state=args.random_state)
     specs = _load_session_specs(args)
     session_df = _session_summary(specs)
     beta_shape_counts = _beta_shape_counts(specs)
@@ -1770,20 +1831,26 @@ def _print_dry_run(args):
     print(f'2. Rebuild p{args.roi_percentile:g} weighted AAL ROI masks from: {args.roi_region_table}')
     if args.split_hemispheres:
         print('   Split selected AAL groups into left/right hemisphere ROI masks.')
-    print(f'3. Extract weighted mean beta trial series per ROI from {len(specs)} subject/session inputs.')
-    print('4. Concatenate runs within each subject/session.')
-    print(f'5. Compute {CONNECTIVITY_METRIC} ROI-edge matrices for each subject/session.')
-    print(f'6. Compute {COMPARISON_METRIC} for all session pairs.')
-    print('7. Compute paired OFF/ON subject-level, bootstrap, label-swap, and Mantel-style similarity tests.')
-    print('8. Plot cross-subject-only OFF-OFF and ON-ON distance distributions.')
-    print(f'9. Compute paired {_connectivity_metric_label()} node-strength summaries and plot the top {args.node_strength_top_n} ROI panels.')
-    print(f'10. Compute within-hemisphere vs between-hemisphere {_connectivity_metric_label()} edge-change summaries.')
-    print('11. Compute intra-ROI voxel FC vs between-ROI FC medication-change summaries.')
+    print(f'3. Apply voxel-selection mode: {args.voxel_selection}')
+    print(f'4. Extract ROI mean beta trial series from {len(specs)} subject/session inputs.')
+    print('5. Concatenate runs within each subject/session.')
+    print(f'6. Compute {CONNECTIVITY_METRIC} ROI-edge matrices for each subject/session.')
+    print(f'7. Compute {COMPARISON_METRIC} for all session pairs.')
+    print('8. Compute paired OFF/ON subject-level, bootstrap, label-swap, and Mantel-style similarity tests.')
+    print('9. Plot cross-subject-only OFF-OFF and ON-ON distance distributions.')
+    print(f'10. Compute paired {_connectivity_metric_label()} node-strength summaries and plot the top {args.node_strength_top_n} ROI panels.')
+    print(f'11. Compute within-hemisphere vs between-hemisphere {_connectivity_metric_label()} edge-change summaries.')
+    print('12. Compute intra-ROI voxel FC vs between-ROI FC medication-change summaries.')
     print()
     print(f'ROI count: {len(rois)}')
     print(f'Weight threshold: {roi_threshold:.8g}')
+    print(f'Voxel-selection mode: {args.voxel_selection}')
     print(f'Minimum selected voxels per ROI: {min_roi_voxels}')
-    print('Top ROI masks: ' + ', '.join((f'{roi.name} ({roi.n_voxels})' for roi in rois[:8])))
+    if args.voxel_selection == VOXEL_SELECTION_MATCHED_NONVIGOUR:
+        print('Matched non-vigour sample uses the weighted vigour counts per ROI and unit voxel weights.')
+    elif args.voxel_selection == VOXEL_SELECTION_UNWEIGHTED_VIGOUR:
+        print('Unweighted vigour sample uses the same vigour voxels with unit voxel weights.')
+    print('Top ROI masks: ' + ', '.join((f'{roi.name} ({roi.n_voxels}; vigour={weighted_roi.n_voxels})' for (roi, weighted_roi) in zip(rois[:8], weighted_rois[:8]))))
     print()
     print('Input sessions by state:')
     print(session_df.groupby('state')['label'].count().to_string())
@@ -1817,12 +1884,13 @@ def main():
     weight_img = nib.load(str(args.weight_map))
     weight_values = np.asarray(weight_img.get_fdata(), dtype=np.float64)
     (groups, metadata, roi_names, min_roi_voxels) = _analysis_roi_setup(args, weight_img)
-    (rois, roi_threshold) = _build_weighted_rois(weight_values=weight_values, roi_names=roi_names, groups=groups, roi_percentile=args.roi_percentile, min_report_voxels=args.min_report_voxels, min_roi_voxels=min_roi_voxels)
+    (rois, roi_threshold, weighted_rois) = _build_analysis_rois(weight_values=weight_values, roi_names=roi_names, groups=groups, roi_percentile=args.roi_percentile, min_report_voxels=args.min_report_voxels, min_roi_voxels=min_roi_voxels, voxel_selection=args.voxel_selection, random_state=args.random_state)
     specs = _load_session_specs(args)
     out_dir = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     roi_names = [roi.name for roi in rois]
-    roi_summary = pd.DataFrame({'roi_name': [roi.name for roi in rois], 'n_weighted_voxels': [roi.n_voxels for roi in rois], 'roi_percentile': float(args.roi_percentile), 'weight_threshold': roi_threshold})
+    roi_summary = pd.DataFrame({'roi_name': [roi.name for roi in rois], 'n_voxels': [roi.n_voxels for roi in rois], 'n_weighted_vigour_voxels': [roi.n_voxels for roi in weighted_rois], 'voxel_selection': args.voxel_selection, 'voxel_weighting': ['optimization_weights' if args.voxel_selection == VOXEL_SELECTION_WEIGHTED_VIGOUR else 'unit_weights' for _ in rois], 'roi_percentile': float(args.roi_percentile), 'weight_threshold': roi_threshold})
+    roi_summary['n_weighted_voxels'] = roi_summary['n_voxels']
     roi_summary.to_csv(out_dir / 'weighted_roi_definition.csv', index=False)
     timeseries_dir = out_dir / 'roi_timeseries'
     timeseries_dir.mkdir(parents=True, exist_ok=True)
@@ -1862,10 +1930,10 @@ def main():
         warnings.warn(f'Skipped within-vs-between hemisphere FC analysis: {exc}', RuntimeWarning)
     intra_between_paths = None
     if intra_between_session_rows:
-        intra_between_paths = _save_intra_between_fc_analysis(intra_between_session_rows, intra_between_roi_rows, out_dir)
+        intra_between_paths = _save_intra_between_fc_analysis(intra_between_session_rows, intra_between_roi_rows, out_dir, voxel_selection=args.voxel_selection)
     elif intra_between_fc_skipped:
         warnings.warn('Skipped intra-vs-between FC analysis because no sessions had voxel-level beta or BOLD inputs.', RuntimeWarning)
-    metadata.update({'weight_map': str(args.weight_map), 'roi_definition_figure': str(args.roi_definition_figure), 'roi_region_table': str(args.roi_region_table), 'session_manifest': str(args.session_manifest) if args.session_manifest.exists() else None, 'beta_root': str(args.beta_root), 'roi_percentile': float(args.roi_percentile), 'weight_threshold': roi_threshold, 'min_report_voxels': int(args.min_report_voxels), 'min_roi_voxels': int(min_roi_voxels), 'connectivity_metric': CONNECTIVITY_METRIC, 'comparison_metric': COMPARISON_METRIC, 'mi_neighbors': int(args.mi_neighbors), 'paired_subject_similarity_values': str(paired_subject_path), 'paired_subject_similarity_stats': str(paired_stats_path), 'paired_subject_similarity_primary_p': paired_stats['permutation']['permutation_p_value_two_sided'], 'paired_subject_similarity_primary_effect': paired_stats['effect_size']['raw_difference'], 'node_strength_mi_values': str(node_strength_values_path), 'node_strength_mi_results': str(node_strength_summary_path), 'node_strength_mi_figure': str(node_strength_figure_path), 'node_strength_mi_top_n': int(args.node_strength_top_n), 'node_strength_mi_min_p': float(node_strength_summary['p_value'].min()), 'intra_vs_between_fc_metric': INTRA_BETWEEN_FC_METRIC, 'intra_vs_between_fc_skipped': intra_between_fc_skipped, 'intra_vs_between_fc_outputs': {key: str(value) for (key, value) in intra_between_paths.items() if key != 'summary'} if intra_between_paths else None, 'intra_vs_between_fc_primary_p': intra_between_paths['summary']['tests']['within_minus_between_delta']['paired_t_p_value_two_sided'] if intra_between_paths else None, 'intra_vs_between_fc_primary_effect': intra_between_paths['summary']['tests']['within_minus_between_delta']['mean'] if intra_between_paths else None, 'sessions': [{'label': spec.label, 'subject': spec.subject, 'session': spec.session, 'state': spec.state, 'bold_path': str(spec.bold_path) if spec.bold_path else None, 'timeseries_path': str(spec.timeseries_path) if spec.timeseries_path else None, 'beta_paths': [str(path) for path in spec.beta_paths]} for spec in specs]})
+    metadata.update({'weight_map': str(args.weight_map), 'roi_definition_figure': str(args.roi_definition_figure), 'roi_region_table': str(args.roi_region_table), 'session_manifest': str(args.session_manifest) if args.session_manifest.exists() else None, 'beta_root': str(args.beta_root), 'voxel_selection': args.voxel_selection, 'voxel_weighting': 'optimization_weights' if args.voxel_selection == VOXEL_SELECTION_WEIGHTED_VIGOUR else 'unit_weights', 'matched_nonvigour_random_state': int(args.random_state) if args.voxel_selection == VOXEL_SELECTION_MATCHED_NONVIGOUR else None, 'roi_percentile': float(args.roi_percentile), 'weight_threshold': roi_threshold, 'min_report_voxels': int(args.min_report_voxels), 'min_roi_voxels': int(min_roi_voxels), 'connectivity_metric': CONNECTIVITY_METRIC, 'comparison_metric': COMPARISON_METRIC, 'mi_neighbors': int(args.mi_neighbors), 'paired_subject_similarity_values': str(paired_subject_path), 'paired_subject_similarity_stats': str(paired_stats_path), 'paired_subject_similarity_primary_p': paired_stats['permutation']['permutation_p_value_two_sided'], 'paired_subject_similarity_primary_effect': paired_stats['effect_size']['raw_difference'], 'node_strength_mi_values': str(node_strength_values_path), 'node_strength_mi_results': str(node_strength_summary_path), 'node_strength_mi_figure': str(node_strength_figure_path), 'node_strength_mi_top_n': int(args.node_strength_top_n), 'node_strength_mi_min_p': float(node_strength_summary['p_value'].min()), 'intra_vs_between_fc_metric': INTRA_BETWEEN_FC_METRIC, 'intra_vs_between_fc_skipped': intra_between_fc_skipped, 'intra_vs_between_fc_outputs': {key: str(value) for (key, value) in intra_between_paths.items() if key != 'summary'} if intra_between_paths else None, 'intra_vs_between_fc_primary_p': intra_between_paths['summary']['tests']['within_minus_between_delta']['paired_t_p_value_two_sided'] if intra_between_paths else None, 'intra_vs_between_fc_primary_effect': intra_between_paths['summary']['tests']['within_minus_between_delta']['mean'] if intra_between_paths else None, 'sessions': [{'label': spec.label, 'subject': spec.subject, 'session': spec.session, 'state': spec.state, 'bold_path': str(spec.bold_path) if spec.bold_path else None, 'timeseries_path': str(spec.timeseries_path) if spec.timeseries_path else None, 'beta_paths': [str(path) for path in spec.beta_paths]} for spec in specs]})
     metadata.update({
         'within_vs_between_hemisphere_fc_skipped': hemisphere_fc_skipped,
         'within_vs_between_hemisphere_fc_outputs': {key: str(value) for (key, value) in hemisphere_fc_paths.items() if key != 'summary'} if hemisphere_fc_paths else None,

@@ -13,6 +13,13 @@ import nibabel as nib
 import numpy as np
 import pandas as pd
 from nilearn import datasets, image
+from scipy import ndimage
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.patheffects as path_effects
 
 from analyze_ablation_constraints import (
     DEFAULT_ATLAS_CACHE_DIR,
@@ -34,6 +41,12 @@ from threshold_robustness_voxel_network import (
 DEFAULT_OUT_BASE = Path("figures/ablation/ablation_full_vs_task_only_roi_quantification")
 HARVARD_OXFORD_CORTICAL = "cort-maxprob-thr25-2mm"
 HARVARD_OXFORD_SUBCORTICAL = "sub-maxprob-thr25-2mm"
+WHITE_MATTER_LABEL_FRAGMENT = "Cerebral White Matter"
+COMPARISON_COLORS = {
+    "vigour_only": "#0072B2",
+    "task_only": "#D55E00",
+    "both": "#00A676",
+}
 
 
 @dataclass
@@ -62,6 +75,47 @@ def _atlas_img(atlas: object) -> nib.Nifti1Image:
     return maps if isinstance(maps, nib.Nifti1Image) else nib.load(maps)
 
 
+def _white_matter_mask(reference_img: nib.Nifti1Image, cache_dir: Path) -> np.ndarray:
+    atlas = datasets.fetch_atlas_harvard_oxford(HARVARD_OXFORD_SUBCORTICAL, data_dir=str(cache_dir), verbose=0)
+    atlas_data = _resample_labels(_atlas_img(atlas), reference_img)
+    label_values = [
+        label_value
+        for label_value, label_name in enumerate(atlas.labels)
+        if WHITE_MATTER_LABEL_FRAGMENT in str(label_name)
+    ]
+    return np.isin(atlas_data, label_values)
+
+
+def _exclude_white_matter(
+    masks: dict[str, np.ndarray],
+    white_matter: np.ndarray,
+    metadata: dict[str, object],
+) -> tuple[dict[str, np.ndarray], dict[str, object]]:
+    full = masks["vigour"] & ~white_matter
+    task = masks["task"] & ~white_matter
+    updated = dict(masks)
+    updated["white_matter"] = white_matter
+    updated["vigour"] = full
+    updated["task"] = task
+    updated["vigour_only"] = full & ~task
+    updated["task_only"] = task & ~full
+    updated["both"] = full & task
+    updated["union"] = full | task
+
+    updated_metadata = dict(metadata)
+    mask_definition = str(updated_metadata.get("mask_definition", "")).strip()
+    updated_metadata["mask_definition"] = (
+        f"{mask_definition} " if mask_definition else ""
+    ) + "Harvard-Oxford cerebral white-matter voxels are excluded from the ROI quantification."
+    updated_metadata["white_matter_mask_source"] = "Harvard-Oxford subcortical: Left/Right Cerebral White Matter"
+    updated_metadata["white_matter_suppressed_vigour_voxels"] = int(np.count_nonzero(masks["vigour"] & white_matter))
+    updated_metadata["white_matter_suppressed_task_activation_voxels"] = int(
+        np.count_nonzero(masks["task"] & white_matter)
+    )
+    updated_metadata["white_matter_suppressed_overlap_voxels"] = int(np.count_nonzero(masks["both"] & white_matter))
+    return updated, updated_metadata
+
+
 def _strip_laterality(label: str) -> str:
     return re.sub(r"^(Left|Right)\s+", "", label).strip()
 
@@ -78,7 +132,7 @@ def _ho_group_name(label: str, family: str) -> str:
     if family == "subcortical":
         exact = {
             "Cerebral White Matter": "Cerebral_White_Matter",
-            "Cerebral Cortex": "Cerebral_Cortex_HO",
+            "Cerebral Cortex": "Cerebral_Cortex",
             "Lateral Ventricle": "Lateral_Ventricle",
             "Thalamus": "Thalamus",
             "Caudate": "Caudate",
@@ -105,7 +159,7 @@ def _ho_group_name(label: str, family: str) -> str:
         return "ParaHippocampal"
     if "fusiform" in low:
         return "Fusiform"
-    if any(token in low for token in ("occipital", "intracalcarine", "cuneal", "lingual")):
+    if any(token in low for token in ("occipital", "intracalcarine", "cuneal", "lingual", "supracalcarine")):
         return "Occipital"
     if any(token in low for token in ("parietal", "precuneous", "angular", "supramarginal")):
         return "Parietal"
@@ -113,7 +167,7 @@ def _ho_group_name(label: str, family: str) -> str:
         return "Orbitofrontal"
     if "frontal" in low or "subcallosal" in low or "central opercular" in low:
         return "Frontal"
-    if "temporal" in low or "heschl" in low or "planum temporale" in low:
+    if "temporal" in low or "heschl" in low or "planum temporale" in low or "planum polare" in low:
         return "Temporal"
     return _safe_unknown_ho_name(base)
 
@@ -176,14 +230,52 @@ def _add_harvard_oxford_fill(
     return assigned
 
 
+def _add_nearest_label_fill(
+    regions: dict[str, RegionMask],
+    assigned: np.ndarray,
+    target_mask: np.ndarray,
+) -> tuple[np.ndarray, int]:
+    missing = target_mask & ~assigned
+    n_missing = int(np.count_nonzero(missing))
+    if n_missing == 0:
+        return assigned, 0
+    if not np.any(assigned):
+        raise RuntimeError("Cannot fill atlas-unassigned voxels because no atlas labels are assigned.")
+
+    region_names = list(regions)
+    label_volume = np.zeros(assigned.shape, dtype=np.int16)
+    for label_id, roi_name in enumerate(region_names, start=1):
+        label_volume[regions[roi_name].mask & assigned] = label_id
+
+    nearest_indices = ndimage.distance_transform_edt(
+        ~assigned,
+        return_distances=False,
+        return_indices=True,
+    )
+    nearest_labels = label_volume[tuple(axis_indices[missing] for axis_indices in nearest_indices)]
+    for label_id in np.unique(nearest_labels):
+        if label_id <= 0:
+            continue
+        roi_name = region_names[int(label_id) - 1]
+        fill_mask = np.zeros(assigned.shape, dtype=bool)
+        fill_mask[missing] = nearest_labels == label_id
+        regions[roi_name].mask |= fill_mask
+        regions[roi_name].sources.add("Nearest-label fill for atlas-uncovered selected voxels")
+        if "nearest atlas label for uncovered selected voxels" not in regions[roi_name].matched_labels:
+            regions[roi_name].matched_labels.append("nearest atlas label for uncovered selected voxels")
+        assigned |= fill_mask
+    return assigned, n_missing
+
+
 def _build_regions(
     reference_img: nib.Nifti1Image,
     cache_dir: Path,
     analysis_space_mask: np.ndarray,
     atlas_mode: str,
+    target_fill_mask: np.ndarray | None = None,
 ) -> tuple[dict[str, RegionMask], np.ndarray, dict[str, object]]:
     regions, assigned, metadata = _build_aal3_regions(reference_img, cache_dir, analysis_space_mask)
-    if atlas_mode == "aal3_ho_fill":
+    if atlas_mode in {"aal3_ho_fill", "aal3_ho_nearest"}:
         assigned = _add_harvard_oxford_fill(regions, assigned, reference_img, cache_dir, analysis_space_mask)
         metadata = dict(metadata)
         metadata["roi_definition"] = "aal3_bilateral_coarse_groups_with_harvard_oxford_fill"
@@ -191,6 +283,18 @@ def _build_regions(
             "AAL3 coarse bilateral regions are assigned first; only AAL3-unassigned voxels are "
             "filled from Harvard-Oxford cortical and subcortical maxprob-thr25 labels."
         )
+    if atlas_mode == "aal3_ho_nearest":
+        if target_fill_mask is None:
+            raise RuntimeError("target_fill_mask is required for nearest-label atlas fill.")
+        assigned, n_nearest_filled = _add_nearest_label_fill(regions, assigned, target_fill_mask & analysis_space_mask)
+        metadata = dict(metadata)
+        metadata["roi_definition"] = "aal3_bilateral_coarse_groups_with_harvard_oxford_and_nearest_selected_voxel_fill"
+        metadata["fill_rule"] = (
+            "AAL3 coarse bilateral regions are assigned first; AAL3-unassigned voxels are filled from "
+            "Harvard-Oxford cortical and subcortical maxprob-thr25 labels; remaining selected voxels "
+            "are assigned to the nearest existing anatomical label."
+        )
+        metadata["nearest_label_filled_selected_voxels"] = int(n_nearest_filled)
     return regions, assigned, metadata
 
 
@@ -322,6 +426,15 @@ def _roi_quantification(
                 "task_only_pct_of_task_only": _safe_pct(task_only, totals["task_only"]),
                 "both_voxels": both,
                 "both_pct_of_overlap": _safe_pct(both, totals["both"]),
+                "vigour_only_pct_of_roi": _safe_pct(vigour_only, priority_roi_voxels)
+                if region.name != UNASSIGNED_ROI
+                else np.nan,
+                "task_only_pct_of_roi": _safe_pct(task_only, priority_roi_voxels)
+                if region.name != UNASSIGNED_ROI
+                else np.nan,
+                "both_pct_of_roi": _safe_pct(both, priority_roi_voxels)
+                if region.name != UNASSIGNED_ROI
+                else np.nan,
                 "vigour_network_pct_of_roi": _safe_pct(vigour_total, priority_roi_voxels)
                 if region.name != UNASSIGNED_ROI
                 else np.nan,
@@ -373,7 +486,7 @@ def _coverage_table(
     masks: dict[str, np.ndarray],
 ) -> pd.DataFrame:
     assigned_masks = _atlas_assigned_masks(reference_img, cache_dir, analysis_space_mask)
-    selected_name = "AAL3v2 + Harvard-Oxford fill" if atlas_mode == "aal3_ho_fill" else "AAL3v2 coarse selected"
+    selected_name = _selected_atlas_name(atlas_mode)
     assigned_masks[selected_name] = selected_assigned_mask
     rows = []
     for atlas_name, assigned in assigned_masks.items():
@@ -394,16 +507,17 @@ def _coverage_table(
 
 def _set_summary(roi_df: pd.DataFrame) -> pd.DataFrame:
     specs = (
-        ("vigour_region_not_task_region", roi_df["roi_membership"].eq("vigour_region_not_task_region")),
-        (
-            "task_activation_region_not_vigour_region",
-            roi_df["roi_membership"].eq("task_activation_region_not_vigour_region"),
-        ),
-        ("regions_in_both_maps", roi_df["roi_membership"].eq("both_maps")),
+        ("regions_with_vigour_only_voxels", roi_df["vigour_only_voxels"].gt(0)),
+        ("regions_with_task_only_voxels", roi_df["task_only_voxels"].gt(0)),
         ("regions_with_same_voxel_overlap", roi_df["both_voxels"].gt(0)),
         (
-            "regions_in_both_maps_without_same_voxel_overlap",
+            "regions_with_both_maps_but_no_same_voxel_overlap",
             roi_df["roi_membership"].eq("both_maps") & roi_df["both_voxels"].eq(0),
+        ),
+        ("regions_present_only_in_vigour_map", roi_df["roi_membership"].eq("vigour_region_not_task_region")),
+        (
+            "regions_present_only_in_task_activation_map",
+            roi_df["roi_membership"].eq("task_activation_region_not_vigour_region"),
         ),
     )
     rows = []
@@ -429,9 +543,234 @@ def _fmt_pct(value: float) -> str:
     return "NA" if pd.isna(value) else f"{100.0 * float(value):.1f}%"
 
 
+def _selected_atlas_name(atlas_mode: str) -> str:
+    if atlas_mode == "aal3_ho_nearest":
+        return "AAL3v2 + Harvard-Oxford + residual nearest-label fill"
+    if atlas_mode == "aal3_ho_fill":
+        return "AAL3v2 + Harvard-Oxford fill"
+    return "AAL3v2 coarse"
+
+
+def _roi_status(row: pd.Series) -> str:
+    if int(row["both_voxels"]) > 0:
+        return "Shared voxels present"
+    if int(row["vigour_network_voxels"]) > 0 and int(row["task_activation_voxels"]) > 0:
+        return "Both maps in ROI, no shared voxels"
+    if int(row["vigour_network_voxels"]) > 0:
+        return "Only vigour voxels in ROI"
+    if int(row["task_activation_voxels"]) > 0:
+        return "Only task voxels in ROI"
+    return "No selected voxels"
+
+
+def _clean_roi_table(roi_df: pd.DataFrame) -> pd.DataFrame:
+    clean = roi_df.copy()
+    clean["same_voxel_overlap_voxels"] = clean["both_voxels"].astype(int)
+    clean["same_voxel_overlap_pct_of_roi"] = clean["both_pct_of_roi"]
+    clean["roi_status"] = clean.apply(_roi_status, axis=1)
+    clean = clean.rename(
+        columns={
+            "vigour_network_voxels": "vigour_total_voxels",
+            "task_activation_voxels": "task_total_voxels",
+            "priority_roi_voxels": "roi_total_voxels",
+            "union_pct_of_roi": "selected_union_pct_of_roi",
+        }
+    )
+    cols = [
+        "roi_name",
+        "roi_total_voxels",
+        "vigour_only_voxels",
+        "vigour_only_pct_of_roi",
+        "task_only_voxels",
+        "task_only_pct_of_roi",
+        "same_voxel_overlap_voxels",
+        "same_voxel_overlap_pct_of_roi",
+        "vigour_total_voxels",
+        "vigour_network_pct_of_roi",
+        "task_total_voxels",
+        "task_activation_pct_of_roi",
+        "union_voxels",
+        "selected_union_pct_of_roi",
+        "roi_status",
+    ]
+    return clean[cols].sort_values(["union_voxels", "roi_name"], ascending=[False, True])
+
+
+def _format_count(value: int | float) -> str:
+    if pd.isna(value):
+        return ""
+    return f"{int(value):,}"
+
+
+def _format_pct_roi(value: int | float) -> str:
+    if pd.isna(value):
+        return ""
+    return f"{100.0 * float(value):.2f}%"
+
+
+def _format_count_pct(count: int | float, pct: int | float) -> str:
+    if pd.isna(count) or pd.isna(pct):
+        return ""
+    return f"{_format_count(count)} ({_format_pct_roi(pct)})"
+
+
+def _add_bar_pct_labels(
+    ax: plt.Axes,
+    y: np.ndarray,
+    left: np.ndarray,
+    width: np.ndarray,
+    y_offset: float,
+) -> None:
+    for idx, segment_width in enumerate(width):
+        if not np.isfinite(segment_width) or segment_width <= 0.0:
+            continue
+        x = float(left[idx] + segment_width / 2.0)
+        if left[idx] == 0.0:
+            x = max(x, min(1.2, segment_width))
+        text = ax.text(
+            x,
+            float(y[idx] + y_offset),
+            f"{segment_width:.2f}%",
+            ha="center",
+            va="center",
+            fontsize=8.8,
+            fontweight="semibold",
+            color="white",
+            clip_on=False,
+        )
+        text.set_path_effects([path_effects.withStroke(linewidth=1.8, foreground="#1A1A1A")])
+
+
+def _plot_summary_image(out_path: Path, clean_df: pd.DataFrame, totals: dict[str, int], atlas_mode: str) -> None:
+    plot_df = clean_df[clean_df["union_voxels"].gt(0)].sort_values(
+        ["vigour_only_pct_of_roi", "roi_name"],
+        ascending=[True, True],
+    )
+    fig_height = max(8.0, 0.34 * len(plot_df) + 2.4)
+    fig, ax = plt.subplots(figsize=(11.6, fig_height), facecolor="white")
+    y = np.arange(len(plot_df))
+    vigour_only = 100.0 * plot_df["vigour_only_pct_of_roi"].to_numpy()
+    both = 100.0 * plot_df["same_voxel_overlap_pct_of_roi"].to_numpy()
+    task_only = 100.0 * plot_df["task_only_pct_of_roi"].to_numpy()
+
+    vigour_bars = ax.barh(y, vigour_only, color=COMPARISON_COLORS["vigour_only"], label="vigour network")
+    overlap_bars = ax.barh(y, both, left=vigour_only, color=COMPARISON_COLORS["both"], label="overlap")
+    task_bars = ax.barh(
+        y,
+        task_only,
+        left=vigour_only + both,
+        color=COMPARISON_COLORS["task_only"],
+        label="task-activation map",
+    )
+
+    ax.set_yticks(y)
+    ax.set_yticklabels(plot_df["roi_name"], fontsize=8.5)
+    ax.set_xlabel("Percent of total voxels in ROI")
+    ax.grid(axis="x", color="#D0D0D0", linewidth=0.6, alpha=0.7)
+    ax.set_axisbelow(True)
+    ax.spines[["top", "right", "left"]].set_visible(False)
+    ax.tick_params(axis="y", length=0)
+    ax.legend(
+        handles=[vigour_bars, task_bars, overlap_bars],
+        labels=["vigour network", "task-activation map", "overlap"],
+        loc="lower right",
+        frameon=False,
+    )
+    zeros = np.zeros_like(vigour_only)
+    _add_bar_pct_labels(ax, y, zeros, vigour_only, 0.22)
+    _add_bar_pct_labels(ax, y, vigour_only, both, 0.0)
+    _add_bar_pct_labels(ax, y, vigour_only + both, task_only, -0.22)
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=260, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _plot_clean_table_image(out_path: Path, clean_df: pd.DataFrame, totals: dict[str, int], atlas_mode: str) -> None:
+    display_df = clean_df[clean_df["union_voxels"].gt(0)].copy()
+    display_df = display_df.sort_values(["selected_union_pct_of_roi", "roi_name"], ascending=[False, True])
+    display_df = display_df[
+        [
+            "roi_name",
+            "vigour_only_voxels",
+            "vigour_only_pct_of_roi",
+            "same_voxel_overlap_voxels",
+            "same_voxel_overlap_pct_of_roi",
+            "task_only_voxels",
+            "task_only_pct_of_roi",
+            "roi_status",
+        ]
+    ]
+
+    table_rows = []
+    for row in display_df.itertuples(index=False):
+        table_rows.append(
+            [
+                row.roi_name,
+                _format_count_pct(row.vigour_only_voxels, row.vigour_only_pct_of_roi),
+                _format_count_pct(row.same_voxel_overlap_voxels, row.same_voxel_overlap_pct_of_roi),
+                _format_count_pct(row.task_only_voxels, row.task_only_pct_of_roi),
+                row.roi_status,
+            ]
+        )
+
+    row_height = 0.26
+    fig_height = max(6.8, row_height * (len(table_rows) + 3.5))
+    fig, ax = plt.subplots(figsize=(11.2, fig_height), facecolor="white")
+    ax.axis("off")
+    title = "Clean ROI Table: Voxel Count and Percent of Each ROI"
+    subtitle = (
+        "White matter excluded. Numeric cells show voxel count (% of ROI); denominator is total voxels in that ROI."
+    )
+    ax.set_title(f"{title}\n{subtitle}", fontsize=13, loc="left", pad=16)
+    table = ax.table(
+        cellText=table_rows,
+        colLabels=[
+            "ROI",
+            "Vigour only n (% ROI)",
+            "Shared voxel n (% ROI)",
+            "Task only n (% ROI)",
+            "Voxel-level relation",
+        ],
+        colLoc="right",
+        cellLoc="right",
+        loc="upper left",
+        colWidths=[0.20, 0.17, 0.19, 0.17, 0.27],
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(7.9)
+    table.scale(1.0, 1.25)
+
+    for (row_idx, col_idx), cell in table.get_celld().items():
+        cell.set_edgecolor("#D8D8D8")
+        cell.set_linewidth(0.5)
+        if row_idx == 0:
+            cell.set_facecolor("#F0F0F0")
+            cell.set_text_props(weight="bold", color="#222222")
+        else:
+            cell.set_facecolor("#FFFFFF" if row_idx % 2 else "#FAFAFA")
+        if col_idx == 0:
+            cell.set_text_props(ha="left")
+        if row_idx > 0 and col_idx == 1:
+            cell.get_text().set_color(COMPARISON_COLORS["vigour_only"])
+        if row_idx > 0 and col_idx == 2:
+            cell.get_text().set_color(COMPARISON_COLORS["both"])
+        if row_idx > 0 and col_idx == 3:
+            cell.get_text().set_color(COMPARISON_COLORS["task_only"])
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=260, bbox_inches="tight")
+    plt.close(fig)
+
+
 def _top_region_lines(roi_df: pd.DataFrame, value_col: str, pct_col: str, n: int = 8) -> list[str]:
     sub = roi_df[roi_df[value_col].gt(0)].sort_values(value_col, ascending=False).head(n)
     return [f"- {row.roi_name}: {int(row[value_col]):,} ({_fmt_pct(row[pct_col])})" for _, row in sub.iterrows()]
+
+
+def _top_roi_pct_lines(roi_df: pd.DataFrame, pct_col: str, count_col: str, n: int = 8) -> list[str]:
+    sub = roi_df[roi_df[pct_col].gt(0)].sort_values(pct_col, ascending=False).head(n)
+    return [f"- {row.roi_name}: {_fmt_pct(row[pct_col])} of ROI" for _, row in sub.iterrows()]
 
 
 def _write_report(
@@ -443,7 +782,7 @@ def _write_report(
     totals: dict[str, int],
     atlas_mode: str,
 ) -> None:
-    selected_atlas = "AAL3v2 + Harvard-Oxford fill" if atlas_mode == "aal3_ho_fill" else "AAL3v2 coarse"
+    selected_atlas = _selected_atlas_name(atlas_mode)
     coverage_lines = []
     for _, row in coverage_df.iterrows():
         coverage_lines.append(
@@ -462,11 +801,12 @@ def _write_report(
         "## Inputs",
         f"- Vigour network: `{metadata['full_model_html']}` selected overlay, with brainstem voxels suppressed.",
         f"- Task activation map: `{metadata['task_activation_map']}` thresholded at {metadata['task_activation_threshold']}, with brainstem voxels suppressed.",
+        f"- White matter excluded: {metadata.get('white_matter_mask_source', 'No')}.",
         f"- Atlas mode: {selected_atlas}.",
         "",
         "## Totals",
-        f"- Vigour network: {totals['vigour']:,} voxels.",
-        f"- Task activation map: {totals['task']:,} voxels.",
+        f"- Vigour network: {totals['vigour']:,} non-white-matter voxels.",
+        f"- Task activation map: {totals['task']:,} non-white-matter voxels.",
         f"- Same-voxel overlap: {totals['both']:,} voxels.",
         f"- Vigour-only: {totals['vigour_only']:,} voxels.",
         f"- Task-only: {totals['task_only']:,} voxels.",
@@ -476,20 +816,24 @@ def _write_report(
         *coverage_lines,
         "",
         "## Region Sets",
+        "These sets are voxel-level summaries. A single ROI can contain both vigour-only and task-only voxels.",
         *set_lines,
         "",
-        "## Largest Vigour-Only Contributions",
-        *_top_region_lines(roi_df, "vigour_only_voxels", "vigour_only_pct_of_vigour_only"),
+        "## Highest Vigour-Only Percent of ROI",
+        *_top_roi_pct_lines(roi_df, "vigour_only_pct_of_roi", "vigour_only_voxels"),
         "",
-        "## Largest Task-Only Contributions",
-        *_top_region_lines(roi_df, "task_only_voxels", "task_only_pct_of_task_only"),
+        "## Highest Task-Only Percent of ROI",
+        *_top_roi_pct_lines(roi_df, "task_only_pct_of_roi", "task_only_voxels"),
         "",
-        "## Largest Shared-Voxel Contributions",
-        *_top_region_lines(roi_df, "both_voxels", "both_pct_of_overlap"),
+        "## Highest Shared-Voxel Percent of ROI",
+        *_top_roi_pct_lines(roi_df, "both_pct_of_roi", "both_voxels"),
         "",
         "## Outputs",
         f"- `{out_base}_by_roi.csv`",
         f"- `{out_base}_region_sets.csv`",
+        f"- `{out_base}_clean_table.csv`",
+        f"- `{out_base}_summary.png`",
+        f"- `{out_base}_clean_table.png`",
         f"- `{out_base}_atlas_coverage.csv`",
         f"- `{out_base}_metadata.json`",
     ]
@@ -503,15 +847,28 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
         args.task_map,
         args.task_z_threshold,
     )
-    analysis_space_mask = ~masks["brainstem"]
+    if args.exclude_white_matter:
+        masks, mask_metadata = _exclude_white_matter(
+            masks,
+            _white_matter_mask(reference_img, args.atlas_cache_dir) & ~masks["brainstem"],
+            mask_metadata,
+        )
+    analysis_space_mask = ~masks["brainstem"] & ~masks.get("white_matter", np.zeros(reference_img.shape[:3], dtype=bool))
     regions, assigned_mask, atlas_metadata = _build_regions(
         reference_img,
         args.atlas_cache_dir,
         analysis_space_mask,
         args.atlas_mode,
+        masks["union"],
     )
     roi_df = _roi_quantification(regions, assigned_mask, masks, reference_img)
+    if not roi_df["roi_name"].eq(UNASSIGNED_ROI).any() and "priority_order" in atlas_metadata:
+        atlas_metadata = dict(atlas_metadata)
+        atlas_metadata["priority_order"] = [
+            roi_name for roi_name in atlas_metadata["priority_order"] if roi_name != UNASSIGNED_ROI
+        ]
     set_df = _set_summary(roi_df)
+    clean_df = _clean_roi_table(roi_df)
     coverage_df = _coverage_table(
         reference_img,
         args.atlas_cache_dir,
@@ -525,19 +882,29 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
     args.out_base.parent.mkdir(parents=True, exist_ok=True)
     by_roi_path = args.out_base.with_name(args.out_base.name + "_by_roi.csv")
     sets_path = args.out_base.with_name(args.out_base.name + "_region_sets.csv")
+    clean_table_path = args.out_base.with_name(args.out_base.name + "_clean_table.csv")
+    summary_image_path = args.out_base.with_name(args.out_base.name + "_summary.png")
+    clean_table_image_path = args.out_base.with_name(args.out_base.name + "_clean_table.png")
     coverage_path = args.out_base.with_name(args.out_base.name + "_atlas_coverage.csv")
     metadata_path = args.out_base.with_name(args.out_base.name + "_metadata.json")
     roi_df.to_csv(by_roi_path, index=False)
     set_df.to_csv(sets_path, index=False)
+    clean_df.to_csv(clean_table_path, index=False)
     coverage_df.to_csv(coverage_path, index=False)
+    _plot_summary_image(summary_image_path, clean_df, totals, args.atlas_mode)
+    _plot_clean_table_image(clean_table_image_path, clean_df, totals, args.atlas_mode)
     metadata = {
         "inputs": mask_metadata,
         "atlas": atlas_metadata,
         "atlas_mode": args.atlas_mode,
+        "exclude_white_matter": bool(args.exclude_white_matter),
         "totals": totals,
         "outputs": {
             "by_roi": str(by_roi_path),
             "region_sets": str(sets_path),
+            "clean_table": str(clean_table_path),
+            "summary_image": str(summary_image_path),
+            "clean_table_image": str(clean_table_image_path),
             "atlas_coverage": str(coverage_path),
             "metadata": str(metadata_path),
             "report": str(args.out_base.with_name(args.out_base.name + "_report.md")),
@@ -548,6 +915,9 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
     return {
         "by_roi": by_roi_path,
         "region_sets": sets_path,
+        "clean_table": clean_table_path,
+        "summary_image": summary_image_path,
+        "clean_table_image": clean_table_image_path,
         "atlas_coverage": coverage_path,
         "metadata": metadata_path,
         "report": args.out_base.with_name(args.out_base.name + "_report.md"),
@@ -563,9 +933,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--atlas-cache-dir", type=Path, default=DEFAULT_ATLAS_CACHE_DIR)
     parser.add_argument(
         "--atlas-mode",
-        choices=("aal3", "aal3_ho_fill"),
-        default="aal3_ho_fill",
-        help="Use AAL3 only, or fill AAL3-unassigned voxels with Harvard-Oxford labels.",
+        choices=("aal3", "aal3_ho_fill", "aal3_ho_nearest"),
+        default="aal3_ho_nearest",
+        help=(
+            "Use AAL3 only, fill AAL3-unassigned voxels with Harvard-Oxford labels, or additionally "
+            "assign remaining selected voxels to the nearest existing anatomical label."
+        ),
+    )
+    parser.add_argument(
+        "--include-white-matter",
+        action="store_false",
+        dest="exclude_white_matter",
+        help="Include Harvard-Oxford cerebral white-matter voxels in the ROI quantification.",
     )
     parser.add_argument("--out-base", type=Path, default=DEFAULT_OUT_BASE)
     return parser.parse_args()
