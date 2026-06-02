@@ -290,6 +290,34 @@ def _plot_metrics(candidate_results, out_base, selected_threshold):
                     "shrinkB": 4,
                 },
             )
+        elif result["slug"] == "typeD" and best_dice is not None:
+            best_dice_threshold = float(best_dice["threshold"])
+            left_ax.scatter(
+                [float(best_dice["false_positive_rate"])],
+                [float(best_dice["sensitivity"])],
+                s=95,
+                facecolors="white",
+                edgecolors=selected_color,
+                linewidths=1.8,
+                zorder=5,
+            )
+            left_ax.annotate(
+                f"Selected\nz = {best_dice_threshold:.2f}",
+                (float(best_dice["false_positive_rate"]), float(best_dice["sensitivity"])),
+                xytext=(16, 2),
+                textcoords="offset points",
+                fontsize=8.5,
+                color=selected_color,
+                ha="left",
+                va="center",
+                arrowprops={
+                    "arrowstyle": "-",
+                    "color": selected_color,
+                    "linewidth": 0.9,
+                    "shrinkA": 2,
+                    "shrinkB": 4,
+                },
+            )
         rank_concordance = result.get("rank_concordance", {})
         kendall_w = rank_concordance.get("kendall_w", np.nan)
         if np.isfinite(kendall_w):
@@ -352,31 +380,22 @@ def _plot_metrics(candidate_results, out_base, selected_threshold):
                 linestyle="--",
                 label=f"Selected Type A threshold (z = {selected_threshold:g})",
             )
-        if best_dice is not None and not np.isclose(
+        elif result["slug"] == "typeD" and best_dice is not None:
+            best_dice_threshold = float(best_dice["threshold"])
+            right_ax.axvline(
+                best_dice_threshold,
+                color=selected_color,
+                linewidth=1.6,
+                linestyle="--",
+                label=f"Selected Type D threshold (z = {best_dice_threshold:.2f})",
+            )
+        elif best_dice is not None and not np.isclose(
             float(best_dice["threshold"]), selected_threshold, atol=0.05
         ):
             best_dice_threshold = float(best_dice["threshold"])
             right_ax.axvline(
                 best_dice_threshold, color="#2f8f5b", linewidth=1.3, linestyle=":"
             )
-            if result["slug"] == "typeD":
-                right_ax.annotate(
-                    f"Best Dice\nz = {best_dice_threshold:.2f}",
-                    (best_dice_threshold, float(best_dice["dice"])),
-                    xytext=(14, 18),
-                    textcoords="offset points",
-                    fontsize=8.5,
-                    color="#2f8f5b",
-                    ha="left",
-                    va="bottom",
-                    arrowprops={
-                        "arrowstyle": "-",
-                        "color": "#2f8f5b",
-                        "linewidth": 0.9,
-                        "shrinkA": 2,
-                        "shrinkB": 3,
-                    },
-                )
         right_ax.set_title(f"{label}: metrics across positive thresholds")
         right_ax.set_xlabel(f"{label} z threshold")
         right_ax.set_ylabel("Metric value")
