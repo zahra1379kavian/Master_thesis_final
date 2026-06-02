@@ -17,6 +17,7 @@ DEFAULT_STANDARD_GLM = Path("data/z_valu_standard_glm.nii.gz")
 DEFAULT_TYPEA_GLM = Path("data/z_value_typaA.nii.gz")
 DEFAULT_OUT_BASE = Path("figures/typea_vs_standard_glm_threshold_auc")
 DEFAULT_REFERENCE_Z_THRESHOLD = 3.1
+DEFAULT_MARKER_THRESHOLDS = (0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5)
 COUNT_COLUMNS = {
     "selected_voxels",
     "reference_voxels",
@@ -132,97 +133,55 @@ def _positive_threshold_auc(metrics_df):
     return float(np.trapezoid(curve["sensitivity"], curve["false_positive_rate"]))
 
 
+def _marker_metrics(reference_mask, scores, analysis_mask, thresholds):
+    rows = [
+        _metrics_for_threshold(reference_mask, scores, analysis_mask, float(threshold))
+        for threshold in thresholds
+    ]
+    return pd.DataFrame(rows)
+
+
 def _plot_metrics(
     metrics_df,
     full_fpr,
     full_tpr,
     auc_full,
     partial_auc_positive_thresholds,
+    marker_metrics_df,
     best_youden,
     best_dice,
     out_base,
 ):
-    finite_metrics = metrics_df[np.isfinite(metrics_df["threshold"])].copy()
-    roc = metrics_df[["false_positive_rate", "sensitivity"]].dropna().copy()
-    roc = roc.sort_values(["false_positive_rate", "sensitivity"])
+    marker_metrics_df = marker_metrics_df.sort_values("threshold").copy()
 
-    fig, axes = plt.subplots(1, 2, figsize=(12.5, 5.2), facecolor="white")
-
-    axes[0].plot(
-        full_fpr,
-        full_tpr,
-        color="#1b6ca8",
-        linewidth=2.2,
-        label=f"Full Type A score ROC, AUC={auc_full:.3f}",
-    )
-    axes[0].plot(
-        roc["false_positive_rate"],
-        roc["sensitivity"],
-        color="#d04f2f",
-        linewidth=1.5,
-        alpha=0.8,
-        label=f"Positive thresholds, partial AUC={partial_auc_positive_thresholds:.3f}",
-    )
-    axes[0].plot([0, 1], [0, 1], color="#888888", linestyle="--", linewidth=1.0)
-    if best_youden is not None:
-        axes[0].scatter(
-            [best_youden["false_positive_rate"]],
-            [best_youden["sensitivity"]],
-            color="#d04f2f",
-            s=46,
-            zorder=3,
-            label=f"Best Youden z={best_youden['threshold']:.3g}",
-        )
-    if best_dice is not None:
-        axes[0].scatter(
-            [best_dice["false_positive_rate"]],
-            [best_dice["sensitivity"]],
-            color="#2f8f5b",
-            s=46,
-            zorder=3,
-            label=f"Best Dice z={best_dice['threshold']:.3g}",
-        )
-    axes[0].set_title("ROC against standard GLM gold map")
-    axes[0].set_xlabel("False positive rate")
-    axes[0].set_ylabel("Sensitivity")
-    axes[0].set_xlim(-0.01, 1.01)
-    axes[0].set_ylim(-0.01, 1.01)
-    axes[0].grid(True, linewidth=0.6, alpha=0.25)
-    axes[0].legend(loc="lower right", fontsize=9)
-
-    axes[1].plot(
-        finite_metrics["threshold"],
-        finite_metrics["sensitivity"],
+    fig, ax = plt.subplots(figsize=(7.0, 5.6), facecolor="white")
+    ax.plot(
+        marker_metrics_df["specificity"],
+        marker_metrics_df["sensitivity"],
         color="#1b6ca8",
         linewidth=1.8,
-        label="Sensitivity",
+        marker="o",
+        markersize=6,
     )
-    axes[1].plot(
-        finite_metrics["threshold"],
-        finite_metrics["specificity"],
-        color="#7d5fb2",
-        linewidth=1.8,
-        label="Specificity",
-    )
-    axes[1].plot(
-        finite_metrics["threshold"],
-        finite_metrics["dice"],
-        color="#2f8f5b",
-        linewidth=1.8,
-        label="Dice overlap",
-    )
-    if best_youden is not None:
-        axes[1].axvline(best_youden["threshold"], color="#d04f2f", linewidth=1.3, linestyle="--")
-    if best_dice is not None:
-        axes[1].axvline(best_dice["threshold"], color="#2f8f5b", linewidth=1.3, linestyle=":")
-    axes[1].set_title("Threshold sweep over positive Type A z values")
-    axes[1].set_xlabel("Type A z threshold")
-    axes[1].set_ylabel("Metric value")
-    axes[1].set_ylim(-0.01, 1.01)
-    axes[1].grid(True, linewidth=0.6, alpha=0.25)
-    axes[1].legend(loc="best", fontsize=9)
+    for row in marker_metrics_df.itertuples(index=False):
+        ax.annotate(
+            f"z >= {row.threshold:g}",
+            (row.specificity, row.sensitivity),
+            xytext=(6, 4),
+            textcoords="offset points",
+            fontsize=9,
+            color="#111111",
+        )
+    ax.set_title("Sensitivity vs specificity across Type A thresholds")
+    ax.set_xlabel("Specificity")
+    ax.set_ylabel("Sensitivity")
+    ax.set_xlim(max(0.0, float(marker_metrics_df["specificity"].min()) - 0.01), 1.0)
+    ax.set_ylim(0.0, min(1.0, float(marker_metrics_df["sensitivity"].max()) + 0.08))
+    ax.grid(True, linewidth=0.6, alpha=0.25)
 
     fig.tight_layout()
+    fig.savefig(f"{out_base}_sensitivity_specificity.png", dpi=220, bbox_inches="tight")
+    fig.savefig(f"{out_base}_sensitivity_specificity.pdf", bbox_inches="tight")
     fig.savefig(f"{out_base}_roc.png", dpi=220, bbox_inches="tight")
     fig.savefig(f"{out_base}_roc.pdf", bbox_inches="tight")
     plt.close(fig)
@@ -260,6 +219,13 @@ def build_parser():
     parser.add_argument("--out-base", type=Path, default=DEFAULT_OUT_BASE)
     parser.add_argument("--reference-z-threshold", type=float, default=DEFAULT_REFERENCE_Z_THRESHOLD)
     parser.add_argument(
+        "--marker-thresholds",
+        type=float,
+        nargs="+",
+        default=list(DEFAULT_MARKER_THRESHOLDS),
+        help="Type A z thresholds to mark explicitly on the ROC plot.",
+    )
+    parser.add_argument(
         "--analysis-mask",
         choices=("finite-both", "typea-nonzero", "typea-positive"),
         default="finite-both",
@@ -294,6 +260,8 @@ def main():
         raise RuntimeError("The analysis mask contains no reference-negative voxels.")
 
     metrics_df = _threshold_sweep(reference_mask, typea_data, analysis_mask)
+    marker_thresholds = sorted(set(float(threshold) for threshold in args.marker_thresholds))
+    marker_metrics_df = _marker_metrics(reference_mask, typea_data, analysis_mask, marker_thresholds)
     best_youden = _best_row(metrics_df, "youden_index")
     best_dice = _best_row(metrics_df, "dice")
 
@@ -306,14 +274,17 @@ def main():
     out_base = args.out_base
     out_base.parent.mkdir(parents=True, exist_ok=True)
     metrics_path = Path(f"{out_base}_metrics.csv")
+    marker_metrics_path = Path(f"{out_base}_marker_threshold_metrics.csv")
     summary_path = Path(f"{out_base}_summary.json")
     metrics_df.to_csv(metrics_path, index=False)
+    marker_metrics_df.to_csv(marker_metrics_path, index=False)
     _plot_metrics(
         metrics_df,
         full_fpr,
         full_tpr,
         auc_full,
         partial_auc_positive_thresholds,
+        marker_metrics_df,
         best_youden,
         best_dice,
         out_base,
@@ -354,12 +325,14 @@ def main():
         ),
         "auc_full_typea_scores": auc_full,
         "partial_auc_positive_thresholds": partial_auc_positive_thresholds,
+        "displayed_marker_thresholds": marker_thresholds,
         "best_youden": _row_payload(best_youden),
         "best_dice": _row_payload(best_dice),
         "outputs": {
             "metrics_csv": str(metrics_path),
-            "roc_png": f"{out_base}_roc.png",
-            "roc_pdf": f"{out_base}_roc.pdf",
+            "marker_threshold_metrics_csv": str(marker_metrics_path),
+            "sensitivity_specificity_png": f"{out_base}_sensitivity_specificity.png",
+            "sensitivity_specificity_pdf": f"{out_base}_sensitivity_specificity.pdf",
             "binary_maps": binary_outputs,
         },
     }
@@ -386,7 +359,8 @@ def main():
             f"dice={float(best_dice['dice']):.4f})"
         )
     print(f"Saved {metrics_path}")
-    print(f"Saved {out_base}_roc.png")
+    print(f"Saved {marker_metrics_path}")
+    print(f"Saved {out_base}_sensitivity_specificity.png")
     print(f"Saved {summary_path}")
 
 
