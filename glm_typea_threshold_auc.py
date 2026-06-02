@@ -16,7 +16,7 @@ from sklearn.metrics import roc_auc_score, roc_curve
 DEFAULT_STANDARD_GLM = Path("data/z_valu_standard_glm.nii.gz")
 DEFAULT_TYPEA_GLM = Path("data/z_value_typaA.nii.gz")
 DEFAULT_OUT_BASE = Path("figures/typea_vs_standard_glm_threshold_auc")
-DEFAULT_REFERENCE_Z_THRESHOLD = 3.1
+DEFAULT_REFERENCE_Z_THRESHOLD = 0.0
 DEFAULT_MARKER_THRESHOLDS = tuple(np.arange(0.5, 6.51, 0.5))
 COUNT_COLUMNS = {
     "selected_voxels",
