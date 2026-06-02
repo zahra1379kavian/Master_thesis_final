@@ -15,8 +15,10 @@ from sklearn.metrics import roc_auc_score, roc_curve
 
 DEFAULT_STANDARD_GLM = Path("data/z_valu_standard_glm.nii.gz")
 DEFAULT_TYPEA_GLM = Path("data/z_value_typaA.nii.gz")
+DEFAULT_TYPED_GLM = Path("data/z_value_typeD.nii.gz")
+DEFAULT_WEIGHT_MAP = Path("data/voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5.nii.gz")
 DEFAULT_OUT_BASE = Path("figures/typea_vs_standard_glm_threshold_auc")
-DEFAULT_REFERENCE_Z_THRESHOLD = 0.0
+DEFAULT_REFERENCE_Z_THRESHOLD = 3.1
 DEFAULT_MARKER_THRESHOLDS = tuple(np.arange(0.5, 6.51, 0.5))
 COUNT_COLUMNS = {
     "selected_voxels",
@@ -55,19 +57,24 @@ def _analysis_mask(reference_data, typea_data, mode):
     raise ValueError(f"Unknown analysis mask mode: {mode}")
 
 
+def _heatmap_support_mask(standard_data, typea_data, typed_data, weight_data):
+    from compare_glm_region_highlights import _build_analysis_mask
+
+    return _build_analysis_mask(
+        {
+            "Standard GLM": standard_data,
+            "GLMsingle Type A": typea_data,
+            "GLMsingle Type D": typed_data,
+            "Optimization weights": weight_data,
+        }
+    )
+
+
 def _safe_ratio(numerator, denominator):
     return float(numerator / denominator) if denominator else np.nan
 
 
-def _metrics_for_threshold(reference_mask, scores, analysis_mask, threshold):
-    predicted_mask = analysis_mask & (scores >= threshold)
-    gold = reference_mask & analysis_mask
-    background = analysis_mask & ~reference_mask
-
-    tp = int(np.count_nonzero(predicted_mask & gold))
-    fp = int(np.count_nonzero(predicted_mask & background))
-    fn = int(np.count_nonzero(~predicted_mask & gold))
-    tn = int(np.count_nonzero(~predicted_mask & background))
+def _metrics_from_counts(threshold, tp, fp, tn, fn):
     selected = tp + fp
     gold_count = tp + fn
     background_count = tn + fp
@@ -80,10 +87,10 @@ def _metrics_for_threshold(reference_mask, scores, analysis_mask, threshold):
         "selected_voxels": int(selected),
         "reference_voxels": int(gold_count),
         "overlap_voxels": int(tp),
-        "tp": tp,
-        "fp": fp,
-        "tn": tn,
-        "fn": fn,
+        "tp": int(tp),
+        "fp": int(fp),
+        "tn": int(tn),
+        "fn": int(fn),
         "sensitivity": sensitivity,
         "specificity": specificity,
         "false_positive_rate": 1.0 - specificity if np.isfinite(specificity) else np.nan,
@@ -101,15 +108,45 @@ def _metrics_for_threshold(reference_mask, scores, analysis_mask, threshold):
     }
 
 
+def _metrics_for_threshold(reference_mask, scores, analysis_mask, threshold):
+    predicted_mask = analysis_mask & (scores >= threshold)
+    gold = reference_mask & analysis_mask
+    background = analysis_mask & ~reference_mask
+
+    tp = int(np.count_nonzero(predicted_mask & gold))
+    fp = int(np.count_nonzero(predicted_mask & background))
+    fn = int(np.count_nonzero(~predicted_mask & gold))
+    tn = int(np.count_nonzero(~predicted_mask & background))
+    return _metrics_from_counts(threshold, tp, fp, tn, fn)
+
+
 def _threshold_sweep(reference_mask, scores, analysis_mask):
-    positive_scores = scores[analysis_mask & (scores > 0)]
+    positive_mask = analysis_mask & (scores > 0)
+    positive_scores = scores[positive_mask]
     if positive_scores.size == 0:
         raise RuntimeError("No positive Type A z values are available in the analysis mask.")
-    thresholds = np.unique(positive_scores)
-    rows = [_metrics_for_threshold(reference_mask, scores, analysis_mask, np.inf)]
+
+    gold_count = int(np.count_nonzero(reference_mask & analysis_mask))
+    background_count = int(np.count_nonzero(analysis_mask & ~reference_mask))
+    order = np.argsort(positive_scores)[::-1]
+    sorted_scores = positive_scores[order]
+    sorted_gold = reference_mask[positive_mask][order]
+    group_ends = np.flatnonzero(np.diff(sorted_scores) != 0) + 1
+    group_ends = np.r_[group_ends, sorted_scores.size]
+    cumulative_tp = np.cumsum(sorted_gold, dtype=np.int64)[group_ends - 1]
+    cumulative_selected = group_ends.astype(np.int64, copy=False)
+    cumulative_fp = cumulative_selected - cumulative_tp
+
+    rows = [_metrics_from_counts(np.inf, 0, 0, background_count, gold_count)]
     rows.extend(
-        _metrics_for_threshold(reference_mask, scores, analysis_mask, threshold)
-        for threshold in thresholds[::-1]
+        _metrics_from_counts(
+            sorted_scores[end - 1],
+            int(tp),
+            int(fp),
+            int(background_count - fp),
+            int(gold_count - tp),
+        )
+        for end, tp, fp in zip(group_ends, cumulative_tp, cumulative_fp)
     )
     return pd.DataFrame(rows)
 
@@ -265,6 +302,8 @@ def build_parser():
     )
     parser.add_argument("--standard-glm", type=Path, default=DEFAULT_STANDARD_GLM)
     parser.add_argument("--typea-glm", type=Path, default=DEFAULT_TYPEA_GLM)
+    parser.add_argument("--typed-glm", type=Path, default=DEFAULT_TYPED_GLM)
+    parser.add_argument("--weight-map", type=Path, default=DEFAULT_WEIGHT_MAP)
     parser.add_argument("--out-base", type=Path, default=DEFAULT_OUT_BASE)
     parser.add_argument("--reference-z-threshold", type=float, default=DEFAULT_REFERENCE_Z_THRESHOLD)
     parser.add_argument(
@@ -276,10 +315,11 @@ def build_parser():
     )
     parser.add_argument(
         "--analysis-mask",
-        choices=("finite-both", "typea-nonzero", "typea-positive"),
+        choices=("finite-both", "typea-nonzero", "typea-positive", "heatmap-support"),
         default="finite-both",
         help=(
-            "Voxel set used for TP/FP/TN/FN counts. Default uses every voxel finite in both maps."
+            "Voxel set used for TP/FP/TN/FN counts. Default uses every voxel finite in both maps. "
+            "heatmap-support matches the support mask in compare_glm_region_highlights.py."
         ),
     )
     parser.add_argument(
@@ -298,7 +338,17 @@ def main():
 
     standard_data = np.asarray(standard_img.get_fdata(), dtype=float)
     typea_data = np.asarray(typea_img.get_fdata(), dtype=float)
-    analysis_mask = _analysis_mask(standard_data, typea_data, args.analysis_mask)
+    if args.analysis_mask == "heatmap-support":
+        typed_img = _load_img(args.typed_glm)
+        weight_img = _load_img(args.weight_map)
+        _check_same_grid(standard_img, typed_img)
+        _check_same_grid(standard_img, weight_img)
+        typed_data = np.asarray(typed_img.get_fdata(), dtype=float)
+        weight_data = np.asarray(weight_img.get_fdata(), dtype=float)
+        analysis_mask = _heatmap_support_mask(standard_data, typea_data, typed_data, weight_data)
+        analysis_mask &= np.isfinite(standard_data) & np.isfinite(typea_data)
+    else:
+        analysis_mask = _analysis_mask(standard_data, typea_data, args.analysis_mask)
     if not np.any(analysis_mask):
         raise RuntimeError("The analysis mask is empty.")
 
@@ -360,6 +410,8 @@ def main():
         "inputs": {
             "standard_glm": str(args.standard_glm),
             "typea_glm": str(args.typea_glm),
+            "typed_glm": str(args.typed_glm) if args.analysis_mask == "heatmap-support" else None,
+            "weight_map": str(args.weight_map) if args.analysis_mask == "heatmap-support" else None,
         },
         "reference": {
             "definition": f"standard GLM z >= {float(args.reference_z_threshold):g}",
