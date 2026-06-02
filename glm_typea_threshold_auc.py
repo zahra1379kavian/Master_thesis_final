@@ -98,9 +98,6 @@ def _metrics_from_counts(threshold, tp, fp, tn, fn):
         "negative_predictive_value": _safe_ratio(tn, tn + fn),
         "accuracy": _safe_ratio(tp + tn, tp + fp + tn + fn),
         "balanced_accuracy": np.nanmean([sensitivity, specificity]),
-        "youden_index": sensitivity + specificity - 1.0
-        if np.isfinite(sensitivity) and np.isfinite(specificity)
-        else np.nan,
         "dice": _safe_ratio(2 * tp, 2 * tp + fp + fn),
         "jaccard": _safe_ratio(tp, union),
         "overlap_of_reference": _safe_ratio(tp, gold_count),
@@ -178,90 +175,97 @@ def _marker_metrics(reference_mask, scores, analysis_mask, thresholds):
     return pd.DataFrame(rows)
 
 
-def _plot_metrics(
-    metrics_df,
-    full_fpr,
-    full_tpr,
-    auc_full,
-    partial_auc_positive_thresholds,
-    marker_metrics_df,
-    best_youden,
-    best_dice,
-    out_base,
-):
-    finite_metrics = metrics_df[np.isfinite(metrics_df["threshold"])].copy()
-    marker_metrics_df = marker_metrics_df.sort_values("threshold").copy()
+def _plot_metrics(candidate_results, out_base):
+    n_rows = len(candidate_results)
+    fig, axes = plt.subplots(n_rows, 2, figsize=(13.8, 5.35 * n_rows), facecolor="white")
+    if n_rows == 1:
+        axes = np.asarray([axes])
 
-    fig, axes = plt.subplots(1, 2, figsize=(13.8, 5.6), facecolor="white")
-
-    axes[0].plot(
-        marker_metrics_df["false_positive_rate"],
-        marker_metrics_df["sensitivity"],
-        color="#1b6ca8",
-        linewidth=1.8,
-        marker="o",
-        markersize=6,
-    )
     high_threshold_offsets = {
         5.0: (12, 24),
         5.5: (12, 13),
         6.0: (12, 2),
         6.5: (12, -9),
     }
-    for index, row in enumerate(marker_metrics_df.itertuples(index=False)):
-        offset_x = 5
-        offset_y = 5 if index % 2 == 0 else -13
-        if row.threshold in high_threshold_offsets:
-            offset_x, offset_y = high_threshold_offsets[row.threshold]
-        axes[0].annotate(
-            f"{row.threshold:g}",
-            (row.false_positive_rate, row.sensitivity),
-            xytext=(offset_x, offset_y),
-            textcoords="offset points",
-            fontsize=8,
-            color="#111111",
-        )
-    axes[0].set_title("Sensitivity vs 1 - specificity")
-    axes[0].set_xlabel("1 - specificity")
-    axes[0].set_ylabel("Sensitivity")
-    axes[0].set_xlim(0.0, min(1.0, float(marker_metrics_df["false_positive_rate"].max()) + 0.004))
-    axes[0].set_ylim(-0.02, min(1.0, float(marker_metrics_df["sensitivity"].max()) + 0.08))
-    axes[0].grid(True, linewidth=0.6, alpha=0.25)
+    for row_index, result in enumerate(candidate_results):
+        metrics_df = result["metrics_df"]
+        marker_metrics_df = result["marker_metrics_df"].sort_values("threshold").copy()
+        finite_metrics = metrics_df[np.isfinite(metrics_df["threshold"])].copy()
+        best_dice = result["best_dice"]
+        label = result["label"]
+        left_ax, right_ax = axes[row_index]
 
-    axes[1].plot(
-        finite_metrics["threshold"],
-        finite_metrics["sensitivity"],
-        color="#1b6ca8",
-        linewidth=1.8,
-        label="Sensitivity",
-    )
-    axes[1].plot(
-        finite_metrics["threshold"],
-        finite_metrics["specificity"],
-        color="#7d5fb2",
-        linewidth=1.8,
-        label="Specificity",
-    )
-    axes[1].plot(
-        finite_metrics["threshold"],
-        finite_metrics["dice"],
-        color="#2f8f5b",
-        linewidth=1.8,
-        label="Dice overlap",
-    )
-    for threshold in marker_metrics_df["threshold"]:
-        axes[1].axvline(threshold, color="#bbbbbb", linewidth=0.7, alpha=0.28)
-    if best_youden is not None:
-        axes[1].axvline(best_youden["threshold"], color="#d04f2f", linewidth=1.3, linestyle="--")
-    if best_dice is not None:
-        axes[1].axvline(best_dice["threshold"], color="#2f8f5b", linewidth=1.3, linestyle=":")
-    axes[1].set_title("Metrics across positive Type A thresholds")
-    axes[1].set_xlabel("Type A z threshold")
-    axes[1].set_ylabel("Metric value")
-    axes[1].set_xlim(0.0, max(float(finite_metrics["threshold"].max()), float(marker_metrics_df["threshold"].max())))
-    axes[1].set_ylim(-0.01, 1.01)
-    axes[1].grid(True, linewidth=0.6, alpha=0.25)
-    axes[1].legend(loc="best", fontsize=9)
+        left_ax.plot(
+            marker_metrics_df["false_positive_rate"],
+            marker_metrics_df["sensitivity"],
+            color="#1b6ca8",
+            linewidth=1.8,
+            marker="o",
+            markersize=6,
+        )
+        for index, row in enumerate(marker_metrics_df.itertuples(index=False)):
+            offset_x = 5
+            offset_y = 5 if index % 2 == 0 else -13
+            if row.threshold in high_threshold_offsets:
+                offset_x, offset_y = high_threshold_offsets[row.threshold]
+            left_ax.annotate(
+                f"{row.threshold:g}",
+                (row.false_positive_rate, row.sensitivity),
+                xytext=(offset_x, offset_y),
+                textcoords="offset points",
+                fontsize=8,
+                color="#111111",
+            )
+        left_ax.set_title(f"{label}: sensitivity vs 1 - specificity")
+        left_ax.set_xlabel("1 - specificity")
+        left_ax.set_ylabel("Sensitivity")
+        left_ax.set_xlim(
+            0.0,
+            min(1.0, float(marker_metrics_df["false_positive_rate"].max()) + 0.004),
+        )
+        left_ax.set_ylim(
+            -0.02,
+            min(1.0, float(marker_metrics_df["sensitivity"].max()) + 0.08),
+        )
+        left_ax.grid(True, linewidth=0.6, alpha=0.25)
+
+        right_ax.plot(
+            finite_metrics["threshold"],
+            finite_metrics["sensitivity"],
+            color="#1b6ca8",
+            linewidth=1.8,
+            label="Sensitivity",
+        )
+        right_ax.plot(
+            finite_metrics["threshold"],
+            finite_metrics["specificity"],
+            color="#7d5fb2",
+            linewidth=1.8,
+            label="Specificity",
+        )
+        right_ax.plot(
+            finite_metrics["threshold"],
+            finite_metrics["dice"],
+            color="#2f8f5b",
+            linewidth=1.8,
+            label="Dice overlap",
+        )
+        for threshold in marker_metrics_df["threshold"]:
+            right_ax.axvline(threshold, color="#bbbbbb", linewidth=0.7, alpha=0.28)
+        if best_dice is not None:
+            right_ax.axvline(
+                best_dice["threshold"], color="#2f8f5b", linewidth=1.3, linestyle=":"
+            )
+        right_ax.set_title(f"{label}: metrics across positive thresholds")
+        right_ax.set_xlabel(f"{label} z threshold")
+        right_ax.set_ylabel("Metric value")
+        right_ax.set_xlim(
+            0.0,
+            max(float(finite_metrics["threshold"].max()), float(marker_metrics_df["threshold"].max())),
+        )
+        right_ax.set_ylim(-0.01, 1.01)
+        right_ax.grid(True, linewidth=0.6, alpha=0.25)
+        right_ax.legend(loc="best", fontsize=9)
 
     fig.tight_layout()
     fig.savefig(f"{out_base}_sensitivity_1minus_specificity.png", dpi=220, bbox_inches="tight")
@@ -293,10 +297,40 @@ def _row_payload(row):
     return payload
 
 
+def _candidate_result(label, slug, data, reference_mask, analysis_mask, marker_thresholds):
+    metrics_df = _threshold_sweep(reference_mask, data, analysis_mask)
+    marker_metrics_df = _marker_metrics(reference_mask, data, analysis_mask, marker_thresholds)
+    best_dice = _best_row(metrics_df, "dice")
+
+    labels = reference_mask[analysis_mask].astype(np.uint8)
+    scores = data[analysis_mask]
+    auc_full = float(roc_auc_score(labels, scores))
+    full_fpr, full_tpr, _ = roc_curve(labels, scores)
+    return {
+        "label": label,
+        "slug": slug,
+        "data": data,
+        "metrics_df": metrics_df,
+        "marker_metrics_df": marker_metrics_df,
+        "best_dice": best_dice,
+        "auc_full": auc_full,
+        "full_fpr": full_fpr,
+        "full_tpr": full_tpr,
+        "partial_auc_positive_thresholds": _positive_threshold_auc(metrics_df),
+        "positive_voxels_in_analysis_mask": int(np.count_nonzero(analysis_mask & (data > 0))),
+    }
+
+
+def _with_candidate_column(df, label):
+    out = df.copy()
+    out.insert(0, "candidate", label)
+    return out
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         description=(
-            "Sweep positive thresholds in a GLMsingle Type A z map against a "
+            "Sweep positive thresholds in GLMsingle z maps against a "
             "standard-GLM z-threshold gold-standard map."
         )
     )
@@ -311,7 +345,12 @@ def build_parser():
         type=float,
         nargs="+",
         default=list(DEFAULT_MARKER_THRESHOLDS),
-        help="Type A z thresholds to mark explicitly on the sensitivity vs 1-specificity plot.",
+        help="Candidate z thresholds to mark explicitly on the sensitivity vs 1-specificity plot.",
+    )
+    parser.add_argument(
+        "--include-typed-row",
+        action="store_true",
+        help="Add a second plot row and outputs for GLMsingle Type D.",
     )
     parser.add_argument(
         "--analysis-mask",
@@ -338,17 +377,23 @@ def main():
 
     standard_data = np.asarray(standard_img.get_fdata(), dtype=float)
     typea_data = np.asarray(typea_img.get_fdata(), dtype=float)
-    if args.analysis_mask == "heatmap-support":
+    typed_img = None
+    typed_data = None
+    if args.include_typed_row or args.analysis_mask == "heatmap-support":
         typed_img = _load_img(args.typed_glm)
-        weight_img = _load_img(args.weight_map)
         _check_same_grid(standard_img, typed_img)
-        _check_same_grid(standard_img, weight_img)
         typed_data = np.asarray(typed_img.get_fdata(), dtype=float)
+
+    if args.analysis_mask == "heatmap-support":
+        weight_img = _load_img(args.weight_map)
+        _check_same_grid(standard_img, weight_img)
         weight_data = np.asarray(weight_img.get_fdata(), dtype=float)
         analysis_mask = _heatmap_support_mask(standard_data, typea_data, typed_data, weight_data)
         analysis_mask &= np.isfinite(standard_data) & np.isfinite(typea_data)
     else:
         analysis_mask = _analysis_mask(standard_data, typea_data, args.analysis_mask)
+    if args.include_typed_row:
+        analysis_mask &= np.isfinite(typed_data)
     if not np.any(analysis_mask):
         raise RuntimeError("The analysis mask is empty.")
 
@@ -358,36 +403,35 @@ def main():
     if np.all(reference_mask[analysis_mask]):
         raise RuntimeError("The analysis mask contains no reference-negative voxels.")
 
-    metrics_df = _threshold_sweep(reference_mask, typea_data, analysis_mask)
     marker_thresholds = sorted(set(float(threshold) for threshold in args.marker_thresholds))
-    marker_metrics_df = _marker_metrics(reference_mask, typea_data, analysis_mask, marker_thresholds)
-    best_youden = _best_row(metrics_df, "youden_index")
-    best_dice = _best_row(metrics_df, "dice")
-
-    labels = reference_mask[analysis_mask].astype(np.uint8)
-    scores = typea_data[analysis_mask]
-    auc_full = float(roc_auc_score(labels, scores))
-    full_fpr, full_tpr, _ = roc_curve(labels, scores)
-    partial_auc_positive_thresholds = _positive_threshold_auc(metrics_df)
+    candidates = [("GLMsingle Type A", "typeA", typea_data)]
+    if args.include_typed_row:
+        candidates.append(("GLMsingle Type D", "typeD", typed_data))
+    candidate_results = [
+        _candidate_result(label, slug, data, reference_mask, analysis_mask, marker_thresholds)
+        for label, slug, data in candidates
+    ]
+    typea_result = candidate_results[0]
 
     out_base = args.out_base
     out_base.parent.mkdir(parents=True, exist_ok=True)
     metrics_path = Path(f"{out_base}_metrics.csv")
     marker_metrics_path = Path(f"{out_base}_marker_threshold_metrics.csv")
     summary_path = Path(f"{out_base}_summary.json")
+    metrics_df = pd.concat(
+        [_with_candidate_column(result["metrics_df"], result["label"]) for result in candidate_results],
+        ignore_index=True,
+    )
+    marker_metrics_df = pd.concat(
+        [
+            _with_candidate_column(result["marker_metrics_df"], result["label"])
+            for result in candidate_results
+        ],
+        ignore_index=True,
+    )
     metrics_df.to_csv(metrics_path, index=False)
     marker_metrics_df.to_csv(marker_metrics_path, index=False)
-    _plot_metrics(
-        metrics_df,
-        full_fpr,
-        full_tpr,
-        auc_full,
-        partial_auc_positive_thresholds,
-        marker_metrics_df,
-        best_youden,
-        best_dice,
-        out_base,
-    )
+    _plot_metrics(candidate_results, out_base)
 
     binary_outputs = {}
     if not args.no_binary_maps:
@@ -395,22 +439,30 @@ def main():
         _save_binary_map(reference_mask, standard_img, reference_path)
         binary_outputs["reference"] = str(reference_path)
 
-        if best_youden is not None:
-            threshold = float(best_youden["threshold"])
-            path = Path(f"{out_base}_typeA_youden_zge{threshold:.6g}_binary.nii.gz")
-            _save_binary_map(analysis_mask & (typea_data >= threshold), standard_img, path)
-            binary_outputs["typeA_best_youden"] = str(path)
-        if best_dice is not None:
-            threshold = float(best_dice["threshold"])
-            path = Path(f"{out_base}_typeA_dice_zge{threshold:.6g}_binary.nii.gz")
-            _save_binary_map(analysis_mask & (typea_data >= threshold), standard_img, path)
-            binary_outputs["typeA_best_dice"] = str(path)
+        for result in candidate_results:
+            if result["best_dice"] is not None:
+                threshold = float(result["best_dice"]["threshold"])
+                path = Path(f"{out_base}_{result['slug']}_dice_zge{threshold:.6g}_binary.nii.gz")
+                _save_binary_map(analysis_mask & (result["data"] >= threshold), standard_img, path)
+                binary_outputs[f"{result['slug']}_best_dice"] = str(path)
+
+    candidate_summaries = {
+        result["label"]: {
+            "positive_voxels_in_analysis_mask": result["positive_voxels_in_analysis_mask"],
+            "auc_full_scores": result["auc_full"],
+            "partial_auc_positive_thresholds": result["partial_auc_positive_thresholds"],
+            "best_dice": _row_payload(result["best_dice"]),
+        }
+        for result in candidate_results
+    }
 
     summary = {
         "inputs": {
             "standard_glm": str(args.standard_glm),
             "typea_glm": str(args.typea_glm),
-            "typed_glm": str(args.typed_glm) if args.analysis_mask == "heatmap-support" else None,
+            "typed_glm": str(args.typed_glm)
+            if args.include_typed_row or args.analysis_mask == "heatmap-support"
+            else None,
             "weight_map": str(args.weight_map) if args.analysis_mask == "heatmap-support" else None,
         },
         "reference": {
@@ -424,11 +476,11 @@ def main():
         "typea_positive_voxels_in_analysis_mask": int(
             np.count_nonzero(analysis_mask & (typea_data > 0))
         ),
-        "auc_full_typea_scores": auc_full,
-        "partial_auc_positive_thresholds": partial_auc_positive_thresholds,
+        "auc_full_typea_scores": typea_result["auc_full"],
+        "partial_auc_positive_thresholds": typea_result["partial_auc_positive_thresholds"],
         "displayed_marker_thresholds": marker_thresholds,
-        "best_youden": _row_payload(best_youden),
-        "best_dice": _row_payload(best_dice),
+        "best_dice": _row_payload(typea_result["best_dice"]),
+        "candidates": candidate_summaries,
         "outputs": {
             "metrics_csv": str(metrics_path),
             "marker_threshold_metrics_csv": str(marker_metrics_path),
@@ -441,24 +493,21 @@ def main():
 
     print(f"Analysis mask voxels: {summary['analysis_mask']['voxels']:,}")
     print(f"Reference voxels: {summary['reference']['voxels']:,}")
-    print(f"Full-score ROC AUC: {auc_full:.4f}")
-    print(f"Positive-threshold partial ROC AUC: {partial_auc_positive_thresholds:.4f}")
-    if best_youden is not None:
+    for result in candidate_results:
+        print(f"{result['label']} full-score ROC AUC: {result['auc_full']:.4f}")
         print(
-            "Best Youden threshold: "
-            f"{float(best_youden['threshold']):.6g} "
-            f"(sensitivity={float(best_youden['sensitivity']):.4f}, "
-            f"specificity={float(best_youden['specificity']):.4f}, "
-            f"dice={float(best_youden['dice']):.4f})"
+            f"{result['label']} positive-threshold partial ROC AUC: "
+            f"{result['partial_auc_positive_thresholds']:.4f}"
         )
-    if best_dice is not None:
-        print(
-            "Best Dice threshold: "
-            f"{float(best_dice['threshold']):.6g} "
-            f"(sensitivity={float(best_dice['sensitivity']):.4f}, "
-            f"specificity={float(best_dice['specificity']):.4f}, "
-            f"dice={float(best_dice['dice']):.4f})"
-        )
+        if result["best_dice"] is not None:
+            best_dice = result["best_dice"]
+            print(
+                f"{result['label']} best Dice threshold: "
+                f"{float(best_dice['threshold']):.6g} "
+                f"(sensitivity={float(best_dice['sensitivity']):.4f}, "
+                f"specificity={float(best_dice['specificity']):.4f}, "
+                f"dice={float(best_dice['dice']):.4f})"
+            )
     print(f"Saved {metrics_path}")
     print(f"Saved {marker_metrics_path}")
     print(f"Saved {out_base}_sensitivity_1minus_specificity.png")
