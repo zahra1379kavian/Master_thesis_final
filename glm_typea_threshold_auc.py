@@ -21,6 +21,7 @@ DEFAULT_WEIGHT_MAP = Path("data/voxel_weights_task1_bold0.6_beta0.6_smooth1.25_g
 DEFAULT_OUT_BASE = Path("figures/typea_vs_standard_glm_threshold_auc")
 DEFAULT_REFERENCE_Z_THRESHOLD = 3.1
 DEFAULT_SELECTED_THRESHOLD = 1.5
+DEFAULT_TYPED_SELECTED_THRESHOLD = 0.86
 DEFAULT_MARKER_THRESHOLDS = tuple(np.arange(0.5, 6.51, 0.5))
 COUNT_COLUMNS = {
     "selected_voxels",
@@ -183,9 +184,15 @@ def _rank_tie_correction(values):
     return float(np.sum(counts**3 - counts))
 
 
-def _kendall_w_between_maps(standard_data, candidate_data, analysis_mask):
-    standard_values = standard_data[analysis_mask]
-    candidate_values = candidate_data[analysis_mask]
+def _kendall_w_between_maps(
+    standard_data,
+    candidate_data,
+    rank_mask,
+    reference_z_threshold,
+    candidate_z_threshold,
+):
+    standard_values = standard_data[rank_mask]
+    candidate_values = candidate_data[rank_mask]
     ranks = np.vstack(
         [
             rankdata(-standard_values, method="average"),
@@ -206,6 +213,12 @@ def _kendall_w_between_maps(standard_data, candidate_data, analysis_mask):
         "models": "Standard GLM; candidate",
         "n_models": int(n_models),
         "n_voxels": int(n_voxels),
+        "rank_mask_definition": (
+            "heatmap-support AND "
+            f"(standard GLM z >= {reference_z_threshold:g} OR candidate z >= {candidate_z_threshold:g})"
+        ),
+        "standard_z_threshold": float(reference_z_threshold),
+        "candidate_z_threshold": float(candidate_z_threshold),
         "rank_basis": "z_value",
         "rank_direction": "descending_z",
         "rank_method": "average_ranks_for_ties",
@@ -214,7 +227,7 @@ def _kendall_w_between_maps(standard_data, candidate_data, analysis_mask):
     }
 
 
-def _plot_metrics(candidate_results, out_base, selected_threshold):
+def _plot_metrics(candidate_results, out_base):
     n_rows = len(candidate_results)
     fig, axes = plt.subplots(n_rows, 2, figsize=(13.8, 5.35 * n_rows), facecolor="white")
     if n_rows == 1:
@@ -233,7 +246,7 @@ def _plot_metrics(candidate_results, out_base, selected_threshold):
         finite_metrics = metrics_df[np.isfinite(metrics_df["threshold"])].copy()
         best_dice = result["best_dice"]
         label = result["label"]
-        is_selected_candidate = result["slug"] == "typeA"
+        selected_threshold = float(result["selected_threshold"])
         left_ax, right_ax = axes[row_index]
 
         left_ax.plot(
@@ -262,7 +275,7 @@ def _plot_metrics(candidate_results, out_base, selected_threshold):
         selected_rows = marker_metrics_df[
             np.isclose(marker_metrics_df["threshold"], selected_threshold)
         ]
-        if is_selected_candidate and not selected_rows.empty:
+        if not selected_rows.empty:
             selected_row = selected_rows.iloc[0]
             left_ax.scatter(
                 [selected_row["false_positive_rate"]],
@@ -276,34 +289,6 @@ def _plot_metrics(candidate_results, out_base, selected_threshold):
             left_ax.annotate(
                 f"Selected\nz = {selected_threshold:g}",
                 (selected_row["false_positive_rate"], selected_row["sensitivity"]),
-                xytext=(16, 2),
-                textcoords="offset points",
-                fontsize=8.5,
-                color=selected_color,
-                ha="left",
-                va="center",
-                arrowprops={
-                    "arrowstyle": "-",
-                    "color": selected_color,
-                    "linewidth": 0.9,
-                    "shrinkA": 2,
-                    "shrinkB": 4,
-                },
-            )
-        elif result["slug"] == "typeD" and best_dice is not None:
-            best_dice_threshold = float(best_dice["threshold"])
-            left_ax.scatter(
-                [float(best_dice["false_positive_rate"])],
-                [float(best_dice["sensitivity"])],
-                s=95,
-                facecolors="white",
-                edgecolors=selected_color,
-                linewidths=1.8,
-                zorder=5,
-            )
-            left_ax.annotate(
-                f"Selected\nz = {best_dice_threshold:.2f}",
-                (float(best_dice["false_positive_rate"]), float(best_dice["sensitivity"])),
                 xytext=(16, 2),
                 textcoords="offset points",
                 fontsize=8.5,
@@ -372,24 +357,14 @@ def _plot_metrics(candidate_results, out_base, selected_threshold):
         )
         for threshold in marker_metrics_df["threshold"]:
             right_ax.axvline(threshold, color="#bbbbbb", linewidth=0.7, alpha=0.28)
-        if is_selected_candidate:
-            right_ax.axvline(
-                selected_threshold,
-                color=selected_color,
-                linewidth=1.6,
-                linestyle="--",
-                label=f"Selected Type A threshold (z = {selected_threshold:g})",
-            )
-        elif result["slug"] == "typeD" and best_dice is not None:
-            best_dice_threshold = float(best_dice["threshold"])
-            right_ax.axvline(
-                best_dice_threshold,
-                color=selected_color,
-                linewidth=1.6,
-                linestyle="--",
-                label=f"Selected Type D threshold (z = {best_dice_threshold:.2f})",
-            )
-        elif best_dice is not None and not np.isclose(
+        right_ax.axvline(
+            selected_threshold,
+            color=selected_color,
+            linewidth=1.6,
+            linestyle="--",
+            label=f"Selected threshold (z = {selected_threshold:g})",
+        )
+        if best_dice is not None and not np.isclose(
             float(best_dice["threshold"]), selected_threshold, atol=0.05
         ):
             best_dice_threshold = float(best_dice["threshold"])
@@ -410,6 +385,10 @@ def _plot_metrics(candidate_results, out_base, selected_threshold):
     fig.tight_layout()
     fig.savefig(f"{out_base}_sensitivity_1minus_specificity.png", dpi=300, bbox_inches="tight")
     fig.savefig(f"{out_base}_sensitivity_1minus_specificity.pdf", bbox_inches="tight")
+    fig.savefig(f"{out_base}_sensitivity_specificity.png", dpi=300, bbox_inches="tight")
+    fig.savefig(f"{out_base}_sensitivity_specificity.pdf", bbox_inches="tight")
+    fig.savefig(f"{out_base}_roc.png", dpi=300, bbox_inches="tight")
+    fig.savefig(f"{out_base}_roc.pdf", bbox_inches="tight")
     plt.close(fig)
 
 
@@ -433,7 +412,17 @@ def _row_payload(row):
     return payload
 
 
-def _candidate_result(label, slug, data, standard_data, reference_mask, analysis_mask, marker_thresholds):
+def _candidate_result(
+    label,
+    slug,
+    data,
+    standard_data,
+    reference_mask,
+    analysis_mask,
+    marker_thresholds,
+    reference_z_threshold,
+    selected_threshold,
+):
     metrics_df = _threshold_sweep(reference_mask, data, analysis_mask)
     marker_metrics_df = _marker_metrics(reference_mask, data, analysis_mask, marker_thresholds)
     best_dice = _best_row(metrics_df, "dice")
@@ -449,12 +438,23 @@ def _candidate_result(label, slug, data, standard_data, reference_mask, analysis
         "metrics_df": metrics_df,
         "marker_metrics_df": marker_metrics_df,
         "best_dice": best_dice,
+        "selected_threshold": float(selected_threshold),
         "auc_full": auc_full,
         "full_fpr": full_fpr,
         "full_tpr": full_tpr,
         "partial_auc_positive_thresholds": _positive_threshold_auc(metrics_df),
         "positive_voxels_in_analysis_mask": int(np.count_nonzero(analysis_mask & (data > 0))),
-        "rank_concordance": _kendall_w_between_maps(standard_data, data, analysis_mask),
+        "rank_concordance": _kendall_w_between_maps(
+            standard_data,
+            data,
+            analysis_mask
+            & (
+                (standard_data >= float(reference_z_threshold))
+                | (data >= float(selected_threshold))
+            ),
+            reference_z_threshold,
+            selected_threshold,
+        ),
     }
 
 
@@ -482,6 +482,12 @@ def build_parser():
         type=float,
         default=DEFAULT_SELECTED_THRESHOLD,
         help="Rounded Type A z threshold to highlight as the selected paper threshold.",
+    )
+    parser.add_argument(
+        "--typed-selected-threshold",
+        type=float,
+        default=DEFAULT_TYPED_SELECTED_THRESHOLD,
+        help="Rounded Type D z threshold to highlight as the selected paper threshold.",
     )
     parser.add_argument(
         "--marker-thresholds",
@@ -547,12 +553,11 @@ def main():
         raise RuntimeError("The analysis mask contains no reference-negative voxels.")
 
     selected_threshold = float(args.selected_threshold)
-    marker_thresholds = sorted(
-        {float(threshold) for threshold in args.marker_thresholds} | {selected_threshold}
-    )
-    candidates = [("GLMsingle Type A", "typeA", typea_data)]
+    typed_selected_threshold = float(args.typed_selected_threshold)
+    base_marker_thresholds = {float(threshold) for threshold in args.marker_thresholds}
+    candidates = [("GLMsingle Type A", "typeA", typea_data, selected_threshold)]
     if args.include_typed_row:
-        candidates.append(("GLMsingle Type D", "typeD", typed_data))
+        candidates.append(("GLMsingle Type D", "typeD", typed_data, typed_selected_threshold))
     candidate_results = [
         _candidate_result(
             label,
@@ -561,9 +566,11 @@ def main():
             standard_data,
             reference_mask,
             analysis_mask,
-            marker_thresholds,
+            sorted(base_marker_thresholds | {candidate_selected_threshold}),
+            args.reference_z_threshold,
+            candidate_selected_threshold,
         )
-        for label, slug, data in candidates
+        for label, slug, data, candidate_selected_threshold in candidates
     ]
     typea_result = candidate_results[0]
 
@@ -603,7 +610,7 @@ def main():
         ]
     )
     rank_concordance_df.to_csv(rank_concordance_path, index=False)
-    _plot_metrics(candidate_results, out_base, selected_threshold)
+    _plot_metrics(candidate_results, out_base)
 
     binary_outputs = {}
     if not args.no_binary_maps:
@@ -623,6 +630,7 @@ def main():
             "positive_voxels_in_analysis_mask": result["positive_voxels_in_analysis_mask"],
             "auc_full_scores": result["auc_full"],
             "partial_auc_positive_thresholds": result["partial_auc_positive_thresholds"],
+            "selected_threshold_for_rank_concordance": result["selected_threshold"],
             "rank_concordance": result["rank_concordance"],
             "best_dice": _row_payload(result["best_dice"]),
         }
@@ -651,8 +659,17 @@ def main():
         ),
         "auc_full_typea_scores": typea_result["auc_full"],
         "partial_auc_positive_thresholds": typea_result["partial_auc_positive_thresholds"],
-        "displayed_marker_thresholds": marker_thresholds,
+        "displayed_marker_thresholds_by_candidate": {
+            result["label"]: [
+                float(threshold)
+                for threshold in result["marker_metrics_df"]["threshold"].sort_values().to_list()
+            ]
+            for result in candidate_results
+        },
         "selected_threshold_for_figure": selected_threshold,
+        "typed_selected_threshold_for_figure": typed_selected_threshold
+        if args.include_typed_row
+        else None,
         "best_dice": _row_payload(typea_result["best_dice"]),
         "candidates": candidate_summaries,
         "outputs": {
