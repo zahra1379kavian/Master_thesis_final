@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import nibabel as nib
 import numpy as np
 import pandas as pd
+from scipy.stats import rankdata
 from sklearn.metrics import roc_auc_score, roc_curve
 
 
@@ -176,6 +177,43 @@ def _marker_metrics(reference_mask, scores, analysis_mask, thresholds):
     return pd.DataFrame(rows)
 
 
+def _rank_tie_correction(values):
+    _, counts = np.unique(values, return_counts=True)
+    counts = counts[counts > 1].astype(np.float64)
+    return float(np.sum(counts**3 - counts))
+
+
+def _kendall_w_between_maps(standard_data, candidate_data, analysis_mask):
+    standard_values = standard_data[analysis_mask]
+    candidate_values = candidate_data[analysis_mask]
+    ranks = np.vstack(
+        [
+            rankdata(-standard_values, method="average"),
+            rankdata(-candidate_values, method="average"),
+        ]
+    )
+    n_models, n_voxels = ranks.shape
+    rank_sums = np.sum(ranks, axis=0)
+    sum_squares = float(np.sum((rank_sums - np.mean(rank_sums)) ** 2))
+    standard_tie_correction = _rank_tie_correction(standard_values)
+    candidate_tie_correction = _rank_tie_correction(candidate_values)
+    denominator = float(
+        n_models * n_models * (n_voxels**3 - n_voxels)
+        - n_models * (standard_tie_correction + candidate_tie_correction)
+    )
+    kendall_w = float(12.0 * sum_squares / denominator) if denominator > 0 else np.nan
+    return {
+        "models": "Standard GLM; candidate",
+        "n_models": int(n_models),
+        "n_voxels": int(n_voxels),
+        "rank_basis": "z_value",
+        "rank_direction": "descending_z",
+        "rank_method": "average_ranks_for_ties",
+        "tie_correction": "kendall_w_denominator",
+        "kendall_w": kendall_w,
+    }
+
+
 def _plot_metrics(candidate_results, out_base, selected_threshold):
     n_rows = len(candidate_results)
     fig, axes = plt.subplots(n_rows, 2, figsize=(13.8, 5.35 * n_rows), facecolor="white")
@@ -252,6 +290,24 @@ def _plot_metrics(candidate_results, out_base, selected_threshold):
                     "shrinkB": 4,
                 },
             )
+        rank_concordance = result.get("rank_concordance", {})
+        kendall_w = rank_concordance.get("kendall_w", np.nan)
+        if np.isfinite(kendall_w):
+            left_ax.text(
+                0.98,
+                0.05,
+                f"Kendall W = {kendall_w:.3f}",
+                transform=left_ax.transAxes,
+                ha="right",
+                va="bottom",
+                fontsize=9,
+                bbox={
+                    "facecolor": "white",
+                    "edgecolor": "#cccccc",
+                    "boxstyle": "round,pad=0.25",
+                    "alpha": 0.9,
+                },
+            )
         left_ax.set_title(f"{label}: sensitivity vs 1 - specificity")
         left_ax.set_xlabel("1 - specificity")
         left_ax.set_ylabel("Sensitivity")
@@ -299,9 +355,28 @@ def _plot_metrics(candidate_results, out_base, selected_threshold):
         if best_dice is not None and not np.isclose(
             float(best_dice["threshold"]), selected_threshold, atol=0.05
         ):
+            best_dice_threshold = float(best_dice["threshold"])
             right_ax.axvline(
-                best_dice["threshold"], color="#2f8f5b", linewidth=1.3, linestyle=":"
+                best_dice_threshold, color="#2f8f5b", linewidth=1.3, linestyle=":"
             )
+            if result["slug"] == "typeD":
+                right_ax.annotate(
+                    f"Best Dice\nz = {best_dice_threshold:.2f}",
+                    (best_dice_threshold, float(best_dice["dice"])),
+                    xytext=(14, 18),
+                    textcoords="offset points",
+                    fontsize=8.5,
+                    color="#2f8f5b",
+                    ha="left",
+                    va="bottom",
+                    arrowprops={
+                        "arrowstyle": "-",
+                        "color": "#2f8f5b",
+                        "linewidth": 0.9,
+                        "shrinkA": 2,
+                        "shrinkB": 3,
+                    },
+                )
         right_ax.set_title(f"{label}: metrics across positive thresholds")
         right_ax.set_xlabel(f"{label} z threshold")
         right_ax.set_ylabel("Metric value")
@@ -316,10 +391,6 @@ def _plot_metrics(candidate_results, out_base, selected_threshold):
     fig.tight_layout()
     fig.savefig(f"{out_base}_sensitivity_1minus_specificity.png", dpi=300, bbox_inches="tight")
     fig.savefig(f"{out_base}_sensitivity_1minus_specificity.pdf", bbox_inches="tight")
-    fig.savefig(f"{out_base}_sensitivity_specificity.png", dpi=300, bbox_inches="tight")
-    fig.savefig(f"{out_base}_sensitivity_specificity.pdf", bbox_inches="tight")
-    fig.savefig(f"{out_base}_roc.png", dpi=300, bbox_inches="tight")
-    fig.savefig(f"{out_base}_roc.pdf", bbox_inches="tight")
     plt.close(fig)
 
 
@@ -343,7 +414,7 @@ def _row_payload(row):
     return payload
 
 
-def _candidate_result(label, slug, data, reference_mask, analysis_mask, marker_thresholds):
+def _candidate_result(label, slug, data, standard_data, reference_mask, analysis_mask, marker_thresholds):
     metrics_df = _threshold_sweep(reference_mask, data, analysis_mask)
     marker_metrics_df = _marker_metrics(reference_mask, data, analysis_mask, marker_thresholds)
     best_dice = _best_row(metrics_df, "dice")
@@ -364,6 +435,7 @@ def _candidate_result(label, slug, data, reference_mask, analysis_mask, marker_t
         "full_tpr": full_tpr,
         "partial_auc_positive_thresholds": _positive_threshold_auc(metrics_df),
         "positive_voxels_in_analysis_mask": int(np.count_nonzero(analysis_mask & (data > 0))),
+        "rank_concordance": _kendall_w_between_maps(standard_data, data, analysis_mask),
     }
 
 
@@ -463,7 +535,15 @@ def main():
     if args.include_typed_row:
         candidates.append(("GLMsingle Type D", "typeD", typed_data))
     candidate_results = [
-        _candidate_result(label, slug, data, reference_mask, analysis_mask, marker_thresholds)
+        _candidate_result(
+            label,
+            slug,
+            data,
+            standard_data,
+            reference_mask,
+            analysis_mask,
+            marker_thresholds,
+        )
         for label, slug, data in candidates
     ]
     typea_result = candidate_results[0]
@@ -472,6 +552,7 @@ def main():
     out_base.parent.mkdir(parents=True, exist_ok=True)
     metrics_path = Path(f"{out_base}_metrics.csv")
     marker_metrics_path = Path(f"{out_base}_marker_threshold_metrics.csv")
+    rank_concordance_path = Path(f"{out_base}_kendall_w.csv")
     summary_path = Path(f"{out_base}_summary.json")
     metrics_df = pd.concat(
         [_with_candidate_column(result["metrics_df"], result["label"]) for result in candidate_results],
@@ -486,6 +567,23 @@ def main():
     )
     metrics_df.to_csv(metrics_path, index=False)
     marker_metrics_df.to_csv(marker_metrics_path, index=False)
+    rank_concordance_df = pd.DataFrame(
+        [
+            {
+                "candidate": result["label"],
+                "models": result["rank_concordance"]["models"].replace(
+                    "candidate", result["label"]
+                ),
+                **{
+                    key: value
+                    for key, value in result["rank_concordance"].items()
+                    if key != "models"
+                },
+            }
+            for result in candidate_results
+        ]
+    )
+    rank_concordance_df.to_csv(rank_concordance_path, index=False)
     _plot_metrics(candidate_results, out_base, selected_threshold)
 
     binary_outputs = {}
@@ -506,6 +604,7 @@ def main():
             "positive_voxels_in_analysis_mask": result["positive_voxels_in_analysis_mask"],
             "auc_full_scores": result["auc_full"],
             "partial_auc_positive_thresholds": result["partial_auc_positive_thresholds"],
+            "rank_concordance": result["rank_concordance"],
             "best_dice": _row_payload(result["best_dice"]),
         }
         for result in candidate_results
@@ -540,6 +639,7 @@ def main():
         "outputs": {
             "metrics_csv": str(metrics_path),
             "marker_threshold_metrics_csv": str(marker_metrics_path),
+            "kendall_w_csv": str(rank_concordance_path),
             "sensitivity_1minus_specificity_png": f"{out_base}_sensitivity_1minus_specificity.png",
             "sensitivity_1minus_specificity_pdf": f"{out_base}_sensitivity_1minus_specificity.pdf",
             "binary_maps": binary_outputs,
@@ -555,6 +655,10 @@ def main():
             f"{result['label']} positive-threshold partial ROC AUC: "
             f"{result['partial_auc_positive_thresholds']:.4f}"
         )
+        print(
+            f"{result['label']} Kendall W vs Standard GLM: "
+            f"{result['rank_concordance']['kendall_w']:.4f}"
+        )
         if result["best_dice"] is not None:
             best_dice = result["best_dice"]
             print(
@@ -566,6 +670,7 @@ def main():
             )
     print(f"Saved {metrics_path}")
     print(f"Saved {marker_metrics_path}")
+    print(f"Saved {rank_concordance_path}")
     print(f"Saved {out_base}_sensitivity_1minus_specificity.png")
     print(f"Saved {summary_path}")
 
