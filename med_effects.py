@@ -1628,6 +1628,13 @@ def _intra_between_fc_test_rows(subject_deltas):
 def _plot_intra_between_fc(subject_deltas, results, out_dir):
     if subject_deltas.empty:
         raise RuntimeError('No complete OFF/ON subjects were available for intra-vs-between FC plotting')
+    def _format_p(value):
+        if not np.isfinite(float(value)):
+            return 'n/a'
+        if float(value) < 0.001:
+            return '<0.001'
+        return f'{float(value):.3f}'
+
     colors = {'off': '#4C78A8', 'on': '#E45756', 'delta': '#333333', 'summary': '#D62728'}
     (fig, axes) = plt.subplots(1, 2, figsize=(9.0, 4.7), gridspec_kw={'width_ratios': [0.68, 0.85], 'wspace': 0.28})
     rng = np.random.default_rng(0)
@@ -1655,28 +1662,31 @@ def _plot_intra_between_fc(subject_deltas, results, out_dir):
         ('Between-ROI', 'between_roi_delta_z_on_minus_off', 'between_roi_on_minus_off', 1.0),
     ]
     delta_positions = [item[3] for item in delta_specs]
+    axes[1].axhline(0.0, color='#666666', linestyle='--', linewidth=0.8, alpha=0.65, zorder=0)
     for (_, row) in subject_deltas.iterrows():
         values = [row['within_roi_delta_z_on_minus_off'], row['between_roi_delta_z_on_minus_off']]
         axes[1].plot(delta_positions, values, color='#b3b3b3', linewidth=0.55, alpha=0.35, zorder=1)
     summary_bounds = []
     summary_means = []
+    component_labels = []
     for (_, column, analysis_key, x_value) in delta_specs:
         values = subject_deltas[column].to_numpy(dtype=np.float64)
         axes[1].scatter(rng.normal(x_value, 0.025, values.size), values, s=22, color=colors['delta'], edgecolor='white', linewidth=0.35, zorder=2)
         summary = results.get(analysis_key, {})
         mean_value = float(summary.get('mean', np.nanmean(values)))
         summary_means.append((x_value, mean_value))
+        component_labels.append((x_value, mean_value, summary.get('paired_t_p_value_two_sided', np.nan)))
         ci_low = float(summary.get('ci95_low', np.nan))
         ci_high = float(summary.get('ci95_high', np.nan))
         if np.isfinite(ci_low) and np.isfinite(ci_high):
             yerr = [[mean_value - ci_low], [ci_high - mean_value]]
-            axes[1].errorbar(x_value, mean_value, yerr=yerr, fmt='o', color=colors['summary'], ecolor=colors['summary'], elinewidth=1.0, capsize=3, markersize=4.2, zorder=3)
+            axes[1].errorbar(x_value, mean_value, yerr=yerr, fmt='o', color=colors['summary'], ecolor=colors['summary'], elinewidth=1.6, capsize=4, markersize=5.5, zorder=3)
             summary_bounds.extend([ci_low, ci_high])
         else:
-            axes[1].scatter([x_value], [mean_value], s=26, color=colors['summary'], zorder=3)
+            axes[1].scatter([x_value], [mean_value], s=42, color=colors['summary'], zorder=3)
     finite_summary_means = [(x_value, mean_value) for (x_value, mean_value) in summary_means if np.isfinite(mean_value)]
     if len(finite_summary_means) == len(summary_means):
-        axes[1].plot([item[0] for item in summary_means], [item[1] for item in summary_means], color=colors['summary'], linewidth=2.0, zorder=3)
+        axes[1].plot([item[0] for item in summary_means], [item[1] for item in summary_means], color=colors['summary'], linewidth=3.0, zorder=3)
     axes[1].set_xticks(delta_positions)
     axes[1].set_xticklabels([item[0] for item in delta_specs])
     x_pad = 0.28
@@ -1695,9 +1705,31 @@ def _plot_intra_between_fc(subject_deltas, results, out_dir):
         y_range = 1.0
     line_y = y_max + 0.10 * y_range
     axes[1].plot(delta_positions, [line_y, line_y], color='#333333', linewidth=0.8, clip_on=False)
-    p_text = 'n/a' if not np.isfinite(float(p_value)) else ('<0.001' if float(p_value) < 0.001 else f'{float(p_value):.3f}')
+    p_text = _format_p(p_value)
     axes[1].text(float(np.mean(delta_positions)), line_y + 0.025 * y_range, f'paired contrast: p = {p_text}', ha='center', va='bottom', fontsize=CELL_VALUE_FONT_SIZE)
     axes[1].set_ylim(y_min - 0.08 * y_range, line_y + 0.16 * y_range)
+    label_pad = 0.055 * y_range
+    for (x_value, mean_value, component_p) in component_labels:
+        if not np.isfinite(mean_value):
+            continue
+        if mean_value >= 0:
+            y_text = mean_value + label_pad
+            va = 'bottom'
+        else:
+            y_text = mean_value - label_pad
+            va = 'top'
+        axes[1].text(
+            x_value,
+            y_text,
+            f'mean = {mean_value:+.3f}\np = {_format_p(component_p)}',
+            ha='center',
+            va=va,
+            fontsize=9.2,
+            fontweight='bold',
+            color=colors['summary'],
+            bbox={'facecolor': 'white', 'edgecolor': 'none', 'alpha': 0.82, 'pad': 1.2},
+            zorder=4,
+        )
 
     for (label, ax) in zip(('A', 'B'), axes):
         ax.set_axisbelow(True)
