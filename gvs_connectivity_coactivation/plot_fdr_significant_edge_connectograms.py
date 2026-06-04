@@ -21,7 +21,7 @@ from matplotlib.path import Path as MplPath
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 ROI_DEF = ROOT / "Claude_results" / "group_analyses" / "analysis3_lme" / "per_trial_roi_betas_roi_definition.csv"
-OUT_ROOT = ROOT / "figures" / "GVS_effects" / "08_connectivity_coactivation"
+OUT_ROOT = ROOT / "figures" / "GVS_effects" / "main result"
 SIG_CSV = OUT_ROOT / "metric_sensitivity" / "fdr_significant_edge_connectivity_metric_sensitivity.csv"
 OUT_DIR = OUT_ROOT / "metric_sensitivity" / "connectogram_reports"
 TOP_N_EDGES = 30

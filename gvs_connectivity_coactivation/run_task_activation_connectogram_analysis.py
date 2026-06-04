@@ -24,7 +24,7 @@ import med_effects as M
 import med_effects_task_activation as task
 
 
-DEFAULT_OUT_DIR = ROOT / "figures" / "GVS_effects" / "08_connectivity_coactivation" / "task_activation_z3p1"
+DEFAULT_OUT_DIR = ROOT / "figures" / "GVS_effects" / "main result" / "task_activation_z3p1"
 DEFAULT_RUN_INVENTORY = ROOT / "figures" / "GVS_effects" / "common" / "run_condition_inventory.csv"
 DEFAULT_METRICS = ("mutual_info_quantile", "spearman_rho")
 

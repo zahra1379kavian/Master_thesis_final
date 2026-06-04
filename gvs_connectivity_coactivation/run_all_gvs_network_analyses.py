@@ -960,8 +960,8 @@ def plot_edge_tstat_matrix(stats_df: pd.DataFrame, roi_cols: list[str], title: s
     save_fig(fig, path)
 
 
-def analysis_08_connectivity_coactivation(data: PreparedData, rng: np.random.Generator) -> dict[str, Any]:
-    out = ensure_dir(OUT_DIR / "08_connectivity_coactivation")
+def analysis_main_result(data: PreparedData, rng: np.random.Generator) -> dict[str, Any]:
+    out = ensure_dir(OUT_DIR / "main result")
     edge_index = roi_edge_index(data.roi_cols)
     rows = []
     edge_lookup: dict[tuple[Any, ...], np.ndarray] = {}
@@ -1874,7 +1874,7 @@ def main() -> None:
         analysis_05_medication_interaction,
         analysis_06_similarity_to_sham,
         analysis_07_variability_dispersion,
-        analysis_08_connectivity_coactivation,
+        analysis_main_result,
         analysis_09_circuit_level,
         analysis_10_maxt_heatmap,
         analysis_11_empirical_bayes,

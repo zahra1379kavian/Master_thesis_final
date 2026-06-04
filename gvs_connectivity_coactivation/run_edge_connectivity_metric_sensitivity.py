@@ -16,7 +16,7 @@ from scipy import stats
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 BASE_SCRIPT = HERE / "run_all_gvs_network_analyses.py"
-OUT = ROOT / "figures" / "GVS_effects" / "08_connectivity_coactivation" / "metric_sensitivity"
+OUT = ROOT / "figures" / "GVS_effects" / "main result" / "metric_sensitivity"
 
 
 def load_base_module():

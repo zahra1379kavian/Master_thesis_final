@@ -18,7 +18,7 @@ from matplotlib.lines import Line2D
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-OUT_ROOT = ROOT / "figures" / "GVS_effects" / "08_connectivity_coactivation"
+OUT_ROOT = ROOT / "figures" / "GVS_effects" / "main result"
 SIG_CSV = OUT_ROOT / "metric_sensitivity" / "fdr_significant_edge_connectivity_metric_sensitivity.csv"
 OUT_DIR = OUT_ROOT / "metric_sensitivity" / "connectogram_reports"
 
