@@ -26,6 +26,22 @@ SIG_CSV = OUT_ROOT / "metric_sensitivity" / "fdr_significant_edge_connectivity_m
 OUT_DIR = OUT_ROOT / "metric_sensitivity" / "connectogram_reports"
 TOP_N_EDGES = 30
 TOP_NODES = 15
+PAPER_FONT_FAMILY = "Liberation Sans"
+CONNECTOGRAM_FIGSIZE = (15.8, 5.85)
+ROI_LABEL_FONTSIZE = 8.2
+GROUP_LABEL_FONTSIZE = 9.4
+COLORBAR_FONTSIZE = 9.0
+ROI_LABEL_RADIUS = 1.23
+GROUP_LABEL_RADIUS = 1.52
+
+plt.rcParams.update(
+    {
+        "font.family": "sans-serif",
+        "font.sans-serif": [PAPER_FONT_FAMILY, "Arial", "Helvetica", "DejaVu Sans"],
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
+    }
+)
 
 GROUP_ORDER = [
     "Frontal-Parietal",
@@ -188,7 +204,11 @@ def label_rotation(theta: float) -> tuple[float, str]:
 
 
 def sector_label_rotation(theta: float) -> tuple[float, str]:
-    ha = "right" if np.cos(theta) < 0 else "left"
+    x_direction = np.cos(theta)
+    if abs(x_direction) < 0.25:
+        ha = "center"
+    else:
+        ha = "right" if x_direction < 0 else "left"
     return 0.0, ha
 
 
@@ -202,6 +222,7 @@ def draw_connectogram_panel(
     norm: Normalize,
     max_abs: float,
     sparse_edges: bool,
+    show_sector_labels: bool = True,
 ) -> None:
     ax.set_aspect("equal")
     ax.axis("off")
@@ -221,6 +242,7 @@ def draw_connectogram_panel(
         draw_chord(ax, theta1, theta2, color, width, alpha)
 
     for group, theta1, theta2 in sectors:
+        mid = (theta1 + theta2) / 2
         wedge = Wedge(
             (0, 0),
             1.17,
@@ -234,11 +256,12 @@ def draw_connectogram_panel(
             zorder=3,
         )
         ax.add_patch(wedge)
-        mid = (theta1 + theta2) / 2
+        if not show_sector_labels or np.cos(mid) > 0.2:
+            continue
         rot, ha = sector_label_rotation(mid)
-        label_point = pol2cart(mid, 1.48)
+        label_point = pol2cart(mid, GROUP_LABEL_RADIUS)
         if group == "Frontal-Parietal":
-            label_point[1] -= 0.08
+            label_point[1] -= 0.10
         ax.text(
             *label_point,
             GROUP_LABELS.get(group, group),
@@ -246,7 +269,7 @@ def draw_connectogram_panel(
             rotation_mode="anchor",
             ha=ha,
             va="center",
-            fontsize=8.0,
+            fontsize=GROUP_LABEL_FONTSIZE,
             color=GROUP_COLORS[group],
         )
 
@@ -257,18 +280,18 @@ def draw_connectogram_panel(
         ax.scatter([p[0]], [p[1]], s=42, color=GROUP_COLORS[group], edgecolor="white", linewidth=0.8, zorder=5)
         rot, ha = label_rotation(theta)
         ax.text(
-            *pol2cart(theta, 1.085),
+            *pol2cart(theta, ROI_LABEL_RADIUS),
             roi_display_label(roi),
             rotation=rot,
             rotation_mode="anchor",
             ha=ha,
             va="center",
-            fontsize=6.8,
+            fontsize=ROI_LABEL_FONTSIZE,
             color="#222222",
         )
 
-    ax.set_xlim(-2.05, 2.05)
-    ax.set_ylim(-1.35, 1.35)
+    ax.set_xlim(-1.92, 1.92)
+    ax.set_ylim(-1.42, 1.42)
 
 
 def panel_abs_limits(df: pd.DataFrame) -> tuple[float, float]:
@@ -296,25 +319,36 @@ def plot_connectogram(df: pd.DataFrame, roi_order: list[str], path_base: Path) -
         (df.loc[df["mean"] > 0].copy(), plt.get_cmap("Oranges"), "Improved connectivity"),
         (df.loc[df["mean"] < 0].copy(), plt.get_cmap("Blues"), "Decreased connectivity"),
     ]
-    fig, axes = plt.subplots(1, 2, figsize=(20.0, 8.8))
-    fig.subplots_adjust(left=0.015, right=0.965, bottom=0.02, top=0.98, wspace=0.08)
-    for ax, (panel_df, cmap, colorbar_label) in zip(np.atleast_1d(axes), panels, strict=True):
+    fig, axes = plt.subplots(1, 2, figsize=CONNECTOGRAM_FIGSIZE)
+    fig.subplots_adjust(left=0.0, right=0.968, bottom=0.0, top=1.0, wspace=0.08)
+    for panel_idx, (ax, (panel_df, cmap, colorbar_label)) in enumerate(zip(np.atleast_1d(axes), panels, strict=True)):
         vmin, vmax = panel_abs_limits(panel_df)
         norm = Normalize(vmin=vmin, vmax=vmax)
         max_abs = float(np.nanpercentile(panel_df["abs_mean"].astype(float), 95)) if panel_df["abs_mean"].notna().any() else 1.0
         if not np.isfinite(max_abs) or max_abs <= 0:
             max_abs = 1.0
-        draw_connectogram_panel(ax, panel_df, ordered_rois, angles, sectors, cmap, norm, max_abs, sparse_edges)
+        draw_connectogram_panel(
+            ax,
+            panel_df,
+            ordered_rois,
+            angles,
+            sectors,
+            cmap,
+            norm,
+            max_abs,
+            sparse_edges,
+            show_sector_labels=panel_idx == 0,
+        )
         sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
         sm.set_array([])
         pos = ax.get_position()
-        cax = fig.add_axes([pos.x1 + 0.006, pos.y0 + pos.height * 0.2, 0.009, pos.height * 0.6])
+        cax = fig.add_axes([pos.x1 + 0.004, pos.y0 + pos.height * 0.2, 0.011, pos.height * 0.6])
         cbar = fig.colorbar(sm, cax=cax)
-        cbar.ax.set_title(colorbar_label, fontsize=8, pad=5)
-        cbar.ax.tick_params(labelsize=7)
+        cbar.ax.set_title(colorbar_label, fontsize=COLORBAR_FONTSIZE, pad=5)
+        cbar.ax.tick_params(labelsize=COLORBAR_FONTSIZE - 1.0)
 
-    fig.savefig(path_base.with_suffix(".png"), dpi=300, bbox_inches="tight", pad_inches=0.01)
-    fig.savefig(path_base.with_suffix(".pdf"), bbox_inches="tight", pad_inches=0.01)
+    fig.savefig(path_base.with_suffix(".png"), dpi=300, bbox_inches="tight", pad_inches=0.0)
+    fig.savefig(path_base.with_suffix(".pdf"), bbox_inches="tight", pad_inches=0.0)
     plt.close(fig)
 
 
