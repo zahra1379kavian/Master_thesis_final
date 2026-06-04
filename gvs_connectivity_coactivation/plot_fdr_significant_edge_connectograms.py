@@ -38,33 +38,40 @@ GROUP_ORDER = [
 
 GROUP_COLORS = {
     "Frontal-Parietal": "#7cb342",
-    "Subcortical": "#4aa3df",
+    "Subcortical": "#c89b1f",
     "Cingulate-Temporal": "#8e6bbd",
     "Visual": "#d65f9e",
     "Limbic/MTL-Olfactory": "#39a76d",
     "Somatomotor/Cerebellar": "#2db7b5",
 }
 
+GROUP_LABELS = {
+    "Limbic/MTL-Olfactory": "Limbic-Olfactory",
+}
+
 ROI_LABELS = {
-    "Amygdala": "Amyg",
-    "Caudate": "Caud",
-    "Cerebellum": "Cereb",
-    "Cingulate": "Cing",
-    "Frontal": "Front",
-    "Fusiform": "Fusi",
-    "Hippocampus": "Hipp",
-    "Occipital": "Occip",
-    "Olfactory": "Olf",
-    "Orbitofrontal": "OFC",
-    "ParaHippocampal": "PHG",
-    "Paracentral_Lobule": "ParaCent",
-    "Parietal": "Par",
-    "Postcentral": "PostCent",
-    "Precentral": "PreCent",
-    "Putamen": "Put",
-    "Supp_Motor_Area": "SMA",
-    "Temporal": "Temp",
-    "Thalamus": "Thal",
+    "Amygdala": "Amygdala",
+    "Caudate": "Caudate",
+    "Cerebellum": "Cerebellum",
+    "Cingulate": "Cingulate",
+    "Frontal": "Frontal",
+    "Fusiform": "Fusiform",
+    "Hippocampus": "Hippocampus",
+    "Insula": "Insula",
+    "Occipital": "Occipital",
+    "Olfactory": "Olfactory",
+    "Orbitofrontal": "Orbitofrontal",
+    "Pallidum": "Pallidum",
+    "ParaHippocampal": "Parahippocampal",
+    "Paracentral_Lobule": "Paracentral Lobule",
+    "Parietal": "Parietal",
+    "Postcentral": "Postcentral",
+    "Precentral": "Precentral",
+    "Putamen": "Putamen",
+    "Rolandic_Oper": "Rolandic Operculum",
+    "Supp_Motor_Area": "Supplementary Motor Area",
+    "Temporal": "Temporal",
+    "Thalamus": "Thalamus",
 }
 
 
@@ -78,11 +85,11 @@ def roi_group(roi: str) -> str:
     base = str(roi).rsplit("_", 1)[0]
     if base in {"Occipital", "Fusiform"}:
         return "Visual"
-    if base in {"Precentral", "Postcentral", "Paracentral_Lobule", "Supp_Motor_Area", "Cerebellum"}:
+    if base in {"Precentral", "Postcentral", "Paracentral_Lobule", "Supp_Motor_Area", "Cerebellum", "Rolandic_Oper"}:
         return "Somatomotor/Cerebellar"
     if base in {"Amygdala", "Hippocampus", "ParaHippocampal", "Olfactory", "Orbitofrontal"}:
         return "Limbic/MTL-Olfactory"
-    if base in {"Caudate", "Putamen", "Thalamus"}:
+    if base in {"Caudate", "Pallidum", "Putamen", "Thalamus"}:
         return "Subcortical"
     if base in {"Frontal", "Parietal"}:
         return "Frontal-Parietal"
@@ -103,37 +110,54 @@ def roi_side(roi: str) -> str:
 
 def roi_display_label(roi: str) -> str:
     base = roi_base(roi)
-    label = ROI_LABELS.get(base, base.replace("_", " "))
-    side = roi_side(roi)
-    return f"({side}) {label}" if side else label
+    return ROI_LABELS.get(base, base.replace("_", " "))
 
 
-def roi_sort_key(roi: str) -> tuple[int, str, int, str]:
-    side_order = {"L": 0, "R": 1, "": 2}
-    return GROUP_ORDER.index(roi_group(roi)), roi_base(roi), side_order.get(roi_side(roi), 2), str(roi)
+def roi_sort_key(roi: str) -> tuple[int, str, str]:
+    return GROUP_ORDER.index(roi_group(roi)), roi_base(roi), str(roi)
 
 
-def circular_layout(rois: list[str]) -> tuple[list[str], dict[str, float], dict[str, tuple[float, float]]]:
-    ordered = sorted(rois, key=roi_sort_key)
-    groups: dict[str, list[str]] = {}
-    for roi in ordered:
-        groups.setdefault(roi_group(roi), []).append(roi)
+def add_side_layout(
+    side_rois: list[str],
+    start_deg: float,
+    end_deg: float,
+    angles: dict[str, float],
+    sectors: list[tuple[str, float, float]],
+) -> None:
+    if not side_rois:
+        return
 
-    gap = np.deg2rad(4.0)
-    total_gap = gap * len(groups)
-    usable = 2 * np.pi - total_gap
-    start = np.deg2rad(100.0)
+    positions = np.deg2rad(np.linspace(start_deg, end_deg, len(side_rois)))
+    step = positions[1] - positions[0] if len(positions) > 1 else np.deg2rad(end_deg - start_deg)
+    if np.isclose(step, 0.0):
+        step = np.deg2rad(7.0)
+
+    for roi, angle in zip(side_rois, positions):
+        angles[roi] = float(angle)
+
+    start_idx = 0
+    while start_idx < len(side_rois):
+        group = roi_group(side_rois[start_idx])
+        stop_idx = start_idx + 1
+        while stop_idx < len(side_rois) and roi_group(side_rois[stop_idx]) == group:
+            stop_idx += 1
+        theta1 = positions[start_idx] - step / 2
+        theta2 = positions[stop_idx - 1] + step / 2
+        sectors.append((group, float(min(theta1, theta2)), float(max(theta1, theta2))))
+        start_idx = stop_idx
+
+
+def circular_layout(rois: list[str]) -> tuple[list[str], dict[str, float], list[tuple[str, float, float]]]:
+    left_rois = sorted([roi for roi in rois if roi_side(roi) == "L"], key=roi_sort_key)
+    right_rois = sorted([roi for roi in rois if roi_side(roi) == "R"], key=roi_sort_key)
+    midline_rois = sorted([roi for roi in rois if roi_side(roi) not in {"L", "R"}], key=roi_sort_key)
+    ordered = left_rois + right_rois + midline_rois
+
     angles: dict[str, float] = {}
-    sectors: dict[str, tuple[float, float]] = {}
-    for group, group_rois in groups.items():
-        width = usable * len(group_rois) / len(ordered)
-        sector_start = start
-        sector_end = start - width
-        positions = np.linspace(sector_start - width / (len(group_rois) + 1), sector_end + width / (len(group_rois) + 1), len(group_rois))
-        for roi, angle in zip(group_rois, positions):
-            angles[roi] = float(angle)
-        sectors[group] = (float(sector_end), float(sector_start))
-        start = sector_end - gap
+    sectors: list[tuple[str, float, float]] = []
+    add_side_layout(left_rois, 112.0, 248.0, angles, sectors)
+    add_side_layout(right_rois, 68.0, -68.0, angles, sectors)
+    add_side_layout(midline_rois, 268.0, 272.0, angles, sectors)
     return ordered, angles, sectors
 
 
@@ -153,22 +177,19 @@ def draw_chord(ax: plt.Axes, theta1: float, theta2: float, color: str, width: fl
 
 def label_rotation(theta: float) -> tuple[float, str]:
     deg = np.rad2deg(theta)
-    rot = deg
-    ha = "left"
-    if 90 < deg % 360 < 270:
-        rot = deg + 180
-        ha = "right"
+    rot = deg + 180 if np.cos(theta) < 0 else deg
+    rot = ((rot + 180) % 360) - 180
+    if rot > 90:
+        rot -= 180
+    if rot < -90:
+        rot += 180
+    ha = "right" if np.cos(theta) < 0 else "left"
     return rot, ha
 
 
 def sector_label_rotation(theta: float) -> tuple[float, str]:
-    deg = np.rad2deg(theta)
-    rot = deg - 90
-    ha = "left"
-    if 90 < deg % 360 < 270:
-        rot += 180
-        ha = "right"
-    return rot, ha
+    ha = "right" if np.cos(theta) < 0 else "left"
+    return 0.0, ha
 
 
 def draw_connectogram_panel(
@@ -176,7 +197,7 @@ def draw_connectogram_panel(
     df: pd.DataFrame,
     ordered_rois: list[str],
     angles: dict[str, float],
-    sectors: dict[str, tuple[float, float]],
+    sectors: list[tuple[str, float, float]],
     cmap: matplotlib.colors.Colormap,
     norm: Normalize,
     max_abs: float,
@@ -199,7 +220,7 @@ def draw_connectogram_panel(
         alpha = (0.62 + 0.28 * scale) if sparse_edges else (0.16 + 0.34 * scale)
         draw_chord(ax, theta1, theta2, color, width, alpha)
 
-    for group, (theta1, theta2) in sectors.items():
+    for group, theta1, theta2 in sectors:
         wedge = Wedge(
             (0, 0),
             1.17,
@@ -215,14 +236,17 @@ def draw_connectogram_panel(
         ax.add_patch(wedge)
         mid = (theta1 + theta2) / 2
         rot, ha = sector_label_rotation(mid)
+        label_point = pol2cart(mid, 1.48)
+        if group == "Frontal-Parietal":
+            label_point[1] -= 0.08
         ax.text(
-            *pol2cart(mid, 1.31),
-            group,
+            *label_point,
+            GROUP_LABELS.get(group, group),
             rotation=rot,
             rotation_mode="anchor",
             ha=ha,
             va="center",
-            fontsize=9.5,
+            fontsize=8.0,
             color=GROUP_COLORS[group],
         )
 
@@ -233,18 +257,18 @@ def draw_connectogram_panel(
         ax.scatter([p[0]], [p[1]], s=42, color=GROUP_COLORS[group], edgecolor="white", linewidth=0.8, zorder=5)
         rot, ha = label_rotation(theta)
         ax.text(
-            *pol2cart(theta, 1.065),
+            *pol2cart(theta, 1.085),
             roi_display_label(roi),
             rotation=rot,
             rotation_mode="anchor",
             ha=ha,
             va="center",
-            fontsize=7.0,
+            fontsize=6.8,
             color="#222222",
         )
 
-    ax.set_xlim(-1.40, 1.40)
-    ax.set_ylim(-1.40, 1.40)
+    ax.set_xlim(-2.05, 2.05)
+    ax.set_ylim(-1.35, 1.35)
 
 
 def panel_abs_limits(df: pd.DataFrame) -> tuple[float, float]:
@@ -272,7 +296,8 @@ def plot_connectogram(df: pd.DataFrame, roi_order: list[str], path_base: Path) -
         (df.loc[df["mean"] > 0].copy(), plt.get_cmap("Oranges"), "Improved connectivity"),
         (df.loc[df["mean"] < 0].copy(), plt.get_cmap("Blues"), "Decreased connectivity"),
     ]
-    fig, axes = plt.subplots(1, 2, figsize=(17.0, 8.0))
+    fig, axes = plt.subplots(1, 2, figsize=(20.0, 8.8))
+    fig.subplots_adjust(left=0.015, right=0.965, bottom=0.02, top=0.98, wspace=0.08)
     for ax, (panel_df, cmap, colorbar_label) in zip(np.atleast_1d(axes), panels, strict=True):
         vmin, vmax = panel_abs_limits(panel_df)
         norm = Normalize(vmin=vmin, vmax=vmax)
@@ -282,11 +307,12 @@ def plot_connectogram(df: pd.DataFrame, roi_order: list[str], path_base: Path) -
         draw_connectogram_panel(ax, panel_df, ordered_rois, angles, sectors, cmap, norm, max_abs, sparse_edges)
         sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
         sm.set_array([])
-        cbar = fig.colorbar(sm, ax=ax, fraction=0.035, pad=0.005, shrink=0.64)
-        cbar.set_label(colorbar_label, fontsize=8)
+        pos = ax.get_position()
+        cax = fig.add_axes([pos.x1 + 0.006, pos.y0 + pos.height * 0.2, 0.009, pos.height * 0.6])
+        cbar = fig.colorbar(sm, cax=cax)
+        cbar.ax.set_title(colorbar_label, fontsize=8, pad=5)
         cbar.ax.tick_params(labelsize=7)
 
-    fig.subplots_adjust(left=0.0, right=0.99, bottom=0.0, top=1.0, wspace=0.02)
     fig.savefig(path_base.with_suffix(".png"), dpi=300, bbox_inches="tight", pad_inches=0.01)
     fig.savefig(path_base.with_suffix(".pdf"), bbox_inches="tight", pad_inches=0.01)
     plt.close(fig)
