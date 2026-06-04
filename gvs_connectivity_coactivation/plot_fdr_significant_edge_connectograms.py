@@ -470,9 +470,9 @@ def main() -> None:
     lines.append("- Keep the full connectograms as supplementary figures because dense methods have many FDR-significant edges.")
     lines.extend(["", "## Plots", ""])
     for row in summary.itertuples(index=False):
-        rel_png = Path(row.plot_png).relative_to(HERE)
-        top_png = Path(row.top_edges_plot_png).relative_to(HERE)
-        node_png = Path(row.roi_involvement_plot_png).relative_to(HERE)
+        rel_png = Path(row.plot_png).relative_to(OUT_ROOT)
+        top_png = Path(row.top_edges_plot_png).relative_to(OUT_ROOT)
+        node_png = Path(row.roi_involvement_plot_png).relative_to(OUT_ROOT)
         lines.append(
             f"- `{row.metric}` | `{row.analysis_view}` | `{row.fdr_scope}`: "
             f"{row.n_sig_edges} edges ({row.n_positive} positive, {row.n_negative} negative), "
