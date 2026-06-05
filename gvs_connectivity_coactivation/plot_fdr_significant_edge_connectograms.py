@@ -27,12 +27,15 @@ OUT_DIR = OUT_ROOT / "metric_sensitivity" / "connectogram_reports"
 TOP_N_EDGES = 30
 TOP_NODES = 15
 PAPER_FONT_FAMILY = "Liberation Sans"
-CONNECTOGRAM_FIGSIZE = (15.8, 5.85)
+CONNECTOGRAM_FIGSIZE = (11.4, 5.35)
 ROI_LABEL_FONTSIZE = 8.2
 GROUP_LABEL_FONTSIZE = 9.4
 COLORBAR_FONTSIZE = 9.0
-ROI_LABEL_RADIUS = 1.23
+LEGEND_FONTSIZE = 8.0
+ROI_LABEL_RADIUS = 1.18
 GROUP_LABEL_RADIUS = 1.52
+COLORBAR_PAD = 0.006
+COLORBAR_WIDTH = 0.012
 
 plt.rcParams.update(
     {
@@ -212,6 +215,33 @@ def sector_label_rotation(theta: float) -> tuple[float, str]:
     return 0.0, ha
 
 
+def draw_group_legend(fig: plt.Figure) -> None:
+    handles = [
+        Line2D(
+            [0],
+            [0],
+            marker="s",
+            linestyle="none",
+            markersize=7.2,
+            markerfacecolor=color,
+            markeredgecolor="none",
+            label=GROUP_LABELS.get(group, group),
+        )
+        for group, color in GROUP_COLORS.items()
+    ]
+    fig.legend(
+        handles=handles,
+        loc="lower center",
+        bbox_to_anchor=(0.5, 0.008),
+        ncol=len(handles),
+        frameon=False,
+        fontsize=LEGEND_FONTSIZE,
+        handletextpad=0.45,
+        columnspacing=1.0,
+        borderaxespad=0.0,
+    )
+
+
 def draw_connectogram_panel(
     ax: plt.Axes,
     df: pd.DataFrame,
@@ -290,8 +320,8 @@ def draw_connectogram_panel(
             color="#222222",
         )
 
-    ax.set_xlim(-1.92, 1.92)
-    ax.set_ylim(-1.42, 1.42)
+    ax.set_xlim(-1.56, 1.56)
+    ax.set_ylim(-1.30, 1.30)
 
 
 def panel_abs_limits(df: pd.DataFrame) -> tuple[float, float]:
@@ -310,7 +340,7 @@ def panel_abs_limits(df: pd.DataFrame) -> tuple[float, float]:
     return vmin, vmax
 
 
-def plot_connectogram(df: pd.DataFrame, roi_order: list[str], path_base: Path) -> None:
+def plot_connectogram(df: pd.DataFrame, roi_order: list[str], path_base: Path, save_pdf: bool = True) -> None:
     ordered_rois, angles, sectors = circular_layout(roi_order)
 
     sparse_edges = len(df) <= 30
@@ -319,8 +349,21 @@ def plot_connectogram(df: pd.DataFrame, roi_order: list[str], path_base: Path) -
         (df.loc[df["mean"] > 0].copy(), plt.get_cmap("Oranges"), "Improved connectivity"),
         (df.loc[df["mean"] < 0].copy(), plt.get_cmap("Blues"), "Decreased connectivity"),
     ]
-    fig, axes = plt.subplots(1, 2, figsize=CONNECTOGRAM_FIGSIZE)
-    fig.subplots_adjust(left=0.0, right=0.968, bottom=0.0, top=1.0, wspace=0.08)
+    fig = plt.figure(figsize=CONNECTOGRAM_FIGSIZE, facecolor="white")
+    grid = fig.add_gridspec(
+        1,
+        4,
+        width_ratios=[1.0, 0.026, 1.0, 0.026],
+        left=0.01,
+        right=0.99,
+        bottom=0.22,
+        top=0.98,
+        wspace=0.005,
+    )
+    axes = [fig.add_subplot(grid[0, 0]), fig.add_subplot(grid[0, 2])]
+    cbar_slots = [fig.add_subplot(grid[0, 1]), fig.add_subplot(grid[0, 3])]
+    draw_group_legend(fig)
+
     for panel_idx, (ax, (panel_df, cmap, colorbar_label)) in enumerate(zip(np.atleast_1d(axes), panels, strict=True)):
         vmin, vmax = panel_abs_limits(panel_df)
         norm = Normalize(vmin=vmin, vmax=vmax)
@@ -337,18 +380,20 @@ def plot_connectogram(df: pd.DataFrame, roi_order: list[str], path_base: Path) -
             norm,
             max_abs,
             sparse_edges,
-            show_sector_labels=panel_idx == 0,
+            show_sector_labels=False,
         )
         sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
         sm.set_array([])
+        cbar_slots[panel_idx].remove()
         pos = ax.get_position()
-        cax = fig.add_axes([pos.x1 + 0.004, pos.y0 + pos.height * 0.2, 0.011, pos.height * 0.6])
+        cax = fig.add_axes([pos.x1 + COLORBAR_PAD, pos.y0 + pos.height * 0.22, COLORBAR_WIDTH, pos.height * 0.56])
         cbar = fig.colorbar(sm, cax=cax)
         cbar.ax.set_title(colorbar_label, fontsize=COLORBAR_FONTSIZE, pad=5)
         cbar.ax.tick_params(labelsize=COLORBAR_FONTSIZE - 1.0)
 
     fig.savefig(path_base.with_suffix(".png"), dpi=300, bbox_inches="tight", pad_inches=0.0)
-    fig.savefig(path_base.with_suffix(".pdf"), bbox_inches="tight", pad_inches=0.0)
+    if save_pdf:
+        fig.savefig(path_base.with_suffix(".pdf"), bbox_inches="tight", pad_inches=0.0)
     plt.close(fig)
 
 
