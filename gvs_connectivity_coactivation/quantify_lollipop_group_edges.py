@@ -167,27 +167,24 @@ def direction_edges(edges: pd.DataFrame, direction: str) -> pd.DataFrame:
     raise ValueError(f"Unknown edge direction: {direction}")
 
 
-def plot_heatmaps(matrices: list[pd.DataFrame], path_base: Path, panel_labels: list[str] | None = None) -> None:
+def plot_heatmaps(matrices: list[pd.DataFrame], path_base: Path) -> None:
     if not matrices:
         return
     vmax = max(int(matrix.to_numpy().max()) for matrix in matrices)
     vmax = max(vmax, 1)
     ncols = len(matrices)
-    fig_width = max(6.8, 5.15 * ncols)
-    fig, axes = plt.subplots(1, ncols, figsize=(fig_width, 5.9), squeeze=False)
+    fig_width = max(6.6, 4.9 * ncols + 0.5)
+    fig, axes = plt.subplots(1, ncols, figsize=(fig_width, 5.15), squeeze=False)
     axes_flat = axes.ravel()
 
     image = None
-    labels = panel_labels or [""] * len(matrices)
-    for ax, matrix, label in zip(axes_flat, matrices, labels, strict=True):
+    for ax, matrix in zip(axes_flat, matrices, strict=True):
         image = ax.imshow(matrix.to_numpy(dtype=float), cmap="YlGnBu", vmin=0, vmax=vmax)
-        if label:
-            ax.set_title(label, fontsize=11.5, pad=10)
         ax.set_xticks(np.arange(matrix.shape[1]))
         ax.set_yticks(np.arange(matrix.shape[0]))
         ax.set_xticklabels([PLOT_LABELS.get(label, label) for label in matrix.columns], fontsize=8.6, rotation=40, ha="right")
         ax.set_yticklabels([PLOT_LABELS.get(label, label) for label in matrix.index], fontsize=8.8)
-        ax.tick_params(axis="both", length=0)
+        ax.tick_params(axis="both", length=0, pad=1.5)
         for spine in ax.spines.values():
             spine.set_visible(False)
         ax.set_xticks(np.arange(-0.5, matrix.shape[1], 1), minor=True)
@@ -200,14 +197,19 @@ def plot_heatmaps(matrices: list[pd.DataFrame], path_base: Path, panel_labels: l
                 text_color = "white" if value > threshold else "#1F2933"
                 ax.text(col_idx, row_idx, str(value), ha="center", va="center", fontsize=10.2, color=text_color)
 
-    top = 0.90 if any(labels) else 0.96
-    fig.subplots_adjust(left=0.11, right=0.92, top=top, bottom=0.21, wspace=0.34)
+    fig.subplots_adjust(left=0.08, right=0.895, top=0.995, bottom=0.18, wspace=0.28)
     if image is not None:
-        cbar = fig.colorbar(image, ax=axes_flat.tolist(), fraction=0.028, pad=0.02)
+        fig.canvas.draw()
+        positions = [ax.get_position() for ax in axes_flat]
+        y0 = min(pos.y0 for pos in positions)
+        y1 = max(pos.y1 for pos in positions)
+        x1 = max(pos.x1 for pos in positions)
+        cax = fig.add_axes([x1 + 0.018, y0, 0.018, y1 - y0])
+        cbar = fig.colorbar(image, cax=cax)
         cbar.set_label("Significant edges", fontsize=9.2)
         cbar.ax.tick_params(labelsize=8.6)
-    fig.savefig(path_base.with_suffix(".png"), dpi=300, bbox_inches="tight")
-    fig.savefig(path_base.with_suffix(".pdf"), bbox_inches="tight")
+    fig.savefig(path_base.with_suffix(".png"), dpi=300, bbox_inches="tight", pad_inches=0.0)
+    fig.savefig(path_base.with_suffix(".pdf"), bbox_inches="tight", pad_inches=0.0)
     plt.close(fig)
 
 
@@ -257,7 +259,6 @@ def process_report(label: str, source_csv: Path, report_dir: Path) -> pd.DataFra
         plot_heatmaps(
             signed_matrices,
             spec.png_path.with_name(f"{paired_stem}_heatmap"),
-            panel_labels=["Increase", "Decrease"],
         )
 
     output_df = pd.concat(output_pairs, ignore_index=True)
@@ -279,28 +280,6 @@ def process_report(label: str, source_csv: Path, report_dir: Path) -> pd.DataFra
             "source_csv",
         ]
     ]
-    for direction in DIRECTIONS:
-        direction_df = output_df.loc[output_df["edge_direction"] == direction].copy()
-        direction_df = direction_df[
-            [
-                "report",
-                "metric",
-                "analysis_view",
-                "fdr_scope",
-                "edge_direction",
-                "lollipop_top_n",
-                "n_counted_edges",
-                "group_i",
-                "group_j",
-                "n_edges",
-                "n_positive",
-                "n_negative",
-                "lollipop_png",
-                "source_csv",
-            ]
-        ]
-        direction_df.to_csv(report_dir / f"lollipop_all_significant_{direction}_group_edge_counts.csv", index=False)
-        direction_df.to_csv(report_dir / f"lollipop_{direction}_group_edge_counts.csv", index=False)
     return output_df
 
 

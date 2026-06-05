@@ -68,6 +68,11 @@ def parse_args():
     )
     parser.add_argument("--cmap-min", type=float, default=0.18, help="Lower fraction used when truncating --cmap.")
     parser.add_argument("--cmap-max", type=float, default=0.98, help="Upper fraction used when truncating --cmap.")
+    parser.add_argument(
+        "--include-weight-map-mask",
+        action="store_true",
+        help="Display nonzero voxels from --weight-map in addition to the thresholded HTML mask.",
+    )
     parser.add_argument("--dpi", type=int, default=300, help="PNG output resolution.")
     return parser.parse_args()
 
@@ -213,9 +218,12 @@ def main():
     motor_overlap_display, _ = motor_overlap_masks(selected_mask, display_affine)
     weight_img = nib.load(args.weight_map)
     weights = align_weights_to_display(weight_img, selected_mask.shape, display_affine) * args.scale
-    weights = np.where(selected_mask & np.isfinite(weights), weights, np.nan)
-    weights = fill_from_nearest_selected(weights, selected_mask, motor_overlap_display)
-    display_mask = selected_mask | motor_overlap_display
+    display_source_mask = selected_mask
+    if args.include_weight_map_mask:
+        display_source_mask = display_source_mask | (np.isfinite(weights) & (weights != 0))
+    weights = np.where(display_source_mask & np.isfinite(weights), weights, np.nan)
+    weights = fill_from_nearest_selected(weights, display_source_mask, motor_overlap_display)
+    display_mask = display_source_mask | motor_overlap_display
 
     norm = color_norm(weights)
     cmap = truncate_colormap(args.cmap, args.cmap_min, args.cmap_max).copy()
