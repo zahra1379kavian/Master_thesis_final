@@ -7,6 +7,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.text import Text
 import nibabel as nib
 import numpy as np
 import pandas as pd
@@ -23,6 +24,10 @@ DEFAULT_REFERENCE_Z_THRESHOLD = 3.1
 DEFAULT_SELECTED_THRESHOLD = 1.5
 DEFAULT_TYPED_SELECTED_THRESHOLD = 0.86
 DEFAULT_MARKER_THRESHOLDS = tuple(np.arange(0.5, 6.51, 0.5))
+PAPER_FONT_FAMILY = "Liberation Sans"
+AXIS_TICK_FONT_SIZE = 13
+ANNOTATION_FONT_SIZE = 11
+LEGEND_FONT_SIZE = 12
 COUNT_COLUMNS = {
     "selected_voxels",
     "reference_voxels",
@@ -269,7 +274,7 @@ def _plot_metrics(candidate_results, out_base):
                 (row.false_positive_rate, row.sensitivity),
                 xytext=(offset_x, offset_y),
                 textcoords="offset points",
-                fontsize=8,
+                fontsize=ANNOTATION_FONT_SIZE,
                 color="#111111",
             )
         selected_rows = marker_metrics_df[
@@ -291,7 +296,7 @@ def _plot_metrics(candidate_results, out_base):
                 (selected_row["false_positive_rate"], selected_row["sensitivity"]),
                 xytext=(16, 2),
                 textcoords="offset points",
-                fontsize=8.5,
+                fontsize=ANNOTATION_FONT_SIZE,
                 color=selected_color,
                 ha="left",
                 va="center",
@@ -313,7 +318,7 @@ def _plot_metrics(candidate_results, out_base):
                 transform=left_ax.transAxes,
                 ha="right",
                 va="bottom",
-                fontsize=9,
+                fontsize=LEGEND_FONT_SIZE,
                 bbox={
                     "facecolor": "white",
                     "edgecolor": "#cccccc",
@@ -321,7 +326,6 @@ def _plot_metrics(candidate_results, out_base):
                     "alpha": 0.9,
                 },
             )
-        left_ax.set_title(f"{label}: sensitivity vs 1 - specificity")
         left_ax.set_xlabel("1 - specificity")
         left_ax.set_ylabel("Sensitivity")
         left_ax.set_xlim(
@@ -371,7 +375,6 @@ def _plot_metrics(candidate_results, out_base):
             right_ax.axvline(
                 best_dice_threshold, color="#2f8f5b", linewidth=1.3, linestyle=":"
             )
-        right_ax.set_title(f"{label}: metrics across positive thresholds")
         right_ax.set_xlabel(f"{label} z threshold")
         right_ax.set_ylabel("Metric value")
         right_ax.set_xlim(
@@ -380,15 +383,23 @@ def _plot_metrics(candidate_results, out_base):
         )
         right_ax.set_ylim(-0.01, 1.01)
         right_ax.grid(True, linewidth=0.6, alpha=0.25)
-        right_ax.legend(loc="best", fontsize=9)
+        legend_loc = "center right" if n_rows > 1 and row_index == n_rows - 1 else "best"
+        right_ax.legend(loc=legend_loc, fontsize=LEGEND_FONT_SIZE)
 
+    for ax in np.atleast_1d(axes).ravel():
+        ax.xaxis.label.set_fontsize(AXIS_TICK_FONT_SIZE)
+        ax.yaxis.label.set_fontsize(AXIS_TICK_FONT_SIZE)
+        ax.tick_params(labelsize=AXIS_TICK_FONT_SIZE)
+    for text in fig.findobj(match=Text):
+        text.set_fontfamily(PAPER_FONT_FAMILY)
     fig.tight_layout()
-    fig.savefig(f"{out_base}_sensitivity_1minus_specificity.png", dpi=300, bbox_inches="tight")
-    fig.savefig(f"{out_base}_sensitivity_1minus_specificity.pdf", bbox_inches="tight")
-    fig.savefig(f"{out_base}_sensitivity_specificity.png", dpi=300, bbox_inches="tight")
-    fig.savefig(f"{out_base}_sensitivity_specificity.pdf", bbox_inches="tight")
-    fig.savefig(f"{out_base}_roc.png", dpi=300, bbox_inches="tight")
-    fig.savefig(f"{out_base}_roc.pdf", bbox_inches="tight")
+    with plt.rc_context({"pdf.fonttype": 42, "ps.fonttype": 42}):
+        fig.savefig(f"{out_base}_sensitivity_1minus_specificity.png", dpi=300, bbox_inches="tight")
+        fig.savefig(f"{out_base}_sensitivity_1minus_specificity.pdf", bbox_inches="tight")
+        fig.savefig(f"{out_base}_sensitivity_specificity.png", dpi=300, bbox_inches="tight")
+        fig.savefig(f"{out_base}_sensitivity_specificity.pdf", bbox_inches="tight")
+        fig.savefig(f"{out_base}_roc.png", dpi=300, bbox_inches="tight")
+        fig.savefig(f"{out_base}_roc.pdf", bbox_inches="tight")
     plt.close(fig)
 
 
