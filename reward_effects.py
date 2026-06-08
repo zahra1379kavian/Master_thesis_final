@@ -71,10 +71,10 @@ def _parse_args() -> argparse.Namespace:
         "--rt-column",
         type=int,
         default=DEFAULT_RT_COLUMN_ONE_BASED,
-        help="One-based behaviour metric column containing inverse RT (1/RT). Default: 2.",
+        help="One-based behaviour metric column containing RT values to invert. Default: 2.",
     )
-    parser.add_argument("--min-rt", type=float, default=0.0, help="Minimum inverse RT value to include.")
-    parser.add_argument("--max-rt", type=float, default=None, help="Maximum inverse RT value to include.")
+    parser.add_argument("--min-rt", type=float, default=0.0, help="Minimum RT value to include before inversion.")
+    parser.add_argument("--max-rt", type=float, default=None, help="Maximum RT value to include before inversion.")
     return parser.parse_args()
 
 
@@ -215,16 +215,17 @@ def _build_trial_table(
                     f"{pair['subject']} {pair['medication']} GVS{gvs_number}: "
                     f"reward rows {reward.shape[0]} != behaviour rows {metric.shape[0]}"
                 )
-            inv_rt = metric[:, rt_column_index]
-            for row_index, (reward_code, inv_rt_value) in enumerate(zip(reward[:, gvs_index], inv_rt), start=1):
+            rt = metric[:, rt_column_index]
+            for row_index, (reward_code, rt_value) in enumerate(zip(reward[:, gvs_index], rt), start=1):
                 level = _reward_level(float(reward_code), low_codes=low_codes, high_codes=high_codes)
-                if level is None or not np.isfinite(inv_rt_value) or inv_rt_value <= 0:
+                if level is None or not np.isfinite(rt_value) or rt_value <= 0:
                     continue
-                inv_rt_value = float(inv_rt_value)
-                if min_rt is not None and inv_rt_value < min_rt:
+                rt_value = float(rt_value)
+                if min_rt is not None and rt_value < min_rt:
                     continue
-                if max_rt is not None and inv_rt_value > max_rt:
+                if max_rt is not None and rt_value > max_rt:
                     continue
+                inv_rt_value = 1.0 / rt_value
                 rows.append(
                     {
                         "subject": pair["subject"],
@@ -243,6 +244,7 @@ def _build_trial_table(
                         "reward_code": float(reward_code),
                         "reward_level": level,
                         "reward_high": 1 if level == "high" else 0,
+                        "rt": rt_value,
                         "inv_rt": inv_rt_value,
                         "reward_file": Path(pair["reward_path"]).name,
                         "behav_metrics_file": Path(pair["metrics_path"]).name,
@@ -430,13 +432,21 @@ def _format_t_test(row: pd.Series, label: str) -> str:
     )
 
 
-def _add_stat_annotation(ax: plt.Axes, text: str, y: float = 0.98, va: str = "top", fontsize: int = 9) -> None:
+def _add_stat_annotation(
+    ax: plt.Axes,
+    text: str,
+    x: float = 0.98,
+    y: float = 0.98,
+    ha: str = "right",
+    va: str = "top",
+    fontsize: int = 9,
+) -> None:
     ax.text(
-        0.98,
+        x,
         y,
         text,
         transform=ax.transAxes,
-        ha="right",
+        ha=ha,
         va=va,
         fontsize=fontsize,
         bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.75, "pad": 1.0},
@@ -496,10 +506,18 @@ def _save_paired_subject_figure(subject_summary: pd.DataFrame, stats_df: pd.Data
     )
     ax.set_xticks(x)
     ax.set_xticklabels(["Low reward", "High reward"])
-    ax.set_xlim(*PAIRED_COLUMN_X_LIMITS)
-    ax.set_ylabel("Inverse reaction time (1/s)")
+    ax.set_xlim(-0.08, 0.72)
+    ax.set_ylabel("RT (s)")
     primary = stats_df.loc[stats_df["analysis"] == "primary_subject_collapsed_across_medication_and_gvs"].iloc[0]
-    _add_stat_annotation(ax, _format_t_test(primary, "High-low"))
+    _add_stat_annotation(
+        ax,
+        _format_t_test(primary, "High-low"),
+        x=0.98,
+        y=0.62,
+        ha="right",
+        va="center",
+        fontsize=7,
+    )
     ax.spines[["top", "right"]].set_visible(False)
     ax.grid(axis="y", color="#E5E7EB", linewidth=0.8)
     fig.tight_layout()
@@ -534,10 +552,10 @@ def _save_medication_delta_figure(subject_medication: pd.DataFrame, stats_df: pd
     ax.set_xticks(x)
     ax.set_xticklabels(["OFF medication", "ON medication"])
     ax.set_xlim(*PAIRED_COLUMN_X_LIMITS)
-    ax.set_ylabel("high-low(1/s)")
+    ax.set_ylabel("High - low RT (s)")
     interaction = stats_df.loc[stats_df["analysis"] == "reward_delta_medication_interaction_on_minus_off"]
     if not interaction.empty:
-        _add_stat_annotation(ax, _format_t_test(interaction.iloc[0], "ON-OFF"), y=0.52, va="center")
+        _add_stat_annotation(ax, _format_t_test(interaction.iloc[0], "ON-OFF"))
     ax.spines[["top", "right"]].set_visible(False)
     ax.grid(axis="y", color="#E5E7EB", linewidth=0.8)
     fig.tight_layout()
@@ -569,7 +587,7 @@ def _save_gvs_delta_figure(subject_gvs: pd.DataFrame, stats_df: pd.DataFrame, ou
     ax.axhline(0, color=GVS_FIGURE_COLOR, linewidth=1.0, linestyle="--", alpha=0.65)
     ax.set_xticks(x)
     ax.set_xticklabels(summary["gvs_label"].tolist(), rotation=35, ha="right")
-    ax.set_ylabel("high-low(1/s)")
+    ax.set_ylabel("High - low RT (s)")
     _add_stat_annotation(ax, _gvs_stat_annotation(stats_df), fontsize=12)
     ax.spines[["top", "right"]].set_visible(False)
     ax.grid(axis="y", color="#E5E7EB", linewidth=0.8)
@@ -623,7 +641,7 @@ def _write_report(
         f"- High reward codes: {sorted(high_codes)}",
         f"- Excluded reward codes: {excluded_codes}",
         f"- Excluded subject/session entries: {excluded_subject_session_text}",
-        f"- Included finite inverse RT trials: {len(trials)}",
+        f"- Included finite 1/RT trials: {len(trials)}",
         f"- Subjects: {summary['subject']['subject'].nunique()}",
         "",
         "## Primary Paired Result",
@@ -726,7 +744,7 @@ def main() -> None:
         "excluded_subject_sessions": excluded_subject_sessions,
         "analysis_metric": "inverse_rt",
         "rt_column_one_based": int(args.rt_column),
-        "inverse_rt_definition": "inverse RT = behav_metrics{gvs}[:, rt_column]",
+        "inverse_rt_definition": "inverse RT = 1.0 / behav_metrics{gvs}[:, rt_column]",
         "output_files": sorted(str(path) for path in out_dir.iterdir() if path.is_file()),
         "figures": [str(path) for path in figures],
     }
