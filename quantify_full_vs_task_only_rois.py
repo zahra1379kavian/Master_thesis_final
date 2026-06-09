@@ -41,6 +41,21 @@ DEFAULT_OUT_BASE = Path("figures/ablation/ablation_full_vs_task_only_roi_quantif
 HARVARD_OXFORD_CORTICAL = "cort-maxprob-thr25-2mm"
 HARVARD_OXFORD_SUBCORTICAL = "sub-maxprob-thr25-2mm"
 WHITE_MATTER_LABEL_FRAGMENT = "Cerebral White Matter"
+ATLAS_MODE_CHOICES = (
+    "aal3",
+    "aal3_ho_fill",
+    "aal3_ho_nearest",
+    "aal3_subregions",
+    "aal3_subregions_ho_fill",
+    "aal3_subregions_ho_nearest",
+)
+HO_FILL_ATLAS_MODES = {
+    "aal3_ho_fill",
+    "aal3_ho_nearest",
+    "aal3_subregions_ho_fill",
+    "aal3_subregions_ho_nearest",
+}
+NEAREST_FILL_ATLAS_MODES = {"aal3_ho_nearest", "aal3_subregions_ho_nearest"}
 COMPARISON_COLORS = {
     "vigour_only": "#0072B2",
     "task_only": "#D55E00",
@@ -119,9 +134,36 @@ def _strip_laterality(label: str) -> str:
     return re.sub(r"^(Left|Right)\s+", "", label).strip()
 
 
+def _strip_aal_laterality(label: str) -> str:
+    return re.sub(r"_(L|R)$", "", label).strip()
+
+
+def _safe_subregion_name(label: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "_", _strip_laterality(label)).strip("_")
+    return cleaned or "Unmapped"
+
+
 def _safe_unknown_ho_name(label: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9]+", "_", _strip_laterality(label)).strip("_")
     return f"HO_{cleaned}" if cleaned else "HO_Unmapped"
+
+
+def _aal_subregion_name(label: str) -> str:
+    return _safe_subregion_name(_strip_aal_laterality(label))
+
+
+def _ho_subregion_name(label: str, family: str) -> str:
+    base = _strip_laterality(label)
+    if family == "subcortical":
+        exact = {
+            "Cerebral White Matter": "Cerebral_White_Matter",
+            "Cerebral Cortex": "Cerebral_Cortex",
+            "Lateral Ventricle": "Lateral_Ventricle",
+            "Accumbens": "N_Acc",
+            "Brain-Stem": "Brainstem_HO",
+        }
+        return exact.get(base, _safe_subregion_name(base))
+    return _safe_subregion_name(base)
 
 
 def _ho_group_name(label: str, family: str) -> str:
@@ -192,7 +234,41 @@ def _build_aal3_regions(
     reference_img: nib.Nifti1Image,
     cache_dir: Path,
     analysis_space_mask: np.ndarray,
+    subregions: bool = False,
 ) -> tuple[dict[str, RegionMask], np.ndarray, dict[str, object]]:
+    if subregions:
+        atlas = datasets.fetch_atlas_aal(version=DEFAULT_AAL_VERSION, data_dir=str(cache_dir), verbose=0)
+        atlas_data = _resample_labels(_atlas_img(atlas), reference_img)
+        atlas_source = f"AAL3v2 ({Path(str(atlas.maps)).name})"
+        label_pairs = [
+            (int(label_value), str(label_name))
+            for label_value, label_name in zip(atlas.indices, atlas.labels)
+            if int(label_value) != 0 and str(label_name).lower() != "background"
+        ]
+        regions: dict[str, RegionMask] = {}
+        assigned = np.zeros(reference_img.shape[:3], dtype=bool)
+        for label_value, label_name in label_pairs:
+            mask = (atlas_data == label_value) & analysis_space_mask
+            _add_region(regions, _aal_subregion_name(label_name), mask, atlas_source, label_name)
+            assigned |= mask
+        metadata = {
+            "roi_definition": "aal3_bilateral_subregions",
+            "priority_order": list(regions) + [UNASSIGNED_ROI],
+            "atlas_info": {
+                "name": "AAL3v2 bilateral subregions",
+                "description": atlas_source,
+                "version": DEFAULT_AAL_VERSION,
+                "map": str(atlas.maps),
+                "n_labels": len(label_pairs),
+                "n_regions": len(regions),
+                "grouping": "Left/right AAL labels merged only into bilateral subregions; broad anatomical groups are not used.",
+            },
+            "subregion_mode": True,
+            "roi_sources": {name: "; ".join(sorted(region.sources)) for name, region in regions.items()},
+            "roi_matched_labels": {name: tuple(region.matched_labels) for name, region in regions.items()},
+        }
+        return regions, assigned, metadata
+
     groups, metadata = _build_roi_groups(reference_img, DEFAULT_AAL_VERSION, cache_dir)
     regions: dict[str, RegionMask] = {}
     assigned = np.zeros(reference_img.shape[:3], dtype=bool)
@@ -209,6 +285,7 @@ def _add_harvard_oxford_fill(
     reference_img: nib.Nifti1Image,
     cache_dir: Path,
     analysis_space_mask: np.ndarray,
+    subregions: bool = False,
 ) -> np.ndarray:
     fill_specs = (
         (HARVARD_OXFORD_CORTICAL, "cortical", "Harvard-Oxford cortical maxprob-thr25 fill after AAL3"),
@@ -223,7 +300,11 @@ def _add_harvard_oxford_fill(
             fill_mask = (atlas_data == label_value) & analysis_space_mask & ~assigned
             if not np.any(fill_mask):
                 continue
-            group_name = _ho_group_name(str(label_name), family)
+            group_name = (
+                _ho_subregion_name(str(label_name), family)
+                if subregions
+                else _ho_group_name(str(label_name), family)
+            )
             _add_region(regions, group_name, fill_mask, source, str(label_name))
             assigned |= fill_mask
     return assigned
@@ -273,26 +354,53 @@ def _build_regions(
     atlas_mode: str,
     target_fill_mask: np.ndarray | None = None,
 ) -> tuple[dict[str, RegionMask], np.ndarray, dict[str, object]]:
-    regions, assigned, metadata = _build_aal3_regions(reference_img, cache_dir, analysis_space_mask)
-    if atlas_mode in {"aal3_ho_fill", "aal3_ho_nearest"}:
-        assigned = _add_harvard_oxford_fill(regions, assigned, reference_img, cache_dir, analysis_space_mask)
-        metadata = dict(metadata)
-        metadata["roi_definition"] = "aal3_bilateral_coarse_groups_with_harvard_oxford_fill"
-        metadata["fill_rule"] = (
-            "AAL3 coarse bilateral regions are assigned first; only AAL3-unassigned voxels are "
-            "filled from Harvard-Oxford cortical and subcortical maxprob-thr25 labels."
+    subregions = atlas_mode.startswith("aal3_subregions")
+    regions, assigned, metadata = _build_aal3_regions(reference_img, cache_dir, analysis_space_mask, subregions)
+    if atlas_mode in HO_FILL_ATLAS_MODES:
+        assigned = _add_harvard_oxford_fill(
+            regions,
+            assigned,
+            reference_img,
+            cache_dir,
+            analysis_space_mask,
+            subregions,
         )
-    if atlas_mode == "aal3_ho_nearest":
+        metadata = dict(metadata)
+        if subregions:
+            metadata["roi_definition"] = "aal3_bilateral_subregions_with_harvard_oxford_subregion_fill"
+            metadata["fill_rule"] = (
+                "AAL3 bilateral subregions are assigned first; only AAL3-unassigned voxels are "
+                "filled from exact Harvard-Oxford cortical and subcortical maxprob-thr25 labels."
+            )
+        else:
+            metadata["roi_definition"] = "aal3_bilateral_coarse_groups_with_harvard_oxford_fill"
+            metadata["fill_rule"] = (
+                "AAL3 coarse bilateral regions are assigned first; only AAL3-unassigned voxels are "
+                "filled from Harvard-Oxford cortical and subcortical maxprob-thr25 labels."
+            )
+        metadata["subregion_mode"] = bool(subregions)
+    if atlas_mode in NEAREST_FILL_ATLAS_MODES:
         if target_fill_mask is None:
             raise RuntimeError("target_fill_mask is required for nearest-label atlas fill.")
         assigned, n_nearest_filled = _add_nearest_label_fill(regions, assigned, target_fill_mask & analysis_space_mask)
         metadata = dict(metadata)
-        metadata["roi_definition"] = "aal3_bilateral_coarse_groups_with_harvard_oxford_and_nearest_selected_voxel_fill"
-        metadata["fill_rule"] = (
-            "AAL3 coarse bilateral regions are assigned first; AAL3-unassigned voxels are filled from "
-            "Harvard-Oxford cortical and subcortical maxprob-thr25 labels; remaining selected voxels "
-            "are assigned to the nearest existing anatomical label."
-        )
+        if subregions:
+            metadata["roi_definition"] = (
+                "aal3_bilateral_subregions_with_harvard_oxford_subregions_and_nearest_selected_voxel_fill"
+            )
+            metadata["fill_rule"] = (
+                "AAL3 bilateral subregions are assigned first; AAL3-unassigned voxels are filled from "
+                "exact Harvard-Oxford cortical and subcortical maxprob-thr25 labels; remaining selected "
+                "voxels are assigned to the nearest existing anatomical subregion label."
+            )
+        else:
+            metadata["roi_definition"] = "aal3_bilateral_coarse_groups_with_harvard_oxford_and_nearest_selected_voxel_fill"
+            metadata["fill_rule"] = (
+                "AAL3 coarse bilateral regions are assigned first; AAL3-unassigned voxels are filled from "
+                "Harvard-Oxford cortical and subcortical maxprob-thr25 labels; remaining selected voxels "
+                "are assigned to the nearest existing anatomical label."
+            )
+        metadata["subregion_mode"] = bool(subregions)
         metadata["nearest_label_filled_selected_voxels"] = int(n_nearest_filled)
     return regions, assigned, metadata
 
@@ -543,6 +651,12 @@ def _fmt_pct(value: float) -> str:
 
 
 def _selected_atlas_name(atlas_mode: str) -> str:
+    if atlas_mode == "aal3_subregions_ho_nearest":
+        return "AAL3v2 bilateral subregions + Harvard-Oxford exact-label fill + residual nearest-label fill"
+    if atlas_mode == "aal3_subregions_ho_fill":
+        return "AAL3v2 bilateral subregions + Harvard-Oxford exact-label fill"
+    if atlas_mode == "aal3_subregions":
+        return "AAL3v2 bilateral subregions"
     if atlas_mode == "aal3_ho_nearest":
         return "AAL3v2 + Harvard-Oxford + residual nearest-label fill"
     if atlas_mode == "aal3_ho_fill":
@@ -895,11 +1009,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--atlas-cache-dir", type=Path, default=DEFAULT_ATLAS_CACHE_DIR)
     parser.add_argument(
         "--atlas-mode",
-        choices=("aal3", "aal3_ho_fill", "aal3_ho_nearest"),
+        choices=ATLAS_MODE_CHOICES,
         default="aal3_ho_nearest",
         help=(
-            "Use AAL3 only, fill AAL3-unassigned voxels with Harvard-Oxford labels, or additionally "
-            "assign remaining selected voxels to the nearest existing anatomical label."
+            "Use coarse AAL3 groups, finer bilateral AAL3 subregions, optional Harvard-Oxford fill, "
+            "or additionally assign remaining selected voxels to the nearest existing anatomical label."
         ),
     )
     parser.add_argument(

@@ -26,6 +26,7 @@ from analyze_ablation_constraints import (
     _plane_slice,
 )
 from quantify_full_vs_task_only_rois import (
+    ATLAS_MODE_CHOICES,
     _build_regions,
     _exclude_white_matter,
     _load_figure_masks,
@@ -43,6 +44,8 @@ def _roi_colors(n: int) -> list[tuple[float, float, float, float]]:
     for palette in palettes:
         for idx in range(palette.N):
             colors.append(palette(idx))
+    if len(colors) < n:
+        colors.extend(plt.cm.hsv(np.linspace(0.0, 1.0, n - len(colors), endpoint=False)))
     return colors[:n]
 
 
@@ -170,12 +173,13 @@ def plot(args: argparse.Namespace) -> None:
     )
     legend_ax.set_title("ROI label (union % of ROI)", fontsize=10, loc="left", pad=8)
 
-    if args.atlas_mode == "aal3_ho_nearest":
-        atlas_note = "AAL3 first; Harvard-Oxford fill; residual non-white-matter voxels assigned to nearest anatomical label"
-    elif args.atlas_mode == "aal3_ho_fill":
-        atlas_note = "AAL3 first; Harvard-Oxford fill; atlas-uncovered selected voxels left Unassigned"
+    atlas_level = "AAL3 subregions" if args.atlas_mode.startswith("aal3_subregions") else "AAL3 coarse labels"
+    if args.atlas_mode.endswith("_nearest"):
+        atlas_note = f"{atlas_level} first; Harvard-Oxford fill; residual selected voxels assigned to nearest label"
+    elif args.atlas_mode.endswith("_ho_fill"):
+        atlas_note = f"{atlas_level} first; Harvard-Oxford fill; atlas-uncovered selected voxels left Unassigned"
     else:
-        atlas_note = "AAL3 coarse bilateral labels; atlas-uncovered selected voxels left Unassigned"
+        atlas_note = f"{atlas_level}; atlas-uncovered selected voxels left Unassigned"
     fig.suptitle(
         f"Brain ROI labels used for full-model vs task-activation quantification\n{atlas_note}",
         fontsize=14,
@@ -200,7 +204,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--task-map", type=Path, default=DEFAULT_TASK_ONLY_MAP)
     parser.add_argument("--task-z-threshold", type=float, default=DEFAULT_TASK_ONLY_Z_THRESHOLD)
     parser.add_argument("--atlas-cache-dir", type=Path, default=DEFAULT_ATLAS_CACHE_DIR)
-    parser.add_argument("--atlas-mode", choices=("aal3", "aal3_ho_fill", "aal3_ho_nearest"), default="aal3_ho_nearest")
+    parser.add_argument("--atlas-mode", choices=ATLAS_MODE_CHOICES, default="aal3_ho_nearest")
     parser.add_argument(
         "--include-white-matter",
         action="store_false",

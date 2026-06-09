@@ -506,22 +506,22 @@ def _save_paired_subject_figure(subject_summary: pd.DataFrame, stats_df: pd.Data
     )
     ax.set_xticks(x)
     ax.set_xticklabels(["Low reward", "High reward"])
-    ax.set_xlim(-0.08, 0.72)
+    ax.set_xlim(-0.03, 0.70)
     ax.set_ylabel("RT (s)")
     primary = stats_df.loc[stats_df["analysis"] == "primary_subject_collapsed_across_medication_and_gvs"].iloc[0]
     _add_stat_annotation(
         ax,
         _format_t_test(primary, "High-low"),
-        x=0.98,
+        x=0.94,
         y=0.62,
         ha="right",
         va="center",
-        fontsize=7,
+        fontsize=9,
     )
     ax.spines[["top", "right"]].set_visible(False)
     ax.grid(axis="y", color="#E5E7EB", linewidth=0.8)
     fig.tight_layout()
-    return _save_figure(fig, out_dir / "reward_rt_subject_paired")
+    return _save_figure(fig, out_dir / "reward_rt_subject_paired", pad_inches=0.03)
 
 
 def _save_medication_delta_figure(subject_medication: pd.DataFrame, stats_df: pd.DataFrame, out_dir: Path) -> list[Path]:
@@ -595,11 +595,11 @@ def _save_gvs_delta_figure(subject_gvs: pd.DataFrame, stats_df: pd.DataFrame, ou
     return _save_figure(fig, out_dir / "reward_rt_gvs_delta")
 
 
-def _save_figure(fig: plt.Figure, stem: Path) -> list[Path]:
+def _save_figure(fig: plt.Figure, stem: Path, pad_inches: float = 0.1) -> list[Path]:
     png_path = stem.with_suffix(".png")
     pdf_path = stem.with_suffix(".pdf")
-    fig.savefig(png_path, dpi=300, bbox_inches="tight")
-    fig.savefig(pdf_path, bbox_inches="tight")
+    fig.savefig(png_path, dpi=300, bbox_inches="tight", pad_inches=pad_inches)
+    fig.savefig(pdf_path, bbox_inches="tight", pad_inches=pad_inches)
     plt.close(fig)
     return [png_path, pdf_path]
 
