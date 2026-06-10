@@ -136,25 +136,53 @@ def load_report_edges(source_csv: Path, report_png: Path) -> pd.DataFrame:
     return matched.sort_values(["direction", "hemisphere_relation", "abs_mean"], ascending=[True, True, True]).copy()
 
 
-def add_panel(ax: plt.Axes, edges: pd.DataFrame, title: str, color: str, x_max: float) -> None:
+def load_possible_edge_denominators(source_csv: Path, report_png: Path) -> dict[str, int]:
+    metric_slug, scope_slug = parse_report_slug(report_png)
+    stats_csv = source_csv.with_name("edge_connectivity_metric_sensitivity_stats.csv")
+    if not stats_csv.exists():
+        raise FileNotFoundError(f"Missing full stats CSV needed for edge-density denominators: {stats_csv}")
+
+    df = pd.read_csv(stats_csv, low_memory=False)
+    df = df.dropna(subset=["roi_i", "roi_j"]).copy()
+    df["metric_slug"] = df["metric"].map(clean_slug)
+    df["scope_slug"] = [clean_slug(f"{view}_{scope}") for view, scope in zip(df["analysis_view"], df["fdr_scope"], strict=True)]
+
+    matched = df.loc[(df["metric_slug"] == metric_slug) & (df["scope_slug"] == scope_slug)].copy()
+    if matched.empty:
+        raise ValueError(f"No full-stat edge rows matched {report_png.name} in {stats_csv}")
+
+    matched["hemisphere_relation"] = [
+        hemisphere_relation(roi_i, roi_j) for roi_i, roi_j in zip(matched["roi_i"], matched["roi_j"], strict=True)
+    ]
+    unknown = matched.loc[matched["hemisphere_relation"] == "Unclassified", ["roi_i", "roi_j"]]
+    if not unknown.empty:
+        preview = unknown.head(5).to_dict(orient="records")
+        raise ValueError(f"Found denominator edges without _L/_R hemisphere labels: {preview}")
+
+    return {relation: int((matched["hemisphere_relation"] == relation).sum()) for relation in ROW_ORDER}
+
+
+def add_panel(ax: plt.Axes, edges: pd.DataFrame, title: str, color: str, x_max: float, denominators: dict[str, int]) -> None:
     ax.axvline(0.0, color="#555555", linewidth=0.9, zorder=0)
     rng = np.random.default_rng(20260610)
 
     for relation in ROW_ORDER:
         relation_edges = edges.loc[edges["hemisphere_relation"] == relation].copy()
         y_center = Y_POSITIONS[relation]
-        if relation_edges.empty:
-            continue
-        jitter = rng.uniform(-0.11, 0.11, size=relation_edges.shape[0])
-        x = relation_edges["plot_value"].to_numpy(dtype=float)
-        y = y_center + jitter
-        ax.scatter(x, y, s=25, color=color, alpha=0.72, edgecolor="white", linewidth=0.45, zorder=3)
-        median_value = float(np.nanmedian(x))
-        ax.plot([median_value, median_value], [y_center - 0.18, y_center + 0.18], color="#202020", linewidth=1.25, zorder=4)
+        if not relation_edges.empty:
+            jitter = rng.uniform(-0.11, 0.11, size=relation_edges.shape[0])
+            x = relation_edges["plot_value"].to_numpy(dtype=float)
+            y = y_center + jitter
+            ax.scatter(x, y, s=25, color=color, alpha=0.72, edgecolor="white", linewidth=0.45, zorder=3)
+            median_value = float(np.nanmedian(x))
+            ax.plot([median_value, median_value], [y_center - 0.18, y_center + 0.18], color="#202020", linewidth=1.25, zorder=4)
+
+        denominator = denominators.get(relation, 0)
+        density_label = "NA" if denominator <= 0 else f"{relation_edges.shape[0] / denominator:.1%}"
         ax.text(
             0.985,
             y_center,
-            f"n={relation_edges.shape[0]}",
+            density_label,
             transform=ax.get_yaxis_transform(),
             ha="right",
             va="center",
@@ -176,7 +204,7 @@ def add_panel(ax: plt.Axes, edges: pd.DataFrame, title: str, color: str, x_max: 
     ax.tick_params(axis="x", labelsize=9.8)
 
 
-def plot_hemisphere_rows(edges: pd.DataFrame, path_base: Path) -> None:
+def plot_hemisphere_rows(edges: pd.DataFrame, denominators: dict[str, int], path_base: Path) -> None:
     positive = edges.loc[edges["mean"] > 0].copy()
     negative = edges.loc[edges["mean"] < 0].copy()
     if positive.empty or negative.empty:
@@ -186,8 +214,9 @@ def plot_hemisphere_rows(edges: pd.DataFrame, path_base: Path) -> None:
     x_max = max(max_value * 1.12, max_value + 0.005)
 
     fig, axes = plt.subplots(2, 1, figsize=(7.4, 4.65), sharex=True)
-    add_panel(axes[0], positive, "Improved", INCREASE_COLOR, x_max)
-    add_panel(axes[1], negative, "Decrement", DECREASE_COLOR, x_max)
+    add_panel(axes[0], positive, "Improved", INCREASE_COLOR, x_max, denominators)
+    add_panel(axes[1], negative, "Decrement", DECREASE_COLOR, x_max, denominators)
+    fig.text(0.985, 0.982, "Significant-edge density", ha="right", va="top", fontsize=8.8, color="#555555")
     axes[1].set_xlabel("Absolute edge-change value", fontsize=11.2)
     fig.subplots_adjust(left=0.23, right=0.985, top=0.965, bottom=0.135, hspace=0.42)
     fig.savefig(path_base.with_suffix(".png"), dpi=300, bbox_inches="tight")
@@ -206,8 +235,9 @@ def process_report(report_png: Path, source_csv: Path) -> Path:
         raise FileNotFoundError(f"Missing source CSV: {source_csv}")
 
     edges = load_report_edges(source_csv, report_png)
+    denominators = load_possible_edge_denominators(source_csv, report_png)
     path_base = output_base(report_png)
-    plot_hemisphere_rows(edges, path_base)
+    plot_hemisphere_rows(edges, denominators, path_base)
     export_cols = [
         "metric",
         "analysis_view",
