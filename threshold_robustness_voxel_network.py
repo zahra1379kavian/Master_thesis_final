@@ -25,6 +25,9 @@ from scipy import ndimage
 DEFAULT_MAP = Path(
     "data/voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5.nii.gz"
 )
+DEFAULT_REFERENCE_HTML = Path(
+    "data/voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5_bold_thr90.html"
+)
 DEFAULT_OUT_BASE = Path(
     "figures/voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5_threshold_robustness"
 )
@@ -247,6 +250,47 @@ def _make_group_label_data(groups: list[ROIGroup], shape: tuple[int, int, int]) 
     for label_id, group in enumerate(groups, start=1):
         label_data[group.mask] = label_id
     return label_data
+
+
+def _align_mask_to_affine(mask: np.ndarray, source_affine: np.ndarray, target_affine: np.ndarray) -> np.ndarray:
+    aligned = mask.copy()
+    for axis in range(3):
+        source_step = float(source_affine[axis, axis])
+        target_step = float(target_affine[axis, axis])
+        if source_step != 0.0 and target_step != 0.0 and np.sign(source_step) != np.sign(target_step):
+            aligned = np.flip(aligned, axis=axis)
+    return aligned
+
+
+def _reference_display_mask(
+    reference_html: Path,
+    reference_img: nib.Nifti1Image,
+) -> tuple[np.ndarray, dict[str, object]]:
+    from analyze_ablation_constraints import _html_sprite_volumes
+    from motor_overlap_overlay import motor_overlap_masks
+
+    _, selected_mask, html_affine = _html_sprite_volumes(reference_html)
+    if selected_mask.shape != reference_img.shape[:3]:
+        raise RuntimeError(
+            f"{reference_html} overlay shape {selected_mask.shape} does not match "
+            f"reference image shape {reference_img.shape[:3]}."
+        )
+
+    motor_display_mask, shared_motor_mask = motor_overlap_masks(selected_mask, html_affine)
+    display_mask = selected_mask | motor_display_mask
+    aligned_display_mask = _align_mask_to_affine(display_mask, html_affine, reference_img.affine)
+
+    metadata = {
+        "enabled": True,
+        "html": str(reference_html),
+        "definition": "HTML p90 selected mask plus motor-overlap display voxels, matching the weights colorbar figure.",
+        "html_selected_voxels": int(np.count_nonzero(selected_mask)),
+        "shared_motor_voxels": int(np.count_nonzero(shared_motor_mask)),
+        "motor_overlap_display_voxels": int(np.count_nonzero(motor_display_mask)),
+        "display_voxels": int(np.count_nonzero(display_mask)),
+        "display_voxels_added_beyond_html": int(np.count_nonzero(motor_display_mask & ~selected_mask)),
+    }
+    return aligned_display_mask, metadata
 
 
 def _mode_projection(label_data: np.ndarray, axis: int) -> np.ndarray:
@@ -585,6 +629,13 @@ def _write_report(
     p85 = summary_df[np.isclose(summary_df["percentile"], 85.0)].iloc[0]
     atlas_info = metadata.get("atlas_info", {})
     atlas_name = atlas_info.get("description", DEFAULT_ATLAS_NAME) if isinstance(atlas_info, dict) else DEFAULT_ATLAS_NAME
+    reference_display = metadata.get("reference_display_mask", {})
+    reference_display_text = ""
+    if isinstance(reference_display, dict) and reference_display.get("enabled"):
+        reference_display_text = (
+            f"- The displayed p90 montage from `{reference_display.get('html')}` contains "
+            f"{int(reference_display.get('display_voxels')):,} voxels; this is shown separately from the raw percentile sweep.\n"
+        )
 
     verdict = (
         "The main network is robust at the anatomical-group level across p85-p95: most p90 groups remain reportable "
@@ -603,7 +654,7 @@ Reference visualization: p90-style thresholding of the final voxel-weight networ
 
 - Thresholded nonzero voxel weights at percentiles: {", ".join(_pct_label(p) for p in summary_df["percentile"])}.
 - Used p90 as the reference threshold and treated p85/p95 as the main relaxed/tightened sensitivity range.
-- Assigned suprathreshold voxels to the current AAL3 atlas using {atlas_name}.
+{reference_display_text}- Assigned suprathreshold voxels to the current AAL3 atlas using {atlas_name}.
 - Merged left/right AAL labels and repeated subparcels into coarser bilateral anatomical groups; the atlas map itself was not changed.
 - Counted a group as reportable when it contained at least {min_report_voxels} suprathreshold voxels.
 
@@ -646,6 +697,17 @@ Then list the stable core and the threshold-sensitive nodes from the bullets abo
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Analyze threshold robustness of the final voxel-weight network.")
     parser.add_argument("--map", type=Path, default=DEFAULT_MAP, help="Input unthresholded voxel-weight NIfTI map.")
+    parser.add_argument(
+        "--reference-html",
+        type=Path,
+        default=DEFAULT_REFERENCE_HTML,
+        help="Displayed p90 HTML map used to match the p90 voxel count in the weights figure.",
+    )
+    parser.add_argument(
+        "--use-reference-display-mask",
+        action="store_true",
+        help="Use the displayed p90 HTML mask instead of the raw p90 percentile mask.",
+    )
     parser.add_argument("--out-base", type=Path, default=DEFAULT_OUT_BASE, help="Output path stem.")
     parser.add_argument(
         "--thresholds",
@@ -686,10 +748,17 @@ def main() -> None:
     values = weights[nonzero]
     threshold_values = {p: float(np.percentile(values, p)) for p in percentiles}
     threshold_masks = {p: nonzero & (weights >= threshold_values[p]) for p in percentiles}
+    display_mask, display_metadata = _reference_display_mask(args.reference_html, img)
+    if args.use_reference_display_mask:
+        threshold_masks[REFERENCE_THRESHOLD] = display_mask
+        display_metadata["used_for_threshold_masks"] = True
+    else:
+        display_metadata["used_for_threshold_masks"] = False
     groups, metadata = _build_roi_groups(img, args.aal_version, args.atlas_cache_dir)
     metadata.update(
         {
             "map": str(args.map),
+            "reference_display_mask": display_metadata,
             "threshold_percentiles": percentiles,
             "reference_threshold": REFERENCE_THRESHOLD,
             "main_threshold_range": MAIN_THRESHOLDS,

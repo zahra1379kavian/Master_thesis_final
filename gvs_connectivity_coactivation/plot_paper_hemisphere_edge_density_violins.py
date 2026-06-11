@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot inter/intra FDR-significant edge densities as bootstrap violins."""
+"""Plot inter/intra FDR-significant edge densities as observed bars."""
 
 from __future__ import annotations
 
@@ -60,9 +60,6 @@ INCREMENT_COLOR = "#d95f02"
 DECREMENT_COLOR = "#2166ac"
 DIRECTION_ORDER = (("Improved", "Increment"), ("Decrement", "Decrement"))
 RELATION_ORDER = (("Between hemispheres", "Inter"), ("Within hemisphere", "intra"))
-N_BOOTSTRAP = 10_000
-RNG_SEED = 20260610
-
 plt.rcParams.update(
     {
         "font.family": "sans-serif",
@@ -166,16 +163,7 @@ def load_edge_table(
     return matched
 
 
-def bootstrap_density(indicator: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-    indicator = np.asarray(indicator, dtype=np.float64)
-    if indicator.size == 0:
-        raise ValueError("Cannot bootstrap an empty edge group.")
-    sample_indices = rng.integers(0, indicator.size, size=(N_BOOTSTRAP, indicator.size))
-    return indicator[sample_indices].mean(axis=1)
-
-
 def build_groups(data: pd.DataFrame, result_labels: tuple[str, str]) -> list[dict[str, object]]:
-    rng = np.random.default_rng(RNG_SEED)
     groups: list[dict[str, object]] = []
     for result_index, result_label in enumerate(result_labels):
         base_position = result_index * 4.85
@@ -190,7 +178,8 @@ def build_groups(data: pd.DataFrame, result_labels: tuple[str, str]) -> list[dic
                     subset["is_significant_edge"]
                     & subset["direction"].eq(direction_key)
                 ).to_numpy(dtype=np.float64)
-                densities = bootstrap_density(indicator, rng)
+                if indicator.size == 0:
+                    raise ValueError("Cannot compute density for an empty edge group.")
                 groups.append(
                     {
                         "result_set": result_label,
@@ -199,7 +188,6 @@ def build_groups(data: pd.DataFrame, result_labels: tuple[str, str]) -> list[dic
                         "hemisphere_relation": relation_key,
                         "relation_label": relation_label,
                         "position": position,
-                        "values": densities,
                         "n_edges_tested": int(indicator.size),
                         "n_sig_edges": int(indicator.sum()),
                         "observed_density": float(indicator.mean()),
@@ -256,7 +244,6 @@ def density_tests(groups: list[dict[str, object]]) -> list[dict[str, object]]:
 def write_group_summary(groups: list[dict[str, object]], output_base: Path) -> Path:
     rows = []
     for group in groups:
-        values = np.asarray(group["values"], dtype=np.float64)
         rows.append(
             {
                 "result_set": group["result_set"],
@@ -265,12 +252,6 @@ def write_group_summary(groups: list[dict[str, object]], output_base: Path) -> P
                 "n_sig_edges": group["n_sig_edges"],
                 "n_edges_tested": group["n_edges_tested"],
                 "observed_density": group["observed_density"],
-                "bootstrap_mean_density": float(np.mean(values)),
-                "bootstrap_median_density": float(np.median(values)),
-                "bootstrap_q1_density": float(np.percentile(values, 25)),
-                "bootstrap_q3_density": float(np.percentile(values, 75)),
-                "bootstrap_p025_density": float(np.percentile(values, 2.5)),
-                "bootstrap_p975_density": float(np.percentile(values, 97.5)),
             }
         )
     path = output_base.with_name(f"{output_base.name}_summary.csv")
@@ -329,58 +310,31 @@ def add_test_annotation(ax: plt.Axes, row: dict[str, object], y_limit: float) ->
     )
 
 
-def plot_density_violins(
+def plot_density_bars(
     groups: list[dict[str, object]],
     test_rows: list[dict[str, object]],
     output_base: Path,
 ) -> tuple[Path, Path]:
     positions = [float(group["position"]) for group in groups]
-    values = [np.asarray(group["values"], dtype=np.float64) for group in groups]
     colors = [group_color(group) for group in groups]
     observed = [float(group["observed_density"]) for group in groups]
 
-    max_density = max(float(np.percentile(group_values, 99.5)) for group_values in values)
     max_observed = max(observed)
-    y_limit = np.ceil(max(max_density * 1.45, max_observed * 1.55, 0.08) / 0.025) * 0.025
+    y_limit = np.ceil(max(max_observed * 1.70, 0.08) / 0.025) * 0.025
 
     fig, ax = plt.subplots(figsize=(9.6, 4.2))
-    violins = ax.violinplot(
-        values,
-        positions=positions,
-        widths=0.75,
-        showmeans=False,
-        showmedians=False,
-        showextrema=False,
+    ax.bar(
+        x=positions,
+        height=observed,
+        width=0.58,
+        color=colors,
+        alpha=0.86,
+        edgecolor="#303030",
+        linewidth=0.8,
+        zorder=3,
     )
-    for body, color in zip(violins["bodies"], colors, strict=True):
-        body.set_facecolor(color)
-        body.set_edgecolor("none")
-        body.set_alpha(0.2)
-
-    box = ax.boxplot(
-        values,
-        positions=positions,
-        widths=0.22,
-        patch_artist=True,
-        showfliers=False,
-        medianprops={"color": "#ffffff", "linewidth": 1.35},
-        whiskerprops={"color": "#444444", "linewidth": 0.85},
-        capprops={"color": "#444444", "linewidth": 0.85},
-    )
-    for patch, color in zip(box["boxes"], colors, strict=True):
-        patch.set_facecolor(color)
-        patch.set_alpha(0.86)
-        patch.set_edgecolor("#303030")
-        patch.set_linewidth(0.8)
-
-    rng = np.random.default_rng(RNG_SEED + 1)
-    for position, group_values, color in zip(positions, values, colors, strict=True):
-        sample = rng.choice(group_values, size=min(260, group_values.size), replace=False)
-        jitter = rng.normal(loc=position, scale=0.045, size=sample.size)
-        ax.scatter(jitter, sample, s=6, color=color, alpha=0.12, linewidths=0.0, zorder=2)
 
     for position, density, group, color in zip(positions, observed, groups, colors, strict=True):
-        ax.scatter([position], [density], s=36, color=color, edgecolor="white", linewidth=0.65, zorder=5)
         count_label = f"{int(group['n_sig_edges'])}/{int(group['n_edges_tested'])}"
         ax.text(
             position,
@@ -459,7 +413,7 @@ def main() -> int:
     result_labels = tuple(label for label, _ in inputs)
     groups = build_groups(data, result_labels)
     test_rows = density_tests(groups)
-    png_path, pdf_path = plot_density_violins(groups, test_rows, args.output_base)
+    png_path, pdf_path = plot_density_bars(groups, test_rows, args.output_base)
     summary_path = write_group_summary(groups, args.output_base)
     test_path = write_test_summary(test_rows, args.output_base)
     print(png_path)
