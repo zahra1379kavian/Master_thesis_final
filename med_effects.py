@@ -35,7 +35,12 @@ DEFAULT_NODE_STRENGTH_TOP_N = 16
 CONNECTIVITY_METRIC = 'mutual_information_ksg'
 CONNECTIVITY_METRICS = ('mutual_information_ksg', 'spearman_correlation')
 COMPARISON_METRIC = 'laplacian_spectral_distance_signed'
-INTRA_BETWEEN_FC_METRIC = 'pearson_fisher_z'
+INTRA_BETWEEN_FC_METRIC_PEARSON = 'pearson_fisher_z'
+INTRA_BETWEEN_FC_METRIC_MI_QUANTILE = 'mutual_info_quantile'
+INTRA_BETWEEN_FC_METRICS = (INTRA_BETWEEN_FC_METRIC_PEARSON, INTRA_BETWEEN_FC_METRIC_MI_QUANTILE)
+INTRA_BETWEEN_FC_METRIC = INTRA_BETWEEN_FC_METRIC_PEARSON
+DEFAULT_MI_QUANTILE_BINS = 3
+DEFAULT_MI_QUANTILE_BLOCK_SIZE = 1024
 VOXEL_SELECTION_WEIGHTED_VIGOUR = 'weighted-vigour'
 VOXEL_SELECTION_UNWEIGHTED_VIGOUR = 'unweighted-vigour'
 VOXEL_SELECTION_MATCHED_NONVIGOUR = 'matched-nonvigour'
@@ -1526,7 +1531,165 @@ def _mean_pairwise_fisher_z_pairwise_complete(values, weights=None, min_overlap=
         'n_pairs': int(pair_z.size),
     }
 
-def _between_roi_fc_summary(cleaned_roi_timeseries):
+def _quantile_codes_1d(values, n_bins=DEFAULT_MI_QUANTILE_BINS):
+    values = np.asarray(values, dtype=np.float64)
+    if values.size == 0 or np.nanstd(values) == 0:
+        return np.zeros(values.size, dtype=np.int16)
+    bins = min(max(2, int(n_bins)), max(2, int(np.unique(values).size)))
+    order = np.argsort(values, kind='mergesort')
+    codes = np.empty(values.size, dtype=np.int16)
+    codes[order] = np.floor(np.arange(values.size) * bins / values.size).astype(np.int16)
+    return np.minimum(codes, bins - 1)
+
+def _quantile_codes_matrix(values, n_bins=DEFAULT_MI_QUANTILE_BINS):
+    values = np.asarray(values, dtype=np.float64)
+    if values.ndim != 2:
+        raise RuntimeError(f'Expected a 2D time-by-feature matrix, got shape {values.shape}')
+    codes = np.zeros(values.shape, dtype=np.int16)
+    for feature_index in range(values.shape[1]):
+        finite = np.isfinite(values[:, feature_index])
+        if np.any(finite):
+            codes[finite, feature_index] = _quantile_codes_1d(values[finite, feature_index], n_bins=n_bins)
+    return codes
+
+def _mutual_information_quantile_pair(x, y, n_bins=DEFAULT_MI_QUANTILE_BINS):
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    finite = np.isfinite(x) & np.isfinite(y)
+    x = x[finite]
+    y = y[finite]
+    if x.size < 4:
+        return float('nan')
+    if np.std(x) == 0 or np.std(y) == 0:
+        return 0.0
+    x_code = _quantile_codes_1d(x, n_bins=n_bins)
+    y_code = _quantile_codes_1d(y, n_bins=n_bins)
+    joint = np.zeros((int(x_code.max()) + 1, int(y_code.max()) + 1), dtype=np.float64)
+    np.add.at(joint, (x_code, y_code), 1.0)
+    joint /= joint.sum()
+    px = joint.sum(axis=1)
+    py = joint.sum(axis=0)
+    denom = px[:, None] * py[None, :]
+    valid = joint > 0
+    return float(np.sum(joint[valid] * np.log(joint[valid] / denom[valid])))
+
+def _mean_pairwise_mutual_info_quantile(cleaned, weights=None, n_bins=DEFAULT_MI_QUANTILE_BINS, block_size=DEFAULT_MI_QUANTILE_BLOCK_SIZE):
+    values = np.asarray(cleaned, dtype=np.float64)
+    if values.ndim != 2:
+        raise RuntimeError(f'Expected a 2D time-by-feature matrix, got shape {values.shape}')
+    n_timepoints, _ = values.shape
+    finite = np.isfinite(values)
+    usable_features = np.sum(finite, axis=0) >= 4
+    values = values[:, usable_features]
+    finite = finite[:, usable_features]
+    n_features = values.shape[1]
+    if weights is not None:
+        weights = np.asarray(weights, dtype=np.float64)[usable_features]
+    if n_timepoints < 4 or n_features < 2:
+        return {
+            'mean_mi': float('nan'),
+            'n_features': int(n_features),
+            'n_pairs': 0,
+        }
+    n_bins = max(2, int(n_bins))
+    block_size = max(1, int(block_size))
+    codes = _quantile_codes_matrix(values, n_bins=n_bins)
+    finite_mask = finite.astype(np.float64)
+    bin_masks = [(finite & (codes == bin_index)).astype(np.float64) for bin_index in range(n_bins)]
+    if weights is not None:
+        if weights.size != n_features:
+            raise RuntimeError(f'Expected {n_features} feature weights, got {weights.size}')
+    feature_indices = np.arange(n_features)
+    weighted_sum = 0.0
+    total_weight = 0.0
+    n_pairs = 0
+    for start in range(0, n_features, block_size):
+        stop = min(n_features, start + block_size)
+        block_len = stop - start
+        mi_block = np.zeros((block_len, n_features), dtype=np.float64)
+        joint_counts = []
+        left_counts = [np.zeros((block_len, n_features), dtype=np.float64) for _ in range(n_bins)]
+        right_counts = [np.zeros((block_len, n_features), dtype=np.float64) for _ in range(n_bins)]
+        for left_bin in range(n_bins):
+            left = bin_masks[left_bin][:, start:stop].T
+            for right_bin in range(n_bins):
+                counts = left @ bin_masks[right_bin]
+                joint_counts.append((left_bin, right_bin, counts))
+                left_counts[left_bin] += counts
+                right_counts[right_bin] += counts
+        overlap = finite_mask[:, start:stop].T @ finite_mask
+        enough_overlap = overlap >= 4
+        for (left_bin, right_bin, counts) in joint_counts:
+            denom = left_counts[left_bin] * right_counts[right_bin]
+            valid = (counts > 0) & (denom > 0) & enough_overlap
+            mi_block[valid] += (counts[valid] / overlap[valid]) * np.log((counts[valid] * overlap[valid]) / denom[valid])
+        upper = feature_indices[None, :] > feature_indices[start:stop, None]
+        if weights is None:
+            valid_pairs = upper & enough_overlap & np.isfinite(mi_block)
+            weighted_sum += float(np.sum(mi_block[valid_pairs]))
+            pair_count = int(np.count_nonzero(valid_pairs))
+            total_weight += float(pair_count)
+            n_pairs += pair_count
+        else:
+            pair_weights = weights[start:stop, None] * weights[None, :]
+            valid_pairs = upper & enough_overlap & np.isfinite(mi_block) & np.isfinite(pair_weights) & (pair_weights > 0)
+            weighted_sum += float(np.sum(mi_block[valid_pairs] * pair_weights[valid_pairs]))
+            pair_weight_sum = float(np.sum(pair_weights[valid_pairs]))
+            total_weight += pair_weight_sum
+            n_pairs += int(np.count_nonzero(valid_pairs))
+    mean_mi = weighted_sum / total_weight if total_weight > 0 else float('nan')
+    return {
+        'mean_mi': float(mean_mi),
+        'n_features': int(n_features),
+        'n_pairs': int(n_pairs),
+    }
+
+def _mean_pairwise_mutual_info_quantile_pairwise_complete(values, weights=None, n_bins=DEFAULT_MI_QUANTILE_BINS, min_overlap=4):
+    values = np.asarray(values, dtype=np.float64)
+    if values.ndim != 2:
+        raise RuntimeError(f'Expected a 2D time-by-feature matrix, got shape {values.shape}')
+    finite = np.isfinite(values)
+    usable_features = np.sum(finite, axis=0) >= int(min_overlap)
+    values = values[:, usable_features]
+    n_features = values.shape[1]
+    if weights is not None:
+        weights = np.asarray(weights, dtype=np.float64)[usable_features]
+    if n_features < 2:
+        return {
+            'mean_mi': float('nan'),
+            'n_features': int(n_features),
+            'n_pairs': 0,
+        }
+    weighted_sum = 0.0
+    total_weight = 0.0
+    n_pairs = 0
+    for (left, right) in itertools.combinations(range(n_features), 2):
+        mi = _mutual_information_quantile_pair(values[:, left], values[:, right], n_bins=n_bins)
+        if not np.isfinite(mi):
+            continue
+        if weights is None:
+            pair_weight = 1.0
+        else:
+            pair_weight = float(weights[left] * weights[right])
+            if not np.isfinite(pair_weight) or pair_weight <= 0:
+                continue
+        weighted_sum += float(mi) * pair_weight
+        total_weight += pair_weight
+        n_pairs += 1
+    return {
+        'mean_mi': float(weighted_sum / total_weight) if total_weight > 0 else float('nan'),
+        'n_features': int(n_features),
+        'n_pairs': int(n_pairs),
+    }
+
+def _between_roi_fc_summary(cleaned_roi_timeseries, mi_quantile_bins=DEFAULT_MI_QUANTILE_BINS):
+    if INTRA_BETWEEN_FC_METRIC == INTRA_BETWEEN_FC_METRIC_MI_QUANTILE:
+        summary = _mean_pairwise_mutual_info_quantile(cleaned_roi_timeseries, n_bins=mi_quantile_bins)
+        return {
+            'between_roi_mean_mi': summary['mean_mi'],
+            'n_rois': summary['n_features'],
+            'n_between_roi_pairs': summary['n_pairs'],
+        }
     summary = _mean_pairwise_fisher_z(cleaned_roi_timeseries)
     return {
         'between_roi_mean_z': summary['mean_z'],
@@ -1535,45 +1698,78 @@ def _between_roi_fc_summary(cleaned_roi_timeseries):
         'n_between_roi_pairs': summary['n_pairs'],
     }
 
-def _intra_roi_fc_values(spec, voxel_timeseries, rois):
+def _intra_roi_fc_values(spec, voxel_timeseries, rois, mi_quantile_bins=DEFAULT_MI_QUANTILE_BINS):
     roi_rows = []
     roi_mean_values = []
     for roi in rois:
-        cleaned, valid_voxels = _clean_feature_timeseries(voxel_timeseries[roi.name])
-        weights = np.asarray(roi.weights, dtype=np.float64)[valid_voxels]
-        summary = _mean_pairwise_fisher_z(cleaned, weights=weights)
-        estimation = 'common_complete_timepoints'
-        if not np.isfinite(summary['mean_z']):
-            summary = _mean_pairwise_fisher_z_pairwise_complete(voxel_timeseries[roi.name], weights=roi.weights)
-            estimation = 'pairwise_complete_timepoints'
-        if np.isfinite(summary['mean_z']):
-            roi_mean_values.append(summary['mean_z'])
-        roi_rows.append({
-            'connectivity_metric': INTRA_BETWEEN_FC_METRIC,
-            'analysis': 'intra_roi_voxel_fc',
-            'label': spec.label,
-            'subject': spec.subject,
-            'session': spec.session,
-            'state': spec.state,
-            'roi': roi.name,
-            'n_weighted_voxels': int(roi.n_voxels),
-            'n_used_voxels': summary['n_features'],
-            'n_voxel_pairs': summary['n_pairs'],
-            'intra_roi_mean_z': summary['mean_z'],
-            'intra_roi_mean_r': summary['mean_r'],
-            'intra_roi_estimation': estimation,
-        })
-    session_mean_z = float(np.mean(roi_mean_values)) if roi_mean_values else float('nan')
-    session_summary = {
-        'within_roi_mean_z': session_mean_z,
-        'within_roi_mean_r': float(np.tanh(session_mean_z)) if np.isfinite(session_mean_z) else float('nan'),
-        'n_within_roi_values': int(len(roi_mean_values)),
-        'within_roi_aggregation': 'equal_roi_mean_of_roi_level_weighted_voxel_pair_fisher_z',
-    }
+        if INTRA_BETWEEN_FC_METRIC == INTRA_BETWEEN_FC_METRIC_MI_QUANTILE:
+            summary = _mean_pairwise_mutual_info_quantile(voxel_timeseries[roi.name], weights=roi.weights, n_bins=mi_quantile_bins)
+            estimation = 'featurewise_quantile_pairwise_complete_timepoints'
+            if not np.isfinite(summary['mean_mi']):
+                summary = _mean_pairwise_mutual_info_quantile_pairwise_complete(voxel_timeseries[roi.name], weights=roi.weights, n_bins=mi_quantile_bins)
+                estimation = 'pairwise_complete_timepoints'
+            if np.isfinite(summary['mean_mi']):
+                roi_mean_values.append(summary['mean_mi'])
+            roi_rows.append({
+                'connectivity_metric': INTRA_BETWEEN_FC_METRIC,
+                'analysis': 'intra_roi_voxel_fc',
+                'label': spec.label,
+                'subject': spec.subject,
+                'session': spec.session,
+                'state': spec.state,
+                'roi': roi.name,
+                'n_weighted_voxels': int(roi.n_voxels),
+                'n_used_voxels': summary['n_features'],
+                'n_voxel_pairs': summary['n_pairs'],
+                'intra_roi_mean_mi': summary['mean_mi'],
+                'mi_quantile_bins': int(mi_quantile_bins),
+                'intra_roi_estimation': estimation,
+            })
+        else:
+            cleaned, valid_voxels = _clean_feature_timeseries(voxel_timeseries[roi.name])
+            weights = np.asarray(roi.weights, dtype=np.float64)[valid_voxels]
+            summary = _mean_pairwise_fisher_z(cleaned, weights=weights)
+            estimation = 'common_complete_timepoints'
+            if not np.isfinite(summary['mean_z']):
+                summary = _mean_pairwise_fisher_z_pairwise_complete(voxel_timeseries[roi.name], weights=roi.weights)
+                estimation = 'pairwise_complete_timepoints'
+            if np.isfinite(summary['mean_z']):
+                roi_mean_values.append(summary['mean_z'])
+            roi_rows.append({
+                'connectivity_metric': INTRA_BETWEEN_FC_METRIC,
+                'analysis': 'intra_roi_voxel_fc',
+                'label': spec.label,
+                'subject': spec.subject,
+                'session': spec.session,
+                'state': spec.state,
+                'roi': roi.name,
+                'n_weighted_voxels': int(roi.n_voxels),
+                'n_used_voxels': summary['n_features'],
+                'n_voxel_pairs': summary['n_pairs'],
+                'intra_roi_mean_z': summary['mean_z'],
+                'intra_roi_mean_r': summary['mean_r'],
+                'intra_roi_estimation': estimation,
+            })
+    session_mean = float(np.mean(roi_mean_values)) if roi_mean_values else float('nan')
+    if INTRA_BETWEEN_FC_METRIC == INTRA_BETWEEN_FC_METRIC_MI_QUANTILE:
+        session_summary = {
+            'within_roi_mean_mi': session_mean,
+            'n_within_roi_values': int(len(roi_mean_values)),
+            'within_roi_aggregation': 'equal_roi_mean_of_roi_level_weighted_voxel_pair_quantile_mi',
+            'mi_quantile_bins': int(mi_quantile_bins),
+        }
+    else:
+        session_summary = {
+            'within_roi_mean_z': session_mean,
+            'within_roi_mean_r': float(np.tanh(session_mean)) if np.isfinite(session_mean) else float('nan'),
+            'n_within_roi_values': int(len(roi_mean_values)),
+            'within_roi_aggregation': 'equal_roi_mean_of_roi_level_weighted_voxel_pair_fisher_z',
+        }
     return (roi_rows, session_summary)
 
 def _complete_intra_between_subject_deltas(session_values):
     rows = []
+    use_mi = 'within_roi_mean_mi' in session_values.columns or 'between_roi_mean_mi' in session_values.columns
     for (subject, subject_values) in session_values.groupby('subject', sort=True):
         off_rows = subject_values.loc[subject_values['state'] == 'off']
         on_rows = subject_values.loc[subject_values['state'] == 'on']
@@ -1581,39 +1777,83 @@ def _complete_intra_between_subject_deltas(session_values):
             continue
         off = off_rows.iloc[0]
         on = on_rows.iloc[0]
-        within_off_z = float(off['within_roi_mean_z'])
-        within_on_z = float(on['within_roi_mean_z'])
-        between_off_z = float(off['between_roi_mean_z'])
-        between_on_z = float(on['between_roi_mean_z'])
-        rows.append({
-            'subject': subject,
-            'off_label': off['label'],
-            'on_label': on['label'],
-            'within_roi_off_z': within_off_z,
-            'within_roi_on_z': within_on_z,
-            'within_roi_off_r': float(np.tanh(within_off_z)),
-            'within_roi_on_r': float(np.tanh(within_on_z)),
-            'within_roi_delta_z_on_minus_off': within_on_z - within_off_z,
-            'within_roi_delta_r_on_minus_off': float(np.tanh(within_on_z) - np.tanh(within_off_z)),
-            'between_roi_off_z': between_off_z,
-            'between_roi_on_z': between_on_z,
-            'between_roi_off_r': float(np.tanh(between_off_z)),
-            'between_roi_on_r': float(np.tanh(between_on_z)),
-            'between_roi_delta_z_on_minus_off': between_on_z - between_off_z,
-            'between_roi_delta_r_on_minus_off': float(np.tanh(between_on_z) - np.tanh(between_off_z)),
-            'within_minus_between_delta_z': (within_on_z - within_off_z) - (between_on_z - between_off_z),
-            'within_minus_between_delta_r': (float(np.tanh(within_on_z) - np.tanh(within_off_z)) - float(np.tanh(between_on_z) - np.tanh(between_off_z))),
-        })
+        if use_mi:
+            within_off_mi = float(off['within_roi_mean_mi'])
+            within_on_mi = float(on['within_roi_mean_mi'])
+            between_off_mi = float(off['between_roi_mean_mi'])
+            between_on_mi = float(on['between_roi_mean_mi'])
+            rows.append({
+                'subject': subject,
+                'off_label': off['label'],
+                'on_label': on['label'],
+                'within_roi_off_mi': within_off_mi,
+                'within_roi_on_mi': within_on_mi,
+                'within_roi_delta_mi_on_minus_off': within_on_mi - within_off_mi,
+                'between_roi_off_mi': between_off_mi,
+                'between_roi_on_mi': between_on_mi,
+                'between_roi_delta_mi_on_minus_off': between_on_mi - between_off_mi,
+                'within_minus_between_delta_mi': (within_on_mi - within_off_mi) - (between_on_mi - between_off_mi),
+            })
+        else:
+            within_off_z = float(off['within_roi_mean_z'])
+            within_on_z = float(on['within_roi_mean_z'])
+            between_off_z = float(off['between_roi_mean_z'])
+            between_on_z = float(on['between_roi_mean_z'])
+            rows.append({
+                'subject': subject,
+                'off_label': off['label'],
+                'on_label': on['label'],
+                'within_roi_off_z': within_off_z,
+                'within_roi_on_z': within_on_z,
+                'within_roi_off_r': float(np.tanh(within_off_z)),
+                'within_roi_on_r': float(np.tanh(within_on_z)),
+                'within_roi_delta_z_on_minus_off': within_on_z - within_off_z,
+                'within_roi_delta_r_on_minus_off': float(np.tanh(within_on_z) - np.tanh(within_off_z)),
+                'between_roi_off_z': between_off_z,
+                'between_roi_on_z': between_on_z,
+                'between_roi_off_r': float(np.tanh(between_off_z)),
+                'between_roi_on_r': float(np.tanh(between_on_z)),
+                'between_roi_delta_z_on_minus_off': between_on_z - between_off_z,
+                'between_roi_delta_r_on_minus_off': float(np.tanh(between_on_z) - np.tanh(between_off_z)),
+                'within_minus_between_delta_z': (within_on_z - within_off_z) - (between_on_z - between_off_z),
+                'within_minus_between_delta_r': (float(np.tanh(within_on_z) - np.tanh(within_off_z)) - float(np.tanh(between_on_z) - np.tanh(between_off_z))),
+            })
     values = pd.DataFrame(rows)
     if values.empty:
         return values
     return values.sort_values('subject').reset_index(drop=True)
 
+def _intra_between_fc_columns(subject_deltas):
+    if 'within_roi_delta_mi_on_minus_off' in subject_deltas.columns:
+        return {
+            'within_off': 'within_roi_off_mi',
+            'within_on': 'within_roi_on_mi',
+            'between_off': 'between_roi_off_mi',
+            'between_on': 'between_roi_on_mi',
+            'within_delta': 'within_roi_delta_mi_on_minus_off',
+            'between_delta': 'between_roi_delta_mi_on_minus_off',
+            'contrast_delta': 'within_minus_between_delta_mi',
+            'mean_ylabel': 'Mean quantile MI per subject',
+            'delta_ylabel': 'Quantile MI difference (ON - OFF)',
+        }
+    return {
+        'within_off': 'within_roi_off_r',
+        'within_on': 'within_roi_on_r',
+        'between_off': 'between_roi_off_r',
+        'between_on': 'between_roi_on_r',
+        'within_delta': 'within_roi_delta_z_on_minus_off',
+        'between_delta': 'between_roi_delta_z_on_minus_off',
+        'contrast_delta': 'within_minus_between_delta_z',
+        'mean_ylabel': 'Mean FC per subject',
+        'delta_ylabel': 'FC difference (On-Off)',
+    }
+
 def _intra_between_fc_test_rows(subject_deltas):
+    columns = _intra_between_fc_columns(subject_deltas)
     tests = [
-        ('within_roi_on_minus_off', 'within_roi_delta_z_on_minus_off', 'ON - OFF intra-ROI voxel FC'),
-        ('between_roi_on_minus_off', 'between_roi_delta_z_on_minus_off', 'ON - OFF between-ROI FC'),
-        ('within_minus_between_delta', 'within_minus_between_delta_z', '(ON - OFF intra-ROI FC) - (ON - OFF between-ROI FC)'),
+        ('within_roi_on_minus_off', columns['within_delta'], 'ON - OFF intra-ROI voxel FC'),
+        ('between_roi_on_minus_off', columns['between_delta'], 'ON - OFF between-ROI FC'),
+        ('within_minus_between_delta', columns['contrast_delta'], '(ON - OFF intra-ROI FC) - (ON - OFF between-ROI FC)'),
     ]
     rows = []
     details = {}
@@ -1628,6 +1868,7 @@ def _intra_between_fc_test_rows(subject_deltas):
 def _plot_intra_between_fc(subject_deltas, results, out_dir):
     if subject_deltas.empty:
         raise RuntimeError('No complete OFF/ON subjects were available for intra-vs-between FC plotting')
+    columns = _intra_between_fc_columns(subject_deltas)
     def _format_p(value):
         if not np.isfinite(float(value)):
             return 'n/a'
@@ -1641,8 +1882,8 @@ def _plot_intra_between_fc(subject_deltas, results, out_dir):
 
     state_offset = 0.22
     paired_specs = [
-        ('Intra-ROI', 'within_roi_off_r', 'within_roi_on_r', 0.0),
-        ('Between-ROI', 'between_roi_off_r', 'between_roi_on_r', 0.52),
+        ('Intra-ROI', columns['within_off'], columns['within_on'], 0.0),
+        ('Between-ROI', columns['between_off'], columns['between_on'], 0.52),
     ]
     for (_, off_column, on_column, offset) in paired_specs:
         off_values = subject_deltas[off_column].to_numpy(dtype=np.float64)
@@ -1654,17 +1895,17 @@ def _plot_intra_between_fc(subject_deltas, results, out_dir):
     axes[0].set_xticks([item[3] + state_offset / 2.0 for item in paired_specs])
     axes[0].set_xticklabels([item[0] for item in paired_specs])
     axes[0].set_xlim(-0.07, paired_specs[-1][3] + state_offset + 0.08)
-    axes[0].set_ylabel('Mean FC per subject')
+    axes[0].set_ylabel(columns['mean_ylabel'])
     axes[0].legend(frameon=False, fontsize=CELL_VALUE_FONT_SIZE, loc='best')
 
     delta_specs = [
-        ('Intra-ROI', 'within_roi_delta_z_on_minus_off', 'within_roi_on_minus_off', 0.0),
-        ('Between-ROI', 'between_roi_delta_z_on_minus_off', 'between_roi_on_minus_off', 1.0),
+        ('Intra-ROI', columns['within_delta'], 'within_roi_on_minus_off', 0.0),
+        ('Between-ROI', columns['between_delta'], 'between_roi_on_minus_off', 1.0),
     ]
     delta_positions = [item[3] for item in delta_specs]
     axes[1].axhline(0.0, color='#666666', linestyle='--', linewidth=0.8, alpha=0.65, zorder=0)
     for (_, row) in subject_deltas.iterrows():
-        values = [row['within_roi_delta_z_on_minus_off'], row['between_roi_delta_z_on_minus_off']]
+        values = [row[columns['within_delta']], row[columns['between_delta']]]
         axes[1].plot(delta_positions, values, color='#b3b3b3', linewidth=0.55, alpha=0.35, zorder=1)
     summary_bounds = []
     summary_means = []
@@ -1691,9 +1932,9 @@ def _plot_intra_between_fc(subject_deltas, results, out_dir):
     axes[1].set_xticklabels([item[0] for item in delta_specs])
     x_pad = 0.28
     axes[1].set_xlim(min(delta_positions) - x_pad, max(delta_positions) + x_pad)
-    axes[1].set_ylabel('FC difference (On-Off)')
+    axes[1].set_ylabel(columns['delta_ylabel'])
     p_value = results.get('within_minus_between_delta', {}).get('paired_t_p_value_two_sided', np.nan)
-    all_delta_values = subject_deltas[['within_roi_delta_z_on_minus_off', 'between_roi_delta_z_on_minus_off']].to_numpy(dtype=np.float64).ravel()
+    all_delta_values = subject_deltas[[columns['within_delta'], columns['between_delta']]].to_numpy(dtype=np.float64).ravel()
     finite_values = all_delta_values[np.isfinite(all_delta_values)]
     y_min = float(np.nanmin(finite_values)) if finite_values.size else 0.0
     y_max = float(np.nanmax(finite_values)) if finite_values.size else 1.0
@@ -1755,29 +1996,48 @@ def _intra_between_voxel_description(voxel_selection):
         return ('a reproducible sample of non-vigour voxels in the same ROIs, matched to the vigour-network voxel count within each ROI', 'unweighted')
     return ('the selected weighted voxels in each ROI', 'weighted by the product of the two optimization weights')
 
-def _write_intra_between_method(path, voxel_selection=VOXEL_SELECTION_WEIGHTED_VIGOUR):
+def _write_intra_between_method(path, voxel_selection=VOXEL_SELECTION_WEIGHTED_VIGOUR, metric=INTRA_BETWEEN_FC_METRIC_PEARSON, mi_quantile_bins=DEFAULT_MI_QUANTILE_BINS):
     (voxel_description, pair_weight_description) = _intra_between_voxel_description(voxel_selection)
     roi_mean_description = 'weighted mean ROI beta-series' if voxel_selection == VOXEL_SELECTION_WEIGHTED_VIGOUR else 'unweighted mean ROI beta-series'
-    text = (
-        '# Intra-ROI vs Between-ROI FC Method\n\n'
-        f'For each subject/session, beta-series were extracted from {voxel_description}. '
-        'Intra-ROI FC was defined as the mean Pearson correlation between voxel beta-series within the same ROI. '
-        'Time points with missing values in any selected voxel of that ROI were excluded before voxel correlations '
-        'were computed. If fewer than four complete common time points remained for an ROI, voxel correlations were '
-        'computed with pairwise-complete observations instead. Voxel-pair correlations were Fisher z transformed '
-        f'before averaging, and voxel-pair averages within an ROI were {pair_weight_description}. '
-        'To avoid bias from unequal ROI sizes, voxel pairs were not pooled across ROIs: each ROI contributed '
-        'one intra-ROI FC value, and the session-level intra-ROI FC was the unweighted mean of these ROI-level '
-        'Fisher-z values.\n\n'
-        f'Between-ROI FC was computed in the same Fisher-z Pearson-correlation scale using the {roi_mean_description}. '
-        'Correlations were averaged across the upper triangle of the ROI-by-ROI correlation matrix. '
-        'Medication effects were evaluated within complete subjects as ON minus OFF separately for intra-ROI and '
-        'between-ROI FC. The primary comparison was the paired subject-level contrast '
-        '(ON - OFF intra-ROI FC) - (ON - OFF between-ROI FC).\n'
-    )
+    if metric == INTRA_BETWEEN_FC_METRIC_MI_QUANTILE:
+        text = (
+            '# Intra-ROI vs Between-ROI FC Method\n\n'
+            f'For each subject/session, beta-series were extracted from {voxel_description}. '
+            f'Each beta-series was rank-discretized into {int(mi_quantile_bins)} quantile bins. '
+            'Intra-ROI FC was defined as the mean mutual information, in natural-log units, between quantile-coded '
+            'voxel beta-series within the same ROI. Quantile bins were assigned separately for each voxel using its '
+            'finite beta values, and each voxel-pair mutual information value used the time points where both voxels '
+            f'were finite. Voxel-pair averages within an ROI were {pair_weight_description}. '
+            'To avoid bias from unequal ROI sizes, voxel pairs were not pooled across ROIs: each ROI contributed '
+            'one intra-ROI FC value, and the session-level intra-ROI FC was the unweighted mean of these ROI-level '
+            'mutual-information values.\n\n'
+            f'Between-ROI FC was computed in the same quantile mutual-information scale using the {roi_mean_description}. '
+            'Mutual-information values were averaged across the upper triangle of the ROI-by-ROI matrix. '
+            'Medication effects were evaluated within complete subjects as ON minus OFF separately for intra-ROI and '
+            'between-ROI FC. The primary comparison was the paired subject-level contrast '
+            '(ON - OFF intra-ROI FC) - (ON - OFF between-ROI FC).\n'
+        )
+    else:
+        text = (
+            '# Intra-ROI vs Between-ROI FC Method\n\n'
+            f'For each subject/session, beta-series were extracted from {voxel_description}. '
+            'Intra-ROI FC was defined as the mean Pearson correlation between voxel beta-series within the same ROI. '
+            'Time points with missing values in any selected voxel of that ROI were excluded before voxel correlations '
+            'were computed. If fewer than four complete common time points remained for an ROI, voxel correlations were '
+            'computed with pairwise-complete observations instead. Voxel-pair correlations were Fisher z transformed '
+            f'before averaging, and voxel-pair averages within an ROI were {pair_weight_description}. '
+            'To avoid bias from unequal ROI sizes, voxel pairs were not pooled across ROIs: each ROI contributed '
+            'one intra-ROI FC value, and the session-level intra-ROI FC was the unweighted mean of these ROI-level '
+            'Fisher-z values.\n\n'
+            f'Between-ROI FC was computed in the same Fisher-z Pearson-correlation scale using the {roi_mean_description}. '
+            'Correlations were averaged across the upper triangle of the ROI-by-ROI correlation matrix. '
+            'Medication effects were evaluated within complete subjects as ON minus OFF separately for intra-ROI and '
+            'between-ROI FC. The primary comparison was the paired subject-level contrast '
+            '(ON - OFF intra-ROI FC) - (ON - OFF between-ROI FC).\n'
+        )
     path.write_text(text, encoding='utf-8')
 
-def _save_intra_between_fc_analysis(session_rows, roi_rows, out_dir, voxel_selection=VOXEL_SELECTION_WEIGHTED_VIGOUR):
+def _save_intra_between_fc_analysis(session_rows, roi_rows, out_dir, voxel_selection=VOXEL_SELECTION_WEIGHTED_VIGOUR, mi_quantile_bins=DEFAULT_MI_QUANTILE_BINS):
     roi_values = pd.DataFrame(roi_rows)
     session_values = pd.DataFrame(session_rows).sort_values(['subject', 'session']).reset_index(drop=True)
     subject_deltas = _complete_intra_between_subject_deltas(session_values)
@@ -1787,7 +2047,8 @@ def _save_intra_between_fc_analysis(session_rows, roi_rows, out_dir, voxel_selec
     result_summary = {
         'connectivity_metric': INTRA_BETWEEN_FC_METRIC,
         'voxel_selection': voxel_selection,
-        'method': 'intra-ROI voxel-pair FC and between-ROI FC are both summarized as Fisher-z Pearson correlations; intra-ROI session means average ROI-level values equally so ROIs with more voxels do not dominate.',
+        'mi_quantile_bins': int(mi_quantile_bins) if INTRA_BETWEEN_FC_METRIC == INTRA_BETWEEN_FC_METRIC_MI_QUANTILE else None,
+        'method': 'intra-ROI voxel-pair FC and between-ROI FC are both summarized as quantile mutual information; intra-ROI session means average ROI-level values equally so ROIs with more voxels do not dominate.' if INTRA_BETWEEN_FC_METRIC == INTRA_BETWEEN_FC_METRIC_MI_QUANTILE else 'intra-ROI voxel-pair FC and between-ROI FC are both summarized as Fisher-z Pearson correlations; intra-ROI session means average ROI-level values equally so ROIs with more voxels do not dominate.',
         'n_sessions': int(session_values.shape[0]),
         'n_complete_subjects': int(subject_deltas.shape[0]),
         'tests': results,
@@ -1803,7 +2064,7 @@ def _save_intra_between_fc_analysis(session_rows, roi_rows, out_dir, voxel_selec
     subject_deltas.to_csv(delta_path, index=False)
     results_table.to_csv(results_path, index=False)
     json_path.write_text(json.dumps(result_summary, indent=2), encoding='utf-8')
-    _write_intra_between_method(method_path, voxel_selection=voxel_selection)
+    _write_intra_between_method(method_path, voxel_selection=voxel_selection, metric=INTRA_BETWEEN_FC_METRIC, mi_quantile_bins=mi_quantile_bins)
     figure_path = _plot_intra_between_fc(subject_deltas, results, out_dir)
     return {
         'summary': result_summary,
@@ -1841,7 +2102,9 @@ def build_parser():
     parser.add_argument('--aal-version', default=DEFAULT_AAL_VERSION)
     parser.add_argument('--atlas-cache-dir', type=Path, default=DEFAULT_ATLAS_CACHE_DIR)
     parser.add_argument('--connectivity-metric', choices=CONNECTIVITY_METRICS, default=CONNECTIVITY_METRIC)
+    parser.add_argument('--intra-between-fc-metric', choices=INTRA_BETWEEN_FC_METRICS, default=INTRA_BETWEEN_FC_METRIC)
     parser.add_argument('--mi-neighbors', type=int, default=DEFAULT_MI_NEIGHBORS)
+    parser.add_argument('--mi-quantile-bins', type=int, default=DEFAULT_MI_QUANTILE_BINS)
     parser.add_argument('--node-strength-top-n', type=int, default=DEFAULT_NODE_STRENGTH_TOP_N)
     parser.add_argument('--random-state', type=int, default=0)
     parser.add_argument('--check-inputs', action='store_true')
@@ -1872,7 +2135,7 @@ def _print_dry_run(args):
     print('9. Plot cross-subject-only OFF-OFF and ON-ON distance distributions.')
     print(f'10. Compute paired {_connectivity_metric_label()} node-strength summaries and plot the top {args.node_strength_top_n} ROI panels.')
     print(f'11. Compute within-hemisphere vs between-hemisphere {_connectivity_metric_label()} edge-change summaries.')
-    print('12. Compute intra-ROI voxel FC vs between-ROI FC medication-change summaries.')
+    print(f'12. Compute intra-ROI voxel FC vs between-ROI FC medication-change summaries ({INTRA_BETWEEN_FC_METRIC}).')
     print()
     print(f'ROI count: {len(rois)}')
     print(f'Weight threshold: {roi_threshold:.8g}')
@@ -1896,9 +2159,10 @@ def _print_dry_run(args):
             print(f'- {shape}: {count} files')
 
 def main():
-    global CONNECTIVITY_METRIC
+    global CONNECTIVITY_METRIC, INTRA_BETWEEN_FC_METRIC
     args = build_parser().parse_args()
     CONNECTIVITY_METRIC = args.connectivity_metric
+    INTRA_BETWEEN_FC_METRIC = args.intra_between_fc_metric
     if args.roi_region_table is None:
         args.roi_region_table = _default_region_table_for(args.roi_definition_figure)
     missing = _missing_inputs(args)
@@ -1936,10 +2200,10 @@ def main():
         cleaned = _clean_timeseries(session_df)
         networks[spec.label] = _connectivity_matrix(cleaned, n_neighbors=args.mi_neighbors, random_state=args.random_state)
         session_fc_row = {'label': spec.label, 'subject': spec.subject, 'session': spec.session, 'state': spec.state, 'connectivity_metric': INTRA_BETWEEN_FC_METRIC}
-        session_fc_row.update(_between_roi_fc_summary(cleaned))
+        session_fc_row.update(_between_roi_fc_summary(cleaned, mi_quantile_bins=args.mi_quantile_bins))
         try:
             voxel_timeseries = _load_session_voxel_timeseries(spec, weight_img, rois)
-            (roi_fc_rows, intra_session_summary) = _intra_roi_fc_values(spec, voxel_timeseries, rois)
+            (roi_fc_rows, intra_session_summary) = _intra_roi_fc_values(spec, voxel_timeseries, rois, mi_quantile_bins=args.mi_quantile_bins)
             session_fc_row.update(intra_session_summary)
             intra_between_roi_rows.extend(roi_fc_rows)
             intra_between_session_rows.append(session_fc_row)
@@ -1962,10 +2226,10 @@ def main():
         warnings.warn(f'Skipped within-vs-between hemisphere FC analysis: {exc}', RuntimeWarning)
     intra_between_paths = None
     if intra_between_session_rows:
-        intra_between_paths = _save_intra_between_fc_analysis(intra_between_session_rows, intra_between_roi_rows, out_dir, voxel_selection=args.voxel_selection)
+        intra_between_paths = _save_intra_between_fc_analysis(intra_between_session_rows, intra_between_roi_rows, out_dir, voxel_selection=args.voxel_selection, mi_quantile_bins=args.mi_quantile_bins)
     elif intra_between_fc_skipped:
         warnings.warn('Skipped intra-vs-between FC analysis because no sessions had voxel-level beta or BOLD inputs.', RuntimeWarning)
-    metadata.update({'weight_map': str(args.weight_map), 'roi_definition_figure': str(args.roi_definition_figure), 'roi_region_table': str(args.roi_region_table), 'session_manifest': str(args.session_manifest) if args.session_manifest.exists() else None, 'beta_root': str(args.beta_root), 'voxel_selection': args.voxel_selection, 'voxel_weighting': 'optimization_weights' if args.voxel_selection == VOXEL_SELECTION_WEIGHTED_VIGOUR else 'unit_weights', 'matched_nonvigour_random_state': int(args.random_state) if args.voxel_selection == VOXEL_SELECTION_MATCHED_NONVIGOUR else None, 'roi_percentile': float(args.roi_percentile), 'weight_threshold': roi_threshold, 'min_report_voxels': int(args.min_report_voxels), 'min_roi_voxels': int(min_roi_voxels), 'connectivity_metric': CONNECTIVITY_METRIC, 'comparison_metric': COMPARISON_METRIC, 'mi_neighbors': int(args.mi_neighbors), 'paired_subject_similarity_values': str(paired_subject_path), 'paired_subject_similarity_stats': str(paired_stats_path), 'paired_subject_similarity_primary_p': paired_stats['permutation']['permutation_p_value_two_sided'], 'paired_subject_similarity_primary_effect': paired_stats['effect_size']['raw_difference'], 'node_strength_mi_values': str(node_strength_values_path), 'node_strength_mi_results': str(node_strength_summary_path), 'node_strength_mi_figure': str(node_strength_figure_path), 'node_strength_mi_top_n': int(args.node_strength_top_n), 'node_strength_mi_min_p': float(node_strength_summary['p_value'].min()), 'intra_vs_between_fc_metric': INTRA_BETWEEN_FC_METRIC, 'intra_vs_between_fc_skipped': intra_between_fc_skipped, 'intra_vs_between_fc_outputs': {key: str(value) for (key, value) in intra_between_paths.items() if key != 'summary'} if intra_between_paths else None, 'intra_vs_between_fc_primary_p': intra_between_paths['summary']['tests']['within_minus_between_delta']['paired_t_p_value_two_sided'] if intra_between_paths else None, 'intra_vs_between_fc_primary_effect': intra_between_paths['summary']['tests']['within_minus_between_delta']['mean'] if intra_between_paths else None, 'sessions': [{'label': spec.label, 'subject': spec.subject, 'session': spec.session, 'state': spec.state, 'bold_path': str(spec.bold_path) if spec.bold_path else None, 'timeseries_path': str(spec.timeseries_path) if spec.timeseries_path else None, 'beta_paths': [str(path) for path in spec.beta_paths]} for spec in specs]})
+    metadata.update({'weight_map': str(args.weight_map), 'roi_definition_figure': str(args.roi_definition_figure), 'roi_region_table': str(args.roi_region_table), 'session_manifest': str(args.session_manifest) if args.session_manifest.exists() else None, 'beta_root': str(args.beta_root), 'voxel_selection': args.voxel_selection, 'voxel_weighting': 'optimization_weights' if args.voxel_selection == VOXEL_SELECTION_WEIGHTED_VIGOUR else 'unit_weights', 'matched_nonvigour_random_state': int(args.random_state) if args.voxel_selection == VOXEL_SELECTION_MATCHED_NONVIGOUR else None, 'roi_percentile': float(args.roi_percentile), 'weight_threshold': roi_threshold, 'min_report_voxels': int(args.min_report_voxels), 'min_roi_voxels': int(min_roi_voxels), 'connectivity_metric': CONNECTIVITY_METRIC, 'comparison_metric': COMPARISON_METRIC, 'mi_neighbors': int(args.mi_neighbors), 'mi_quantile_bins': int(args.mi_quantile_bins), 'paired_subject_similarity_values': str(paired_subject_path), 'paired_subject_similarity_stats': str(paired_stats_path), 'paired_subject_similarity_primary_p': paired_stats['permutation']['permutation_p_value_two_sided'], 'paired_subject_similarity_primary_effect': paired_stats['effect_size']['raw_difference'], 'node_strength_mi_values': str(node_strength_values_path), 'node_strength_mi_results': str(node_strength_summary_path), 'node_strength_mi_figure': str(node_strength_figure_path), 'node_strength_mi_top_n': int(args.node_strength_top_n), 'node_strength_mi_min_p': float(node_strength_summary['p_value'].min()), 'intra_vs_between_fc_metric': INTRA_BETWEEN_FC_METRIC, 'intra_vs_between_fc_skipped': intra_between_fc_skipped, 'intra_vs_between_fc_outputs': {key: str(value) for (key, value) in intra_between_paths.items() if key != 'summary'} if intra_between_paths else None, 'intra_vs_between_fc_primary_p': intra_between_paths['summary']['tests']['within_minus_between_delta']['paired_t_p_value_two_sided'] if intra_between_paths else None, 'intra_vs_between_fc_primary_effect': intra_between_paths['summary']['tests']['within_minus_between_delta']['mean'] if intra_between_paths else None, 'sessions': [{'label': spec.label, 'subject': spec.subject, 'session': spec.session, 'state': spec.state, 'bold_path': str(spec.bold_path) if spec.bold_path else None, 'timeseries_path': str(spec.timeseries_path) if spec.timeseries_path else None, 'beta_paths': [str(path) for path in spec.beta_paths]} for spec in specs]})
     metadata.update({
         'within_vs_between_hemisphere_fc_skipped': hemisphere_fc_skipped,
         'within_vs_between_hemisphere_fc_outputs': {key: str(value) for (key, value) in hemisphere_fc_paths.items() if key != 'summary'} if hemisphere_fc_paths else None,

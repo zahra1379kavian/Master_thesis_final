@@ -111,20 +111,37 @@ def _roi_summary(rois, z_threshold):
     return summary
 
 
-def _write_task_intra_between_method(path, z_threshold):
-    text = (
-        '# Intra-ROI vs Between-ROI FC Method\n\n'
-        'For each subject/session, beta-series were extracted from task-activation voxels '
-        f'defined by the standard-GLM z map thresholded at z >= {float(z_threshold):g}. Because the task map is '
-        'binary after thresholding and has no optimization weights, ROI beta-series are '
-        'unweighted means of selected voxel beta values.\n\n'
-        'Intra-ROI FC was defined as the mean Pearson correlation between voxel beta-series '
-        'within the same ROI. Voxel-pair correlations were Fisher z transformed before '
-        'averaging, with equal weight for each voxel pair. Between-ROI FC was computed from '
-        'the unweighted mean ROI beta-series in the same Fisher-z Pearson-correlation scale. '
-        'Medication effects were evaluated within complete subjects as ON minus OFF, and '
-        'the primary comparison was (ON - OFF intra-ROI FC) - (ON - OFF between-ROI FC).\n'
-    )
+def _write_task_intra_between_method(path, z_threshold, metric=M.INTRA_BETWEEN_FC_METRIC_PEARSON, mi_quantile_bins=M.DEFAULT_MI_QUANTILE_BINS):
+    if metric == M.INTRA_BETWEEN_FC_METRIC_MI_QUANTILE:
+        text = (
+            '# Intra-ROI vs Between-ROI FC Method\n\n'
+            'For each subject/session, beta-series were extracted from task-activation voxels '
+            f'defined by the standard-GLM z map thresholded at z >= {float(z_threshold):g}. Because the task map is '
+            'binary after thresholding and has no optimization weights, ROI beta-series are '
+            'unweighted means of selected voxel beta values.\n\n'
+            f'Each beta-series was rank-discretized into {int(mi_quantile_bins)} quantile bins. '
+            'Intra-ROI FC was defined as the mean mutual information, in natural-log units, between quantile-coded '
+            'voxel beta-series within the same ROI. Quantile bins were assigned separately for each voxel using its '
+            'finite beta values, and each voxel-pair mutual information value used the time points where both voxels '
+            'were finite. Voxel-pair values were averaged with equal weight for each voxel pair. Between-ROI FC was '
+            'computed from the unweighted mean ROI beta-series in the same quantile '
+            'mutual-information scale. Medication effects were evaluated within complete subjects as ON minus OFF, '
+            'and the primary comparison was (ON - OFF intra-ROI FC) - (ON - OFF between-ROI FC).\n'
+        )
+    else:
+        text = (
+            '# Intra-ROI vs Between-ROI FC Method\n\n'
+            'For each subject/session, beta-series were extracted from task-activation voxels '
+            f'defined by the standard-GLM z map thresholded at z >= {float(z_threshold):g}. Because the task map is '
+            'binary after thresholding and has no optimization weights, ROI beta-series are '
+            'unweighted means of selected voxel beta values.\n\n'
+            'Intra-ROI FC was defined as the mean Pearson correlation between voxel beta-series '
+            'within the same ROI. Voxel-pair correlations were Fisher z transformed before '
+            'averaging, with equal weight for each voxel pair. Between-ROI FC was computed from '
+            'the unweighted mean ROI beta-series in the same Fisher-z Pearson-correlation scale. '
+            'Medication effects were evaluated within complete subjects as ON minus OFF, and '
+            'the primary comparison was (ON - OFF intra-ROI FC) - (ON - OFF between-ROI FC).\n'
+        )
     path.write_text(text, encoding='utf-8')
 
 
@@ -157,7 +174,7 @@ def _print_dry_run(args):
     if args.split_hemispheres:
         print('   Split selected AAL groups into left/right hemisphere ROI masks.')
     print(f'4. Extract unweighted ROI mean beta trial series from {len(specs)} subject/session inputs.')
-    print('5. Run the existing medication network, cross-subject distance, and intra-vs-between FC analyses.')
+    print(f'5. Run the existing medication network, cross-subject distance, and intra-vs-between FC analyses ({M.INTRA_BETWEEN_FC_METRIC}).')
     print()
     print(f'Task-map grid: {task_img.shape[:3]}')
     print(f'Task activation voxels at threshold: {int(np.count_nonzero(selected))}')
@@ -191,7 +208,9 @@ def build_parser():
     parser.add_argument('--aal-version', default=M.DEFAULT_AAL_VERSION)
     parser.add_argument('--atlas-cache-dir', type=Path, default=M.DEFAULT_ATLAS_CACHE_DIR)
     parser.add_argument('--connectivity-metric', choices=M.CONNECTIVITY_METRICS, default=M.CONNECTIVITY_METRIC)
+    parser.add_argument('--intra-between-fc-metric', choices=M.INTRA_BETWEEN_FC_METRICS, default=M.INTRA_BETWEEN_FC_METRIC)
     parser.add_argument('--mi-neighbors', type=int, default=M.DEFAULT_MI_NEIGHBORS)
+    parser.add_argument('--mi-quantile-bins', type=int, default=M.DEFAULT_MI_QUANTILE_BINS)
     parser.add_argument('--node-strength-top-n', type=int, default=M.DEFAULT_NODE_STRENGTH_TOP_N)
     parser.add_argument('--random-state', type=int, default=0)
     parser.add_argument('--check-inputs', action='store_true')
@@ -202,6 +221,7 @@ def build_parser():
 def main():
     args = build_parser().parse_args()
     M.CONNECTIVITY_METRIC = args.connectivity_metric
+    M.INTRA_BETWEEN_FC_METRIC = args.intra_between_fc_metric
     missing = _missing_inputs(args)
     if missing:
         print('Missing required inputs:')
@@ -242,10 +262,10 @@ def main():
             'state': spec.state,
             'connectivity_metric': M.INTRA_BETWEEN_FC_METRIC,
         }
-        session_fc_row.update(M._between_roi_fc_summary(cleaned))
+        session_fc_row.update(M._between_roi_fc_summary(cleaned, mi_quantile_bins=args.mi_quantile_bins))
         try:
             voxel_timeseries = M._load_session_voxel_timeseries(spec, task_img, rois)
-            roi_fc_rows, intra_session_summary = M._intra_roi_fc_values(spec, voxel_timeseries, rois)
+            roi_fc_rows, intra_session_summary = M._intra_roi_fc_values(spec, voxel_timeseries, rois, mi_quantile_bins=args.mi_quantile_bins)
             session_fc_row.update(intra_session_summary)
             intra_between_roi_rows.extend(roi_fc_rows)
             intra_between_session_rows.append(session_fc_row)
@@ -283,8 +303,9 @@ def main():
             intra_between_roi_rows,
             out_dir,
             voxel_selection=TASK_VOXEL_SELECTION,
+            mi_quantile_bins=args.mi_quantile_bins,
         )
-        _write_task_intra_between_method(intra_between_paths['method'], args.task_z_threshold)
+        _write_task_intra_between_method(intra_between_paths['method'], args.task_z_threshold, metric=M.INTRA_BETWEEN_FC_METRIC, mi_quantile_bins=args.mi_quantile_bins)
     elif intra_between_fc_skipped:
         warnings.warn('Skipped intra-vs-between FC analysis because no sessions had voxel-level beta or BOLD inputs.', RuntimeWarning)
 
@@ -302,6 +323,7 @@ def main():
         'connectivity_metric': M.CONNECTIVITY_METRIC,
         'comparison_metric': M.COMPARISON_METRIC,
         'mi_neighbors': int(args.mi_neighbors),
+        'mi_quantile_bins': int(args.mi_quantile_bins),
         'paired_subject_similarity_values': str(paired_subject_path),
         'paired_subject_similarity_stats': str(paired_stats_path),
         'paired_subject_similarity_primary_p': paired_stats['permutation']['permutation_p_value_two_sided'],
