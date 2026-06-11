@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot an 8-column violin summary of significant hemisphere edge changes."""
+"""Plot inter/intra ranks for the same edges used in the FC-change violin figure."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ DEFAULT_OUTPUT_BASE = (
     / "figures"
     / "GVS_effects"
     / "main result"
-    / "mutual_info_quantile_vigour_task_hemisphere_edge_change_violins"
+    / "mutual_info_quantile_vigour_task_hemisphere_edge_rank_violins"
 )
 
 PAPER_FONT_FAMILY = "Liberation Sans"
@@ -68,22 +68,41 @@ plt.rcParams.update(
     }
 )
 
-
-def load_edge_changes(label: str, path: Path) -> pd.DataFrame:
+def load_ranked_edges(label: str, path: Path) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"Missing edge-change CSV: {path}")
-    df = pd.read_csv(path)
+    df = pd.read_csv(path, low_memory=False)
     required = {"mean", "direction", "hemisphere_relation"}
     missing = sorted(required - set(df.columns))
     if missing:
         raise ValueError(f"{path} is missing required column(s): {', '.join(missing)}")
+
     df = df.copy()
-    df["result_set"] = label
     df["mean"] = pd.to_numeric(df["mean"], errors="coerce")
-    df = df.dropna(subset=["mean", "direction", "hemisphere_relation"])
-    if df.empty:
-        raise ValueError(f"No finite edge-change rows were found in {path}")
-    return df
+    matched = df.dropna(subset=["mean", "direction", "hemisphere_relation"]).copy()
+    matched = matched.loc[matched["mean"].ne(0.0)].copy()
+    if matched.empty:
+        raise ValueError(f"No finite non-zero edge-change rows were found in {path}")
+
+    expected_directions = {direction for direction, _ in DIRECTION_ORDER}
+    unexpected_directions = sorted(set(matched["direction"]) - expected_directions)
+    if unexpected_directions:
+        raise ValueError(f"Unexpected direction value(s) in {path}: {unexpected_directions}")
+    expected_relations = {relation for relation, _ in RELATION_ORDER}
+    unexpected_relations = sorted(set(matched["hemisphere_relation"]) - expected_relations)
+    if unexpected_relations:
+        raise ValueError(f"Unexpected hemisphere_relation value(s) in {path}: {unexpected_relations}")
+
+    matched["result_set"] = label
+    matched["abs_mean"] = matched["mean"].abs()
+    matched["rank_within_direction"] = matched.groupby("direction")["abs_mean"].rank(
+        method="average",
+        ascending=True,
+    )
+    matched["direction_edge_count"] = (
+        matched.groupby("direction")["rank_within_direction"].transform("count").astype(int)
+    )
+    return matched
 
 
 def build_groups(data: pd.DataFrame, result_labels: tuple[str, str]) -> list[dict[str, object]]:
@@ -97,9 +116,9 @@ def build_groups(data: pd.DataFrame, result_labels: tuple[str, str]) -> list[dic
                     (data["result_set"] == result_label)
                     & (data["direction"] == direction_key)
                     & (data["hemisphere_relation"] == relation_key),
-                    "mean",
+                    "rank_within_direction",
                 ].to_numpy(dtype=np.float64)
-                values = np.abs(values[np.isfinite(values)])
+                values = values[np.isfinite(values)]
                 if values.size == 0:
                     raise ValueError(
                         f"No rows for {result_label}, {direction_label}, {relation_key}."
@@ -122,6 +141,35 @@ def group_color(group: dict[str, object]) -> str:
     return INCREMENT_COLOR if group["direction_key"] == "Improved" else DECREMENT_COLOR
 
 
+def write_ranked_edges(data: pd.DataFrame, output_base: Path) -> Path:
+    cols = [
+        "result_set",
+        "metric",
+        "analysis_view",
+        "fdr_scope",
+        "edge_id",
+        "roi_i",
+        "roi_j",
+        "edge_label",
+        "mean",
+        "abs_mean",
+        "direction",
+        "hemisphere_relation",
+        "rank_within_direction",
+        "direction_edge_count",
+        "p_signflip",
+        "q_fdr",
+        "sig_fdr",
+    ]
+    available = [col for col in cols if col in data.columns]
+    path = output_base.with_name(f"{output_base.name}_ranked_edges.csv")
+    data[available].sort_values(
+        ["result_set", "direction", "rank_within_direction", "hemisphere_relation", "edge_id"],
+        ascending=[True, True, False, True, True],
+    ).to_csv(path, index=False)
+    return path
+
+
 def write_group_summary(groups: list[dict[str, object]], output_base: Path) -> Path:
     rows = []
     for group in groups:
@@ -132,17 +180,16 @@ def write_group_summary(groups: list[dict[str, object]], output_base: Path) -> P
                 "direction": group["direction"],
                 "hemisphere_relation": group["hemisphere_relation"],
                 "n_edges": int(values.size),
-                "mean": float(np.mean(values)),
-                "median": float(np.median(values)),
-                "q1": float(np.percentile(values, 25)),
-                "q3": float(np.percentile(values, 75)),
-                "min": float(np.min(values)),
-                "max": float(np.max(values)),
+                "mean_rank": float(np.mean(values)),
+                "median_rank": float(np.median(values)),
+                "q1_rank": float(np.percentile(values, 25)),
+                "q3_rank": float(np.percentile(values, 75)),
+                "min_rank": float(np.min(values)),
+                "max_rank": float(np.max(values)),
             }
         )
-    summary = pd.DataFrame(rows)
     path = output_base.with_name(f"{output_base.name}_summary.csv")
-    summary.to_csv(path, index=False)
+    pd.DataFrame(rows).to_csv(path, index=False)
     return path
 
 
@@ -169,7 +216,7 @@ def fdr_bh(p_values: list[float]) -> list[float]:
     return q_values.tolist()
 
 
-def inter_intra_tests(groups: list[dict[str, object]]) -> list[dict[str, object]]:
+def inter_intra_tests(groups: list[dict[str, object]], edge_inclusion: str) -> list[dict[str, object]]:
     rows = []
     for left, right in zip(groups[0::2], groups[1::2], strict=True):
         left_values = np.asarray(left["values"], dtype=np.float64)
@@ -177,21 +224,28 @@ def inter_intra_tests(groups: list[dict[str, object]]) -> list[dict[str, object]
         result = mannwhitneyu(left_values, right_values, alternative="two-sided", method="auto")
         rows.append(
             {
+                "test": "Mann-Whitney U / Wilcoxon rank-sum on edge ranks",
+                "edge_inclusion": edge_inclusion,
+                "rank_basis": "Higher rank values indicate larger absolute mean FC change within result_set x direction.",
                 "result_set": left["result_set"],
                 "direction": left["direction"],
                 "left_relation": left["hemisphere_relation"],
                 "right_relation": right["hemisphere_relation"],
                 "left_n_edges": int(left_values.size),
                 "right_n_edges": int(right_values.size),
-                "left_median": float(np.median(left_values)),
-                "right_median": float(np.median(right_values)),
-                "median_difference_inter_minus_intra": float(np.median(left_values) - np.median(right_values)),
+                "left_mean_rank": float(np.mean(left_values)),
+                "right_mean_rank": float(np.mean(right_values)),
+                "left_median_rank": float(np.median(left_values)),
+                "right_median_rank": float(np.median(right_values)),
+                "median_rank_difference_inter_minus_intra": float(
+                    np.median(left_values) - np.median(right_values)
+                ),
                 "mannwhitney_u": float(result.statistic),
                 "p_value_two_sided": float(result.pvalue),
                 "left_position": float(left["position"]),
                 "right_position": float(right["position"]),
                 "direction_key": left["direction_key"],
-                "pair_max_abs": max(float(np.max(left_values)), float(np.max(right_values))),
+                "pair_max_rank": max(float(np.max(left_values)), float(np.max(right_values))),
             }
         )
     q_values = fdr_bh([float(row["p_value_two_sided"]) for row in rows])
@@ -206,22 +260,22 @@ def write_test_summary(test_rows: list[dict[str, object]], output_base: Path) ->
         export_row = {
             key: value
             for key, value in row.items()
-            if key not in {"left_position", "right_position", "direction_key", "pair_max_abs"}
+            if key not in {"left_position", "right_position", "direction_key", "pair_max_rank"}
         }
         export_rows.append(export_row)
-    path = output_base.with_name(f"{output_base.name}_inter_intra_tests.csv")
+    path = output_base.with_name(f"{output_base.name}_inter_intra_rank_tests.csv")
     pd.DataFrame(export_rows).to_csv(path, index=False)
     return path
 
 
-def significance_label(p_value: float) -> str:
-    if not np.isfinite(p_value):
+def significance_label(q_value: float) -> str:
+    if not np.isfinite(q_value):
         return ""
-    if p_value < 0.001:
+    if q_value < 0.001:
         return "***"
-    if p_value < 0.01:
+    if q_value < 0.01:
         return "**"
-    if p_value < 0.05:
+    if q_value < 0.05:
         return "*"
     return ""
 
@@ -229,11 +283,11 @@ def significance_label(p_value: float) -> str:
 def add_test_annotation(ax: plt.Axes, row: dict[str, object], y_limit: float) -> None:
     x_left = float(row["left_position"])
     x_right = float(row["right_position"])
-    label = significance_label(float(row["p_value_two_sided"]))
+    label = significance_label(float(row["q_fdr_bh"]))
     if not label:
         return
     bracket_height = y_limit * 0.018
-    y = min(float(row["pair_max_abs"]) + y_limit * 0.075, y_limit * 0.9)
+    y = min(float(row["pair_max_rank"]) + y_limit * 0.075, y_limit * 0.9)
     text_y = y + y_limit * 0.035
     ax.plot(
         [x_left, x_left, x_right, x_right],
@@ -260,15 +314,14 @@ def plot_violin_summary(
     values = [np.asarray(group["values"], dtype=np.float64) for group in groups]
     colors = [group_color(group) for group in groups]
 
-    max_abs = max(float(np.max(group_values)) for group_values in values)
+    max_rank = max(float(np.max(group_values)) for group_values in values)
     significant_pair_max = [
-        float(row["pair_max_abs"])
+        float(row["pair_max_rank"])
         for row in test_rows
-        if significance_label(float(row["p_value_two_sided"]))
+        if significance_label(float(row["q_fdr_bh"]))
     ]
     annotation_limit = max((pair_max / 0.86 for pair_max in significant_pair_max), default=0.0)
-    y_limit = np.ceil(max(max_abs * 1.06, annotation_limit) / 0.005) * 0.005
-    y_limit = max(y_limit, 0.01)
+    y_limit = float(np.ceil(max(max_rank * 1.06, annotation_limit, 10.0)))
 
     fig, ax = plt.subplots(figsize=(9.6, 4.2))
 
@@ -307,9 +360,9 @@ def plot_violin_summary(
         ax.scatter(
             jitter,
             group_values,
-            s=15,
+            s=11,
             color=color,
-            alpha=0.38,
+            alpha=0.34,
             linewidths=0.0,
             zorder=2,
         )
@@ -317,17 +370,14 @@ def plot_violin_summary(
     for row in test_rows:
         add_test_annotation(ax, row, y_limit)
 
-    tick_labels = [
-        f"{group['relation_label']}"
-        for group in groups
-    ]
+    tick_labels = [f"{group['relation_label']}" for group in groups]
     ax.set_xticks(positions)
     ax.set_xticklabels(tick_labels, fontsize=12.0)
     ax.set_xlim(-0.55, 8.4)
     ax.set_ylim(0.0, y_limit)
-    ax.set_ylabel("abs(FC changes)", fontsize=15.0)
-    ax.yaxis.set_major_locator(MaxNLocator(nbins=7))
-    ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value:.2f}"))
+    ax.set_ylabel("edge rank", fontsize=15.0)
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=7, integer=True))
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value:.0f}"))
     ax.grid(axis="y", color="#DADADA", linewidth=0.75)
     ax.set_axisbelow(True)
     ax.spines["top"].set_visible(False)
@@ -350,14 +400,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-base",
         type=Path,
         default=DEFAULT_OUTPUT_BASE,
-        help="Output path without suffix. PNG, PDF, and summary CSV are written.",
+        help="Output path without suffix. PNG, PDF, and summary CSVs are written.",
     )
     parser.add_argument(
         "--input",
         nargs=2,
         action="append",
         metavar=("LABEL", "CSV"),
-        help="Result label and all_significant_hemisphere_edge_changes CSV. Repeat twice.",
+        help="Result label and edge-change CSV. Repeat twice.",
     )
     return parser
 
@@ -368,15 +418,24 @@ def main() -> int:
     if len(inputs) != 2:
         raise ValueError("Expected exactly two input CSVs: one for Vigour and one for Task result.")
 
-    data = pd.concat([load_edge_changes(label, path) for label, path in inputs], ignore_index=True)
+    data = pd.concat(
+        [
+            load_ranked_edges(label, path)
+            for label, path in inputs
+        ],
+        ignore_index=True,
+    )
     result_labels = tuple(label for label, _ in inputs)
     groups = build_groups(data, result_labels)
-    test_rows = inter_intra_tests(groups)
+    edge_inclusion = "Exact rows from the value figure all_significant_hemisphere_edge_changes CSVs"
+    test_rows = inter_intra_tests(groups, edge_inclusion)
     png_path, pdf_path = plot_violin_summary(groups, test_rows, args.output_base)
+    ranked_path = write_ranked_edges(data, args.output_base)
     summary_path = write_group_summary(groups, args.output_base)
     test_path = write_test_summary(test_rows, args.output_base)
     print(png_path)
     print(pdf_path)
+    print(ranked_path)
     print(summary_path)
     print(test_path)
     return 0
