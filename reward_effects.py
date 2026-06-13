@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 from scipy.io import loadmat
+from matplotlib.ticker import MaxNLocator
 
 try:
     import statsmodels.formula.api as smf
@@ -467,6 +468,109 @@ def _gvs_stat_annotation(stats_df: pd.DataFrame) -> str:
     return f"min p: {label}\nt({int(row['n']) - 1})={row['t_statistic']:.2f}, {_format_p_value(float(row['p_ttest_two_sided']))}"
 
 
+def _significance_stars(p_value: float) -> str:
+    if not np.isfinite(p_value) or p_value >= 0.05:
+        return ""
+    if p_value < 0.001:
+        return "***"
+    if p_value < 0.01:
+        return "**"
+    return "*"
+
+
+def _subject_rt_range_stats(trials: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for subject, group in trials.groupby("subject", sort=True):
+        low = group.loc[group["reward_level"] == "low", "rt"].to_numpy(dtype=np.float64)
+        high = group.loc[group["reward_level"] == "high", "rt"].to_numpy(dtype=np.float64)
+        low = low[np.isfinite(low)]
+        high = high[np.isfinite(high)]
+        t_statistic = float("nan")
+        p_value = float("nan")
+        if low.size > 1 and high.size > 1:
+            test = stats.ttest_ind(high, low, equal_var=False)
+            t_statistic = float(test.statistic)
+            p_value = float(test.pvalue)
+        rows.append(
+            {
+                "subject": subject,
+                "n_low": int(low.size),
+                "n_high": int(high.size),
+                "mean_rt_low": float(np.mean(low)) if low.size else float("nan"),
+                "mean_rt_high": float(np.mean(high)) if high.size else float("nan"),
+                "median_rt_low": float(np.median(low)) if low.size else float("nan"),
+                "median_rt_high": float(np.median(high)) if high.size else float("nan"),
+                "min_rt_low": float(np.min(low)) if low.size else float("nan"),
+                "max_rt_low": float(np.max(low)) if low.size else float("nan"),
+                "min_rt_high": float(np.min(high)) if high.size else float("nan"),
+                "max_rt_high": float(np.max(high)) if high.size else float("nan"),
+                "delta_rt_high_minus_low": (
+                    float(np.mean(high) - np.mean(low)) if low.size and high.size else float("nan")
+                ),
+                "t_statistic_welch": t_statistic,
+                "p_ttest_welch_two_sided": p_value,
+                "significance": _significance_stars(p_value),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _save_subject_rt_bar_range_figure(subject_rt_stats: pd.DataFrame, out_dir: Path) -> list[Path]:
+    subjects = subject_rt_stats["subject"].tolist()
+    n_cols = 3
+    n_rows = int(np.ceil(len(subjects) / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(8.2, 1.65 * n_rows), squeeze=False)
+    low_color = "#9CA3AF"
+    high_color = SUBJECT_FIGURE_COLOR
+    x = np.array([0.0, 1.0])
+
+    for panel_index, (ax, (_, row)) in enumerate(zip(axes.ravel(), subject_rt_stats.iterrows()), start=1):
+        means = np.array([row["mean_rt_low"], row["mean_rt_high"]], dtype=np.float64)
+        mins = np.array([row["min_rt_low"], row["min_rt_high"]], dtype=np.float64)
+        maxs = np.array([row["max_rt_low"], row["max_rt_high"]], dtype=np.float64)
+        yerr = np.vstack([means - mins, maxs - means])
+        ax.bar(
+            x,
+            means,
+            width=0.58,
+            color=[low_color, high_color],
+            edgecolor="#374151",
+            linewidth=0.6,
+            yerr=yerr,
+            capsize=3,
+            error_kw={"ecolor": "#374151", "elinewidth": 0.8, "capthick": 0.8},
+            zorder=2,
+        )
+        stars = str(row["significance"])
+        if stars:
+            bracket_y = float(np.nanmax(maxs)) * 1.03
+            tick = max(float(np.nanmax(maxs)) * 0.015, 0.04)
+            ax.plot(
+                [x[0], x[0], x[1], x[1]],
+                [bracket_y, bracket_y + tick, bracket_y + tick, bracket_y],
+                color="#111827",
+                linewidth=0.8,
+                clip_on=False,
+            )
+            ax.text(np.mean(x), bracket_y + tick, stars, ha="center", va="bottom", fontsize=10)
+        y_max = float(np.nanmax(maxs))
+        ax.set_ylim(0, y_max * 1.18 if y_max > 0 else 1)
+        ax.set_title(f"sub{panel_index:02d}", fontsize=9, pad=2)
+        ax.set_xticks(x)
+        ax.set_xticklabels(["Low", "High"], fontsize=8)
+        ax.tick_params(axis="y", labelsize=8)
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=3))
+        ax.grid(axis="y", color="#E5E7EB", linewidth=0.6, zorder=1)
+        ax.spines[["top", "right"]].set_visible(False)
+
+    for ax in axes.ravel()[len(subjects) :]:
+        ax.axis("off")
+    for ax in axes[:, 0]:
+        ax.set_ylabel("RT (s)", fontsize=9)
+    fig.tight_layout(pad=0.4, h_pad=0.6, w_pad=0.8)
+    return _save_figure(fig, out_dir / "reward_rt_subject_bar_range", pad_inches=0.05)
+
+
 def _save_paired_subject_figure(subject_summary: pd.DataFrame, stats_df: pd.DataFrame, out_dir: Path) -> list[Path]:
     fig, ax = plt.subplots(figsize=PAIRED_FIGURE_SIZE)
     x = PAIRED_COLUMN_X
@@ -699,15 +803,18 @@ def main() -> None:
     }
     stats_df = _paired_difference_stats(summary)
     regression_df = _regression_tables(trials)
+    subject_rt_stats = _subject_rt_range_stats(trials)
 
     trials.to_csv(out_dir / "reward_rt_trials.csv", index=False)
     for name, df in summary.items():
         df.to_csv(out_dir / f"reward_rt_{name}_summary.csv", index=False)
     stats_df.to_csv(out_dir / "reward_rt_paired_statistics.csv", index=False)
     regression_df.to_csv(out_dir / "reward_rt_regression_statistics.csv", index=False)
+    subject_rt_stats.to_csv(out_dir / "reward_rt_subject_bar_range_stats.csv", index=False)
 
     figures = []
     figures.extend(_save_paired_subject_figure(summary["subject"], stats_df, out_dir))
+    figures.extend(_save_subject_rt_bar_range_figure(subject_rt_stats, out_dir))
     figures.extend(_save_medication_delta_figure(summary["subject_medication"], stats_df, out_dir))
     figures.extend(_save_gvs_delta_figure(summary["subject_gvs"], stats_df, out_dir))
 
