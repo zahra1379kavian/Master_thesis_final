@@ -481,8 +481,9 @@ def _significance_stars(p_value: float) -> str:
 def _subject_rt_range_stats(trials: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for subject, group in trials.groupby("subject", sort=True):
-        low = group.loc[group["reward_level"] == "low", "rt"].to_numpy(dtype=np.float64)
-        high = group.loc[group["reward_level"] == "high", "rt"].to_numpy(dtype=np.float64)
+        # The source metric column is 1/RT; the legacy "inv_rt" column stores its reciprocal, RT in seconds.
+        low = group.loc[group["reward_level"] == "low", "inv_rt"].to_numpy(dtype=np.float64)
+        high = group.loc[group["reward_level"] == "high", "inv_rt"].to_numpy(dtype=np.float64)
         low = low[np.isfinite(low)]
         high = high[np.isfinite(high)]
         t_statistic = float("nan")
@@ -554,7 +555,8 @@ def _save_subject_rt_bar_range_figure(subject_rt_stats: pd.DataFrame, out_dir: P
             )
             ax.text(np.mean(x), bracket_y + tick, stars, ha="center", va="bottom", fontsize=10)
         y_max = float(np.nanmax(maxs))
-        ax.set_ylim(0, y_max * 1.18 if y_max > 0 else 1)
+        top_scale = 1.32 if stars else 1.18
+        ax.set_ylim(0, y_max * top_scale if y_max > 0 else 1)
         ax.set_title(f"sub{panel_index:02d}", fontsize=9, pad=2)
         ax.set_xticks(x)
         ax.set_xticklabels(["Low", "High"], fontsize=8)

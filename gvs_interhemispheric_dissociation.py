@@ -379,9 +379,9 @@ def make_figure(data, homo_or, homo_p):
         bbox_to_anchor=(0.985, 0.018),
         frameon=False,
         ncol=4,
-        fontsize=9.6,
-        handlelength=1.8,
-        columnspacing=1.0,
+        fontsize=7.8,
+        handlelength=1.35,
+        columnspacing=0.65,
     )
     out = "/home/zkavian/Master_thesis_final/figures/GVS_effects/main result/connectogram_network_comparison/interhemispheric_homotopic_dissociation"
     fig.savefig(out + ".png", dpi=200, bbox_inches="tight")
