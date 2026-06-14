@@ -47,7 +47,7 @@ PAPER_AXIS_TICK_FONT_SIZE = 13
 PAPER_CELL_COLORBAR_FONT_SIZE = 12
 PAPER_FOOTER_FONT_SIZE = 11
 EXCLUDED_MAIN_PLOT_REGIONS = {"N_Acc"}
-EXCLUDED_ATLAS_LABEL_REGIONS = {"Olfactory"}
+EXCLUDED_ATLAS_LABEL_REGIONS = set()
 COARSE_AAL_GROUPS = (
     ("Cerebellum", ("Cerebellum", "Vermis"), ()),
     ("Temporal", ("Temporal",), ("Heschl",)),
@@ -460,12 +460,14 @@ def _plot_atlas_regions(
     legend_ax.axis("off")
     n_cols = 6
     rows_per_col = max(1, int(np.ceil(len(labeled_groups) / n_cols)))
-    row_step = 0.31
+    top_y = 0.78
+    bottom_y = 0.16
+    row_step = (top_y - bottom_y) / max(1, rows_per_col - 1)
     for idx, group in enumerate(labeled_groups, start=1):
         col = (idx - 1) // rows_per_col
         row = (idx - 1) % rows_per_col
         x = (col + 0.02) / n_cols
-        y = 0.78 - row * row_step
+        y = top_y - row * row_step
         label = _compact_region_label(group.name, reference_counts.get(group.name, 0))
         legend_ax.add_patch(plt.Rectangle((x, y - 0.040), 0.010, 0.080, color=group_colors[group.name], transform=legend_ax.transAxes))
         legend_ax.text(x + 0.014, y, label, fontsize=7.0, va="center")
