@@ -739,8 +739,12 @@ def _plot_summary_image(out_path: Path, clean_df: pd.DataFrame, totals: dict[str
         ["vigour_only_pct_of_roi", "roi_name"],
         ascending=[True, True],
     )
-    fig_height = max(8.0, 0.34 * len(plot_df) + 2.4)
-    fig, ax = plt.subplots(figsize=(11.6, fig_height), facecolor="white")
+    roi_label_fontsize = 15.0
+    axis_label_fontsize = 14.5
+    tick_fontsize = 13.5
+    legend_fontsize = 22.0
+    fig_height = max(8.8, 0.42 * len(plot_df) + 2.6)
+    fig, ax = plt.subplots(figsize=(12.4, fig_height), facecolor="white")
     y = np.arange(len(plot_df))
     vigour_only = 100.0 * plot_df["vigour_only_pct_of_roi"].to_numpy()
     both = 100.0 * plot_df["same_voxel_overlap_pct_of_roi"].to_numpy()
@@ -757,19 +761,22 @@ def _plot_summary_image(out_path: Path, clean_df: pd.DataFrame, totals: dict[str
     )
 
     ax.set_yticks(y)
-    ax.set_yticklabels(plot_df["roi_name"], fontsize=12.5, fontweight="bold")
-    ax.set_xlabel("Percent of total voxels in ROI", fontsize=12.0)
+    ax.set_yticklabels(plot_df["roi_name"], fontsize=roi_label_fontsize, fontweight="bold")
+    ax.set_xlabel("Percent of total voxels in ROI", fontsize=axis_label_fontsize)
     ax.grid(axis="x", color="#D0D0D0", linewidth=0.6, alpha=0.7)
     ax.set_axisbelow(True)
     ax.spines[["top", "right", "left"]].set_visible(False)
     ax.tick_params(axis="y", length=0)
-    ax.tick_params(axis="x", labelsize=11.0)
+    ax.tick_params(axis="x", labelsize=tick_fontsize)
     ax.legend(
         handles=[vigour_bars, task_bars, overlap_bars],
         labels=["vigour network", "task-activation map", "overlap"],
         loc="lower right",
         frameon=False,
-        fontsize=11.0,
+        prop={"size": legend_fontsize, "weight": "bold"},
+        handlelength=2.4,
+        handleheight=1.4,
+        labelspacing=0.8,
     )
 
     fig.tight_layout()
@@ -918,6 +925,7 @@ def _write_report(
         f"- `{out_base}_region_sets.csv`",
         f"- `{out_base}_clean_table.csv`",
         f"- `{out_base}_summary.png`",
+        f"- `{out_base}_summary.pdf`",
         f"- `{out_base}_clean_table.png`",
         f"- `{out_base}_atlas_coverage.csv`",
         f"- `{out_base}_metadata.json`",
@@ -969,6 +977,7 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
     sets_path = args.out_base.with_name(args.out_base.name + "_region_sets.csv")
     clean_table_path = args.out_base.with_name(args.out_base.name + "_clean_table.csv")
     summary_image_path = args.out_base.with_name(args.out_base.name + "_summary.png")
+    summary_pdf_path = args.out_base.with_name(args.out_base.name + "_summary.pdf")
     clean_table_image_path = args.out_base.with_name(args.out_base.name + "_clean_table.png")
     coverage_path = args.out_base.with_name(args.out_base.name + "_atlas_coverage.csv")
     metadata_path = args.out_base.with_name(args.out_base.name + "_metadata.json")
@@ -977,6 +986,7 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
     clean_df.to_csv(clean_table_path, index=False)
     coverage_df.to_csv(coverage_path, index=False)
     _plot_summary_image(summary_image_path, clean_df, totals, args.atlas_mode)
+    _plot_summary_image(summary_pdf_path, clean_df, totals, args.atlas_mode)
     _plot_clean_table_image(clean_table_image_path, clean_df, totals, args.atlas_mode)
     metadata = {
         "inputs": mask_metadata,
@@ -989,6 +999,7 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
             "region_sets": str(sets_path),
             "clean_table": str(clean_table_path),
             "summary_image": str(summary_image_path),
+            "summary_pdf": str(summary_pdf_path),
             "clean_table_image": str(clean_table_image_path),
             "atlas_coverage": str(coverage_path),
             "metadata": str(metadata_path),
@@ -1002,6 +1013,7 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
         "region_sets": sets_path,
         "clean_table": clean_table_path,
         "summary_image": summary_image_path,
+        "summary_pdf": summary_pdf_path,
         "clean_table_image": clean_table_image_path,
         "atlas_coverage": coverage_path,
         "metadata": metadata_path,

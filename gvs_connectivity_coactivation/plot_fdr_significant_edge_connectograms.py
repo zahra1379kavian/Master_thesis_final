@@ -27,11 +27,11 @@ OUT_DIR = OUT_ROOT / "metric_sensitivity" / "connectogram_reports"
 TOP_N_EDGES = 30
 TOP_NODES = 15
 PAPER_FONT_FAMILY = "Liberation Sans"
-CONNECTOGRAM_FIGSIZE = (11.4, 5.35)
-ROI_LABEL_FONTSIZE = 8.2
-GROUP_LABEL_FONTSIZE = 9.4
-COLORBAR_FONTSIZE = 9.0
-LEGEND_FONTSIZE = 8.0
+CONNECTOGRAM_FIGSIZE = (13.2, 6.2)
+ROI_LABEL_FONTSIZE = 9.8
+GROUP_LABEL_FONTSIZE = 10.8
+COLORBAR_FONTSIZE = 10.4
+LEGEND_FONTSIZE = 9.4
 ROI_LABEL_RADIUS = 1.18
 GROUP_LABEL_RADIUS = 1.52
 COLORBAR_PAD = 0.006
@@ -41,6 +41,7 @@ plt.rcParams.update(
     {
         "font.family": "sans-serif",
         "font.sans-serif": [PAPER_FONT_FAMILY, "Arial", "Helvetica", "DejaVu Sans"],
+        "font.weight": "bold",
         "pdf.fonttype": 42,
         "ps.fonttype": 42,
     }
@@ -232,10 +233,10 @@ def draw_group_legend(fig: plt.Figure) -> None:
     fig.legend(
         handles=handles,
         loc="lower center",
-        bbox_to_anchor=(0.5, 0.008),
+        bbox_to_anchor=(0.5, -0.04),
         ncol=len(handles),
         frameon=False,
-        fontsize=LEGEND_FONTSIZE,
+        prop={"size": LEGEND_FONTSIZE, "weight": "bold"},
         handletextpad=0.45,
         columnspacing=1.0,
         borderaxespad=0.0,
@@ -300,6 +301,7 @@ def draw_connectogram_panel(
             ha=ha,
             va="center",
             fontsize=GROUP_LABEL_FONTSIZE,
+            fontweight="bold",
             color=GROUP_COLORS[group],
         )
 
@@ -317,10 +319,11 @@ def draw_connectogram_panel(
             ha=ha,
             va="center",
             fontsize=ROI_LABEL_FONTSIZE,
+            fontweight="bold",
             color="#222222",
         )
 
-    ax.set_xlim(-1.56, 1.56)
+    ax.set_xlim(-1.78, 1.78)
     ax.set_ylim(-1.30, 1.30)
 
 
@@ -358,7 +361,7 @@ def plot_connectogram(df: pd.DataFrame, roi_order: list[str], path_base: Path, s
         right=0.99,
         bottom=0.22,
         top=0.98,
-        wspace=0.005,
+        wspace=0.14,
     )
     axes = [fig.add_subplot(grid[0, 0]), fig.add_subplot(grid[0, 2])]
     cbar_slots = [fig.add_subplot(grid[0, 1]), fig.add_subplot(grid[0, 3])]
@@ -388,12 +391,14 @@ def plot_connectogram(df: pd.DataFrame, roi_order: list[str], path_base: Path, s
         pos = ax.get_position()
         cax = fig.add_axes([pos.x1 + COLORBAR_PAD, pos.y0 + pos.height * 0.22, COLORBAR_WIDTH, pos.height * 0.56])
         cbar = fig.colorbar(sm, cax=cax)
-        cbar.ax.set_title(colorbar_label, fontsize=COLORBAR_FONTSIZE, pad=5)
+        cbar.ax.set_title(colorbar_label.replace(" ", "\n"), fontsize=COLORBAR_FONTSIZE, fontweight="bold", pad=5)
         cbar.ax.tick_params(labelsize=COLORBAR_FONTSIZE - 1.0)
+        for tick_label in cbar.ax.get_yticklabels():
+            tick_label.set_fontweight("bold")
 
-    fig.savefig(path_base.with_suffix(".png"), dpi=300, bbox_inches="tight", pad_inches=0.0)
+    fig.savefig(path_base.with_suffix(".png"), dpi=300, bbox_inches="tight", pad_inches=0.03)
     if save_pdf:
-        fig.savefig(path_base.with_suffix(".pdf"), bbox_inches="tight", pad_inches=0.0)
+        fig.savefig(path_base.with_suffix(".pdf"), bbox_inches="tight", pad_inches=0.03)
     plt.close(fig)
 
 

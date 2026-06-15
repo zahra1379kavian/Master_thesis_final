@@ -1979,6 +1979,8 @@ def _plot_intra_between_fc(subject_deltas, results, out_dir):
         ax.tick_params(labelsize=AXIS_TICK_FONT_SIZE)
         ax.text(-0.12, 1.04, label, transform=ax.transAxes, fontsize=TITLE_FONT_SIZE, fontweight='bold', ha='left', va='bottom')
     _apply_paper_typography(fig, axes)
+    for text in fig.findobj(match=Text):
+        text.set_fontweight('bold')
     fig.subplots_adjust(wspace=0.28)
     out_dir.mkdir(parents=True, exist_ok=True)
     png_path = out_dir / 'intra_vs_between_fc_medication_change.png'
