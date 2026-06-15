@@ -505,6 +505,8 @@ def _subject_rt_range_stats(trials: pd.DataFrame) -> pd.DataFrame:
                 "max_rt_low": float(np.max(low)) if low.size else float("nan"),
                 "min_rt_high": float(np.min(high)) if high.size else float("nan"),
                 "max_rt_high": float(np.max(high)) if high.size else float("nan"),
+                "sem_rt_low": float(stats.sem(low)) if low.size > 1 else float("nan"),
+                "sem_rt_high": float(stats.sem(high)) if high.size > 1 else float("nan"),
                 "delta_rt_high_minus_low": (
                     float(np.mean(high) - np.mean(low)) if low.size and high.size else float("nan")
                 ),
@@ -527,9 +529,9 @@ def _save_subject_rt_bar_range_figure(subject_rt_stats: pd.DataFrame, out_dir: P
 
     for panel_index, (ax, (_, row)) in enumerate(zip(axes.ravel(), subject_rt_stats.iterrows()), start=1):
         means = np.array([row["mean_rt_low"], row["mean_rt_high"]], dtype=np.float64)
-        mins = np.array([row["min_rt_low"], row["min_rt_high"]], dtype=np.float64)
-        maxs = np.array([row["max_rt_low"], row["max_rt_high"]], dtype=np.float64)
-        yerr = np.vstack([means - mins, maxs - means])
+        sems = np.array([row["sem_rt_low"], row["sem_rt_high"]], dtype=np.float64)
+        yerr = np.nan_to_num(sems, nan=0.0)
+        upper = means + yerr
         ax.bar(
             x,
             means,
@@ -544,8 +546,8 @@ def _save_subject_rt_bar_range_figure(subject_rt_stats: pd.DataFrame, out_dir: P
         )
         stars = str(row["significance"])
         if stars:
-            bracket_y = float(np.nanmax(maxs)) * 1.03
-            tick = max(float(np.nanmax(maxs)) * 0.015, 0.04)
+            bracket_y = float(np.nanmax(upper)) * 1.08
+            tick = max(float(np.nanmax(upper)) * 0.02, 0.04)
             ax.plot(
                 [x[0], x[0], x[1], x[1]],
                 [bracket_y, bracket_y + tick, bracket_y + tick, bracket_y],
@@ -554,7 +556,7 @@ def _save_subject_rt_bar_range_figure(subject_rt_stats: pd.DataFrame, out_dir: P
                 clip_on=False,
             )
             ax.text(np.mean(x), bracket_y + tick, stars, ha="center", va="bottom", fontsize=10)
-        y_max = float(np.nanmax(maxs))
+        y_max = float(np.nanmax(upper))
         top_scale = 1.32 if stars else 1.18
         ax.set_ylim(0, y_max * top_scale if y_max > 0 else 1)
         ax.set_title(f"sub{panel_index:02d}", fontsize=9, pad=2)

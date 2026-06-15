@@ -276,6 +276,7 @@ def main():
                     ha="center",
                     va="bottom",
                     fontsize=AXIS_LABEL_FONTSIZE,
+                    fontweight="bold",
                     color="0.15",
                     clip_on=False,
                 )
@@ -286,6 +287,7 @@ def main():
                     ha="center",
                     va="bottom",
                     fontsize=AXIS_LABEL_FONTSIZE,
+                    fontweight="bold",
                     color="0.15",
                     clip_on=False,
                 )
@@ -302,6 +304,7 @@ def main():
                 ha="center",
                 va="top",
                 fontsize=AXIS_LABEL_FONTSIZE,
+                fontweight="bold",
                 color="0.15",
             )
             ax.set_axis_off()
@@ -310,10 +313,12 @@ def main():
     scalar = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
     scalar.set_array([])
     colorbar = fig.colorbar(scalar, cax=cax)
-    colorbar.ax.set_title(args.colorbar_label, fontsize=COLORBAR_FONTSIZE, pad=7)
+    colorbar.ax.set_title(args.colorbar_label, fontsize=COLORBAR_FONTSIZE, fontweight="bold", pad=7)
     colorbar.ax.tick_params(labelsize=COLORBAR_FONTSIZE, width=0.6, length=2.8, pad=2)
     colorbar.ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
     colorbar.ax.yaxis.set_major_formatter(FormatStrFormatter("%.2f"))
+    for label in colorbar.ax.get_yticklabels():
+        label.set_fontweight("bold")
     colorbar.outline.set_linewidth(0.6)
 
     args.output_base.parent.mkdir(exist_ok=True)

@@ -1381,6 +1381,7 @@ def plot_full_vs_task_only_anatomy(
                     ha="center",
                     va="top",
                     fontsize=PAPER_AXIS_TICK_FONT_SIZE,
+                    fontweight="bold",
                 )
                 if row == 0:
                     ax.text(
@@ -1391,6 +1392,7 @@ def plot_full_vs_task_only_anatomy(
                         ha="center",
                         va="top",
                         fontsize=PAPER_AXIS_TICK_FONT_SIZE,
+                        fontweight="bold",
                     )
                     ax.text(
                         0.88,
@@ -1400,6 +1402,7 @@ def plot_full_vs_task_only_anatomy(
                         ha="center",
                         va="top",
                         fontsize=PAPER_AXIS_TICK_FONT_SIZE,
+                        fontweight="bold",
                     )
                 ax.set_facecolor("none")
                 ax.patch.set_alpha(0)
@@ -1410,7 +1413,14 @@ def plot_full_vs_task_only_anatomy(
             Patch(facecolor=colors["task"], edgecolor=colors["task"], alpha=0.46, label="Task-activation map"),
             Patch(facecolor=colors["shared"], edgecolor=colors["shared_edge"], alpha=0.90, label="Overlap of networks"),
         ]
-        fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False, bbox_to_anchor=(0.5, 0.01))
+        fig.legend(
+            handles=handles,
+            loc="lower center",
+            ncol=3,
+            frameon=False,
+            bbox_to_anchor=(0.5, 0.01),
+            prop={"size": PAPER_AXIS_TICK_FONT_SIZE + 2, "weight": "bold"},
+        )
         fig.subplots_adjust(left=0.01, right=0.995, top=0.995, bottom=0.16, wspace=0.02, hspace=0.04)
         fig.savefig(f"{out_base}.png", dpi=300, bbox_inches="tight")
         fig.savefig(f"{out_base}.pdf", bbox_inches="tight")

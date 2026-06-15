@@ -18,6 +18,13 @@ from scipy import ndimage
 import matplotlib
 
 matplotlib.use("Agg")
+matplotlib.rcParams.update(
+    {
+        "font.family": "DejaVu Sans",
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
+    }
+)
 import matplotlib.pyplot as plt
 
 from analyze_ablation_constraints import (
@@ -750,17 +757,19 @@ def _plot_summary_image(out_path: Path, clean_df: pd.DataFrame, totals: dict[str
     )
 
     ax.set_yticks(y)
-    ax.set_yticklabels(plot_df["roi_name"], fontsize=8.5)
-    ax.set_xlabel("Percent of total voxels in ROI")
+    ax.set_yticklabels(plot_df["roi_name"], fontsize=12.5, fontweight="bold")
+    ax.set_xlabel("Percent of total voxels in ROI", fontsize=12.0)
     ax.grid(axis="x", color="#D0D0D0", linewidth=0.6, alpha=0.7)
     ax.set_axisbelow(True)
     ax.spines[["top", "right", "left"]].set_visible(False)
     ax.tick_params(axis="y", length=0)
+    ax.tick_params(axis="x", labelsize=11.0)
     ax.legend(
         handles=[vigour_bars, task_bars, overlap_bars],
         labels=["vigour network", "task-activation map", "overlap"],
         loc="lower right",
         frameon=False,
+        fontsize=11.0,
     )
 
     fig.tight_layout()

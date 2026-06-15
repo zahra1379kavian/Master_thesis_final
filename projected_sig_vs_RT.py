@@ -13,6 +13,7 @@ import matplotlib
 warnings.filterwarnings("ignore", message="Unable to import Axes3D.*")
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.text import Text
 import nibabel as nib
 import numpy as np
 import pandas as pd
@@ -553,31 +554,13 @@ def _plot_paired_estimation(
         zorder=3,
     )
 
-    finite_pairs = np.isfinite(behavior_values) & np.isfinite(projection_values)
-    p_value = (
-        stats.ttest_rel(behavior_values[finite_pairs], projection_values[finite_pairs]).pvalue
-        if np.count_nonzero(finite_pairs) > 1
-        else np.nan
-    )
     y_low, y_high = y_limits
-    y_range = y_high - y_low
-    max_value = float(np.nanmax(np.concatenate([behavior_values, projection_values])))
-    bracket_y = max_value + y_range * 0.04
-    bracket_height = y_range * 0.025
-    star_y = bracket_y + bracket_height + y_range * 0.012
-    y_high = max(y_high, star_y + y_range * 0.05)
-    ax.plot(
-        [0.0, 0.0, 1.0, 1.0],
-        [bracket_y, bracket_y + bracket_height, bracket_y + bracket_height, bracket_y],
-        color="0.10",
-        linewidth=1.0,
-    )
-    ax.text(0.5, star_y, _significance_label(p_value), ha="center", va="bottom", fontsize=CELL_VALUE_FONT_SIZE, color="0.10")
 
     ax.set_xlim(-0.38, 1.38)
     ax.set_ylim((y_low, y_high))
     ax.set_xticks([0.0, 1.0])
     ax.set_xticklabels(["Behaviour", "Projection"])
+    ax.tick_params(axis="y", labelleft=False)
     ax.set_ylabel(VARIABILITY_AXIS_LABEL)
     ax.grid(axis="y", linestyle="-", linewidth=0.45, alpha=0.18)
     ax.spines["top"].set_visible(False)
@@ -588,7 +571,6 @@ def _plot_paired_estimation(
 
 def _plot_behaviour_minus_projection(ax: plt.Axes, subject_df: pd.DataFrame) -> None:
     reductions = subject_df["behaviour_minus_projection"].to_numpy(dtype=np.float64)
-    finite_reductions = reductions[np.isfinite(reductions)]
     rng = np.random.default_rng(141)
     x = rng.uniform(-0.055, 0.055, size=reductions.size)
     _draw_boxplot(ax, [reductions], [0.0], [DIFFERENCE_COLOR], width=0.24)
@@ -602,8 +584,6 @@ def _plot_behaviour_minus_projection(ax: plt.Axes, subject_df: pd.DataFrame) -> 
         linewidths=0.25,
         zorder=3,
     )
-    mean, ci_low, ci_high = _mean_ci(reductions)
-    p_value = stats.ttest_1samp(finite_reductions, 0.0).pvalue if finite_reductions.size > 1 else np.nan
     y_low, y_high = _expanded_limits(reductions, force_zero=True)
     y_high += (y_high - y_low) * 0.16
 
@@ -612,22 +592,19 @@ def _plot_behaviour_minus_projection(ax: plt.Axes, subject_df: pd.DataFrame) -> 
     ax.set_ylim((y_low, y_high))
     ax.set_xticks([0.0])
     ax.set_xticklabels(["Difference"])
+    ax.tick_params(axis="y", labelleft=False)
     ax.set_ylabel("Behaviour - Projection\nvariability")
     ax.grid(axis="y", linestyle="-", linewidth=0.45, alpha=0.18)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.spines["left"].set_color("0.25")
     ax.spines["bottom"].set_color("0.25")
-    ax.text(
-        0.98,
-        0.97,
-        f"Mean difference = {mean:.1f}\n95% CI [{ci_low:.1f}, {ci_high:.1f}]\npaired t-test {_format_p_value(p_value)}",
-        transform=ax.transAxes,
-        ha="right",
-        va="top",
-        fontsize=CELL_VALUE_FONT_SIZE,
-        linespacing=1.25,
-    )
+
+
+def _bold_figure_text(fig: plt.Figure) -> None:
+    fig.canvas.draw()
+    for text in fig.findobj(match=Text):
+        text.set_fontweight("bold")
 
 
 def _save_pdf_and_png(fig: plt.Figure, pdf_path: Path, dpi: int) -> tuple[Path, Path]:
@@ -677,6 +654,7 @@ def _save_behavior_projection_figure(metric_df: pd.DataFrame, out_dir: Path) -> 
         )
         _plot_paired_estimation(axes[0], subject_df, y_limits)
         _plot_behaviour_minus_projection(axes[1], subject_df)
+        _bold_figure_text(fig)
         fig.subplots_adjust(left=0.105, right=0.985, bottom=0.18, top=0.965, wspace=0.25)
         paths = _save_pdf_and_png(fig, out_dir / "projection_behavior_subject_panel(main).pdf", dpi=300)
         plt.close(fig)

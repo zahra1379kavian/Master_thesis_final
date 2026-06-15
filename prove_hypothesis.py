@@ -19,6 +19,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.text import Text
 import nibabel as nib
 import numpy as np
 import pandas as pd
@@ -469,6 +470,12 @@ def _style_axis(ax) -> None:
     ax.tick_params(labelsize=13)
 
 
+def _bold_figure_text(fig: plt.Figure) -> None:
+    fig.canvas.draw()
+    for text in fig.findobj(match=Text):
+        text.set_fontweight("bold")
+
+
 def _plot_norm_diff_figure(
     output_png: Path,
     percentiles: np.ndarray,
@@ -536,7 +543,7 @@ def _plot_norm_diff_figure(
             color=ci_color,
             alpha=0.24,
             linewidth=0,
-            label=f"95% CI [{ci_low:.2f}, {ci_high:.2f}]",
+            label="Control mean interval",
         )
         axes[1].hist(
             resampled_means,
@@ -552,14 +559,14 @@ def _plot_norm_diff_figure(
             color=selected_color,
             linestyle="--",
             linewidth=1.8,
-            label=f"Vigour network mean = {selected_mean:.2f}",
+            label="Vigour network mean",
         )
         axes[1].axvline(
             resample_mean,
             color=reference_color,
             linestyle="--",
             linewidth=1.5,
-            label=f"Control network mean = {resample_mean:.2f}",
+            label="Control network mean",
         )
         axes[1].set_xlabel("Consecutive trial variability")
         axes[1].set_ylabel("Density")
@@ -574,12 +581,13 @@ def _plot_norm_diff_figure(
             facecolor="white",
             edgecolor="none",
             framealpha=0.78,
-            fontsize=9,
+            fontsize=12,
             loc="upper right",
             borderaxespad=0.35,
             handlelength=2.4,
         )
 
+        _bold_figure_text(fig)
         fig.tight_layout(w_pad=2.0)
         output_png.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(output_png, dpi=320, bbox_inches="tight", pad_inches=0.04)
