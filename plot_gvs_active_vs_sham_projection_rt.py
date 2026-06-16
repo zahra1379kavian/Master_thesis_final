@@ -51,13 +51,13 @@ METRICS = {
     },
     "projection_variability": {
         "label": "Projection variability",
-        "ylabel": "Mean normalized adjacent change",
+        "ylabel": "Mean Variability",
         "delta_label": "a.u.",
         "color": "#009E73",
     },
     "projection_rt_coupling_z": {
         "label": "Projection-RT coupling",
-        "ylabel": "Fisher z Pearson r",
+        "ylabel": "Corr",
         "delta_label": "z",
         "color": "#7A5195",
     },
@@ -363,14 +363,6 @@ def _stats_table(subject_pairs: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _format_p(p_value: float) -> str:
-    if not np.isfinite(p_value):
-        return "p = n/a"
-    if p_value < 0.001:
-        return "p < 0.001"
-    return f"p = {p_value:.3f}"
-
-
 def _expanded_limits(values: np.ndarray) -> tuple[float, float]:
     values = np.asarray(values, dtype=np.float64)
     values = values[np.isfinite(values)]
@@ -385,26 +377,25 @@ def _expanded_limits(values: np.ndarray) -> tuple[float, float]:
     return low - pad, high + pad
 
 
-def _draw_metric_panel(ax: plt.Axes, subject_pairs: pd.DataFrame, stats_df: pd.DataFrame, metric: str, label: str) -> None:
+def _draw_metric_panel(ax: plt.Axes, subject_pairs: pd.DataFrame, metric: str) -> None:
     spec = METRICS[metric]
     data = subject_pairs.loc[subject_pairs["metric"].eq(metric)].copy()
-    stat = stats_df.loc[stats_df["metric"].eq(metric)].iloc[0]
     data = data.sort_values("delta_active_minus_sham").reset_index(drop=True)
 
     rng = np.random.default_rng(20240616)
     jitter = rng.uniform(-0.035, 0.035, size=data.shape[0])
     x_sham = 0.0 + jitter
-    x_active = 1.0 + jitter
+    x_active = 0.45 + jitter
     sham = data["sham_value"].to_numpy(dtype=np.float64)
     active = data["active_value"].to_numpy(dtype=np.float64)
     color = str(spec["color"])
 
     for x0, x1, y0, y1 in zip(x_sham, x_active, sham, active):
-        ax.plot([x0, x1], [y0, y1], color="0.66", linewidth=0.65, alpha=0.45, zorder=1)
-    ax.scatter(x_sham, sham, s=24, color="#777777", edgecolor="white", linewidth=0.35, alpha=0.82, zorder=3)
-    ax.scatter(x_active, active, s=24, color=color, edgecolor="white", linewidth=0.35, alpha=0.88, zorder=3)
+        ax.plot([x0, x1], [y0, y1], color="0.66", linewidth=0.75, alpha=0.45, zorder=1)
+    ax.scatter(x_sham, sham, s=42, color="#777777", edgecolor="white", linewidth=0.45, alpha=0.82, zorder=3)
+    ax.scatter(x_active, active, s=42, color=color, edgecolor="white", linewidth=0.45, alpha=0.88, zorder=3)
 
-    for x, values, point_color in [(0.0, sham, "#333333"), (1.0, active, color)]:
+    for x, values, point_color in [(0.0, sham, "#333333"), (0.45, active, color)]:
         finite = values[np.isfinite(values)]
         mean = float(np.mean(finite)) if finite.size else np.nan
         yerr = None
@@ -417,60 +408,46 @@ def _draw_metric_panel(ax: plt.Axes, subject_pairs: pd.DataFrame, stats_df: pd.D
             [mean],
             yerr=yerr,
             fmt="D",
-            markersize=5.2,
+            markersize=6.3,
             markerfacecolor="white",
             markeredgecolor=point_color,
-            markeredgewidth=1.1,
+            markeredgewidth=1.25,
             ecolor=point_color,
-            elinewidth=1.1,
-            capsize=3.0,
+            elinewidth=1.25,
+            capsize=3.5,
             zorder=4,
         )
 
-    delta = float(stat["mean_delta"])
-    p_value = float(stat["p_value"])
-    ax.set_title(
-        f"{label}. {spec['label']}\nDelta = {delta:.3g} {spec['delta_label']}; {_format_p(p_value)}",
-        fontsize=11,
-        pad=8,
-    )
-    ax.set_xlim(-0.35, 1.35)
-    ax.set_xticks([0.0, 1.0])
-    ax.set_xticklabels(["Sham", "Active GVS"])
-    ax.set_ylabel(str(spec["ylabel"]))
+    ax.set_xlim(-0.14, 0.70)
+    ax.set_xticks([0.0, 0.45])
+    ax.set_xticklabels(["Sham", "Active GVS"], fontweight="bold")
+    ax.set_ylabel(str(spec["ylabel"]), fontweight="bold")
     ax.set_ylim(_expanded_limits(np.concatenate([sham, active])))
     ax.grid(axis="y", color="#E5E7EB", linewidth=0.8)
     ax.spines[["top", "right"]].set_visible(False)
+    for tick_label in [*ax.get_xticklabels(), *ax.get_yticklabels()]:
+        tick_label.set_fontweight("bold")
 
 
-def _save_figure(subject_pairs: pd.DataFrame, stats_df: pd.DataFrame, out_dir: Path) -> tuple[Path, Path]:
+def _save_figure(subject_pairs: pd.DataFrame, out_dir: Path) -> tuple[Path, Path]:
     with plt.rc_context(
         {
             "font.family": "sans-serif",
             "font.sans-serif": [PAPER_FONT_FAMILY, "Arial", "DejaVu Sans"],
-            "font.size": 10,
-            "axes.labelsize": 10,
-            "xtick.labelsize": 9.5,
-            "ytick.labelsize": 9.5,
+            "font.weight": "bold",
+            "font.size": 13,
+            "axes.labelweight": "bold",
+            "axes.labelsize": 13,
+            "xtick.labelsize": 12,
+            "ytick.labelsize": 12,
             "pdf.fonttype": 42,
             "ps.fonttype": 42,
         }
     ):
-        fig, axes = plt.subplots(2, 2, figsize=(9.4, 7.0))
-        for ax, metric, label in zip(axes.ravel(), METRICS, ["A", "B", "C", "D"]):
-            _draw_metric_panel(ax, subject_pairs, stats_df, metric, label)
-        fig.text(
-            0.5,
-            0.015,
-            (
-                "Each point is one subject. Active values average the eight active-GVS blocks within each run; "
-                "deltas are paired to the same-run sham block and then averaged per subject."
-            ),
-            ha="center",
-            va="bottom",
-            fontsize=8.5,
-        )
-        fig.tight_layout(rect=(0.02, 0.045, 1.0, 1.0), w_pad=2.0, h_pad=2.2)
+        fig, axes = plt.subplots(2, 2, figsize=(6.6, 5.0))
+        for ax, metric in zip(axes.ravel(), METRICS):
+            _draw_metric_panel(ax, subject_pairs, metric)
+        fig.tight_layout(rect=(0.005, 0.005, 0.995, 0.995), w_pad=0.8, h_pad=0.9)
         out_dir.mkdir(parents=True, exist_ok=True)
         png = out_dir / f"{FIGURE_STEM}.png"
         pdf = out_dir / f"{FIGURE_STEM}.pdf"
@@ -520,7 +497,7 @@ def main() -> None:
     run_pair_df.to_csv(run_pair_path, index=False)
     subject_pair_df.to_csv(subject_pair_path, index=False)
     stats_df.to_csv(stats_path, index=False)
-    png, pdf = _save_figure(subject_pair_df, stats_df, args.out_dir)
+    png, pdf = _save_figure(subject_pair_df, args.out_dir)
 
     summary = {
         "inventory": str(args.inventory),
