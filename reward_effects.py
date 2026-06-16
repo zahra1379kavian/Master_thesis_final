@@ -17,6 +17,8 @@ matplotlib.rcParams.update(
     {
         "font.family": "Liberation Sans",
         "font.sans-serif": ["Liberation Sans", "Arial", "DejaVu Sans"],
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
     }
 )
 import matplotlib.pyplot as plt
@@ -24,6 +26,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 from scipy.io import loadmat
+from matplotlib.text import Text
 from matplotlib.ticker import MaxNLocator
 
 try:
@@ -55,6 +58,11 @@ GVS_FIGURE_COLOR = "#8EC5F6"
 PAIRED_FIGURE_SIZE = (4.2, 4.4)
 PAIRED_COLUMN_X = np.array([0.0, 0.42])
 PAIRED_COLUMN_X_LIMITS = (-0.08, 0.5)
+
+
+def _bold_figure_text(fig: plt.Figure) -> None:
+    for text in fig.findobj(match=Text):
+        text.set_fontweight("bold")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -522,7 +530,7 @@ def _save_subject_rt_bar_range_figure(subject_rt_stats: pd.DataFrame, out_dir: P
     subjects = subject_rt_stats["subject"].tolist()
     n_cols = 3
     n_rows = int(np.ceil(len(subjects) / n_cols))
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(8.2, 1.65 * n_rows), squeeze=False)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(10.4, 2.12 * n_rows), squeeze=False)
     low_color = "#9CA3AF"
     high_color = SUBJECT_FIGURE_COLOR
     x = np.array([0.0, 1.0])
@@ -544,7 +552,7 @@ def _save_subject_rt_bar_range_figure(subject_rt_stats: pd.DataFrame, out_dir: P
             error_kw={"ecolor": "#374151", "elinewidth": 0.8, "capthick": 0.8},
             zorder=2,
         )
-        stars = str(row["significance"])
+        stars = "" if pd.isna(row["significance"]) else str(row["significance"])
         if stars:
             bracket_y = float(np.nanmax(upper)) * 1.08
             tick = max(float(np.nanmax(upper)) * 0.02, 0.04)
@@ -555,14 +563,15 @@ def _save_subject_rt_bar_range_figure(subject_rt_stats: pd.DataFrame, out_dir: P
                 linewidth=0.8,
                 clip_on=False,
             )
-            ax.text(np.mean(x), bracket_y + tick, stars, ha="center", va="bottom", fontsize=10)
+            star_y = bracket_y + tick * (0.55 if panel_index == 1 else 1.0)
+            ax.text(np.mean(x), star_y, stars, ha="center", va="bottom", fontsize=15, fontweight="bold")
         y_max = float(np.nanmax(upper))
         top_scale = 1.32 if stars else 1.18
         ax.set_ylim(0, y_max * top_scale if y_max > 0 else 1)
-        ax.set_title(f"sub{panel_index:02d}", fontsize=9, pad=2)
+        ax.set_title(f"sub{panel_index:02d}", fontsize=14, fontweight="bold", pad=2)
         ax.set_xticks(x)
-        ax.set_xticklabels(["Low", "High"], fontsize=8)
-        ax.tick_params(axis="y", labelsize=8)
+        ax.set_xticklabels(["Low", "High"], fontsize=13, fontweight="bold")
+        ax.tick_params(axis="y", labelsize=13)
         ax.yaxis.set_major_locator(MaxNLocator(nbins=3))
         ax.grid(axis="y", color="#E5E7EB", linewidth=0.6, zorder=1)
         ax.spines[["top", "right"]].set_visible(False)
@@ -570,8 +579,9 @@ def _save_subject_rt_bar_range_figure(subject_rt_stats: pd.DataFrame, out_dir: P
     for ax in axes.ravel()[len(subjects) :]:
         ax.axis("off")
     for ax in axes[:, 0]:
-        ax.set_ylabel("RT (s)", fontsize=9)
-    fig.tight_layout(pad=0.4, h_pad=0.6, w_pad=0.8)
+        ax.set_ylabel("RT (s)", fontsize=14, fontweight="bold")
+    _bold_figure_text(fig)
+    fig.tight_layout(pad=0.4, h_pad=0.7, w_pad=1.0)
     return _save_figure(fig, out_dir / "reward_rt_subject_bar_range", pad_inches=0.05)
 
 

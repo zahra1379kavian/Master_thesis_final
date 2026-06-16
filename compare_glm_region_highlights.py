@@ -33,6 +33,7 @@ PAPER_BASE_FONT_SIZE = PAPER_AXIS_TICK_FONT_SIZE
 HEATMAP_TICK_FONT_SIZE = 18
 HEATMAP_CELL_FONT_SIZE = 17
 HEATMAP_TICK_ROTATION = 35
+HEATMAP_FONT_WEIGHT = 'bold'
 MapSpec = namedtuple('MapSpec', ('method', 'path', 'kind'))
 MaskSpec = namedtuple('MaskSpec', ('method', 'mask_name', 'family', 'threshold_definition', 'threshold_value', 'values', 'mask'))
 
@@ -172,6 +173,10 @@ def _wide_region_table(region_df, mask_names, value_col='percent_of_map'):
     wide = rows.pivot_table(index='roi_name', columns='mask_name', values=value_col, aggfunc='sum', fill_value=0.0)
     return wide.reindex(columns=[name for name in mask_names if name in wide.columns])
 
+def _bold_tick_labels(axis):
+    for label in axis.get_ticklabels():
+        label.set_fontweight(HEATMAP_FONT_WEIGHT)
+
 def _plot_region_heatmap(region_df, mask_names, out_base, min_row_percent=DEFAULT_HEATMAP_MIN_ROW_PERCENT):
     wide = _wide_region_table(region_df, mask_names, value_col='percent_of_map')
     if wide.empty:
@@ -185,7 +190,7 @@ def _plot_region_heatmap(region_df, mask_names, out_base, min_row_percent=DEFAUL
     tick_font_size = HEATMAP_TICK_FONT_SIZE
     cell_font_size = HEATMAP_CELL_FONT_SIZE
     fig_height = max(5.4, 0.38 * len(wide) + 1.2)
-    with plt.rc_context({'font.family': 'sans-serif', 'font.sans-serif': [PAPER_FONT_FAMILY, 'Arial', 'Helvetica', 'DejaVu Sans'], 'font.size': tick_font_size, 'axes.titlesize': PAPER_TITLE_FONT_SIZE, 'axes.labelsize': tick_font_size, 'xtick.labelsize': tick_font_size, 'ytick.labelsize': tick_font_size, 'pdf.fonttype': 42, 'ps.fonttype': 42}):
+    with plt.rc_context({'font.family': 'sans-serif', 'font.sans-serif': [PAPER_FONT_FAMILY, 'Arial', 'Helvetica', 'DejaVu Sans'], 'font.size': tick_font_size, 'font.weight': HEATMAP_FONT_WEIGHT, 'axes.titleweight': HEATMAP_FONT_WEIGHT, 'axes.labelweight': HEATMAP_FONT_WEIGHT, 'axes.titlesize': PAPER_TITLE_FONT_SIZE, 'axes.labelsize': tick_font_size, 'xtick.labelsize': tick_font_size, 'ytick.labelsize': tick_font_size, 'pdf.fonttype': 42, 'ps.fonttype': 42}):
         (fig, ax) = plt.subplots(figsize=(8.8, fig_height), facecolor='white')
         values = wide.to_numpy(dtype=float) * 100.0
         im = ax.imshow(values, aspect='auto', cmap='Blues', vmin=0.0)
@@ -194,14 +199,17 @@ def _plot_region_heatmap(region_df, mask_names, out_base, min_row_percent=DEFAUL
         ax.set_yticks(np.arange(len(wide.index)))
         ax.set_yticklabels([_display_region_name(name) for name in wide.index], rotation=HEATMAP_TICK_ROTATION, ha='right', va='center', rotation_mode='anchor')
         ax.tick_params(axis='both', labelsize=tick_font_size)
+        _bold_tick_labels(ax.xaxis)
+        _bold_tick_labels(ax.yaxis)
         for row in range(values.shape[0]):
             for col in range(values.shape[1]):
                 value = values[row, col]
                 if value >= 2.0:
-                    ax.text(col, row, f'{value:.1f}', ha='center', va='center', fontsize=cell_font_size, color='black')
+                    ax.text(col, row, f'{value:.1f}', ha='center', va='center', fontsize=cell_font_size, color='black', fontweight=HEATMAP_FONT_WEIGHT)
         cbar = fig.colorbar(im, ax=ax, fraction=0.028, pad=0.02)
-        cbar.set_label('Voxels %', fontsize=cell_font_size, labelpad=8)
+        cbar.set_label('Voxels %', fontsize=cell_font_size, labelpad=8, fontweight=HEATMAP_FONT_WEIGHT)
         cbar.ax.tick_params(labelsize=cell_font_size, colors='black')
+        _bold_tick_labels(cbar.ax.yaxis)
         fig.tight_layout(pad=0.1)
         fig.savefig(f'{out_base}_region_heatmap.png', dpi=220, bbox_inches='tight', pad_inches=0.01)
         fig.savefig(f'{out_base}_region_heatmap.pdf', bbox_inches='tight', pad_inches=0.01)
@@ -219,7 +227,7 @@ def _plot_overlap_heatmap(overlap_df, mask_names, out_base):
             matrix.loc[row.mask_b, row.mask_a] = row.dice
     tick_font_size = HEATMAP_TICK_FONT_SIZE
     cell_font_size = HEATMAP_CELL_FONT_SIZE
-    with plt.rc_context({'font.family': 'sans-serif', 'font.sans-serif': [PAPER_FONT_FAMILY, 'Arial', 'Helvetica', 'DejaVu Sans'], 'font.size': tick_font_size, 'xtick.labelsize': tick_font_size, 'ytick.labelsize': tick_font_size, 'pdf.fonttype': 42, 'ps.fonttype': 42}):
+    with plt.rc_context({'font.family': 'sans-serif', 'font.sans-serif': [PAPER_FONT_FAMILY, 'Arial', 'Helvetica', 'DejaVu Sans'], 'font.size': tick_font_size, 'font.weight': HEATMAP_FONT_WEIGHT, 'axes.titleweight': HEATMAP_FONT_WEIGHT, 'axes.labelweight': HEATMAP_FONT_WEIGHT, 'xtick.labelsize': tick_font_size, 'ytick.labelsize': tick_font_size, 'pdf.fonttype': 42, 'ps.fonttype': 42}):
         (fig, ax) = plt.subplots(figsize=(5.8, 5.2), facecolor='white')
         values = matrix.to_numpy(dtype=float)
         display_values = values.copy()
@@ -232,6 +240,8 @@ def _plot_overlap_heatmap(overlap_df, mask_names, out_base):
         ax.set_yticks(np.arange(len(mask_names)))
         ax.set_yticklabels([_short_mask_label(name) for name in mask_names], rotation=HEATMAP_TICK_ROTATION, ha='right', va='center', rotation_mode='anchor')
         ax.tick_params(axis='both', labelsize=tick_font_size)
+        _bold_tick_labels(ax.xaxis)
+        _bold_tick_labels(ax.yaxis)
         ax.set_xticks(np.arange(-0.5, len(mask_names), 1), minor=True)
         ax.set_yticks(np.arange(-0.5, len(mask_names), 1), minor=True)
         ax.grid(which='minor', color='white', linewidth=1.4)
@@ -243,12 +253,12 @@ def _plot_overlap_heatmap(overlap_df, mask_names, out_base):
             ax.axvline(split_position, color='#222222', linewidth=1.6)
         for row in range(values.shape[0]):
             for col in range(values.shape[1]):
-                is_diagonal = row == col
-                ax.text(col, row, f'{values[row, col]:.2f}', ha='center', va='center', fontsize=cell_font_size, color='black', fontweight='bold' if values[row, col] >= 0.55 and not is_diagonal else 'normal')
+                ax.text(col, row, f'{values[row, col]:.2f}', ha='center', va='center', fontsize=cell_font_size, color='black', fontweight=HEATMAP_FONT_WEIGHT)
         cbar = fig.colorbar(im, ax=ax, fraction=0.035, pad=0.02)
         cbar.set_ticks(np.linspace(0, 1, 6))
-        cbar.set_label('Dice', fontsize=cell_font_size, labelpad=8)
+        cbar.set_label('Dice', fontsize=cell_font_size, labelpad=8, fontweight=HEATMAP_FONT_WEIGHT)
         cbar.ax.tick_params(labelsize=cell_font_size)
+        _bold_tick_labels(cbar.ax.yaxis)
         fig.tight_layout(pad=0.1)
         fig.savefig(f'{out_base}_overlap_heatmap.png', dpi=220, bbox_inches='tight', pad_inches=0.03)
         fig.savefig(f'{out_base}_overlap_heatmap.pdf', bbox_inches='tight', pad_inches=0.03)

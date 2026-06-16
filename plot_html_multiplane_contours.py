@@ -7,6 +7,7 @@ warnings.filterwarnings("ignore", message="Unable to import Axes3D.*")
 import matplotlib.pyplot as plt
 from matplotlib.colors import to_rgb
 from matplotlib.patches import Patch
+from matplotlib.text import Text
 import nibabel as nib
 from nilearn import datasets, image
 from PIL import Image
@@ -20,6 +21,9 @@ plt.rcParams.update(
     {
         "font.family": "Liberation Sans",
         "font.sans-serif": ["Liberation Sans", "Arial", "DejaVu Sans"],
+        "font.weight": "bold",
+        "axes.labelweight": "bold",
+        "axes.titleweight": "bold",
         "pdf.fonttype": 42,
         "ps.fonttype": 42,
     }
@@ -183,6 +187,11 @@ def overlay(ax, labels, m):
     ax.imshow(rgba, interpolation="nearest")
     if np.any(m):
         ax.contour(m.astype(float), levels=[0.5], colors="#111111", linewidths=0.55, alpha=0.95)
+
+def bold_figure_text(fig):
+    for text in fig.findobj(match=Text):
+        text.set_fontweight("bold")
+
 base.parent.mkdir(exist_ok=True)
 n_cols = max(len(cuts[mode]) for mode, _ in plane_specs)
 fig, axes = plt.subplots(len(plane_specs), n_cols, figsize=(15.1, 6.4), facecolor="white")
@@ -208,19 +217,20 @@ for row, (mode, plane_label) in enumerate(plane_specs):
         label_y = brain_y.max() + 3
         ax.set_xlim(-0.5, width - 0.5)
         ax.set_ylim(label_y + 12, brain_y.min() - 12 if row == 0 else brain_y.min() - 2)
-        ax.text(label_x, label_y, f"{mode} = {cut:g}", ha="center", va="top", fontsize=13, color="0.2")
+        ax.text(label_x, label_y, f"{mode} = {cut:g}", ha="center", va="top", fontsize=17, fontweight="bold", color="0.2")
         if row == 0:
             orient_y = brain_y.min() + 1
-            ax.text(brain_x.min() + 2, orient_y, "L", ha="center", va="bottom", fontsize=13, color="0.15")
-            ax.text(brain_x.max() - 2, orient_y, "R", ha="center", va="bottom", fontsize=13, color="0.15")
+            ax.text(brain_x.min() + 2, orient_y, "L", ha="center", va="bottom", fontsize=17, fontweight="bold", color="0.15")
+            ax.text(brain_x.max() - 2, orient_y, "R", ha="center", va="bottom", fontsize=17, fontweight="bold", color="0.15")
         ax.set_axis_off()
 legend = [
     Patch(facecolor=region_colors[name], edgecolor="0.2", alpha=0.90, label=name)
     for name in region_order
     if region_counts[name] > 0
 ]
-fig.legend(handles=legend, loc="lower center", ncol=4, frameon=False, fontsize=12, bbox_to_anchor=(0.5, 0.055))
-fig.subplots_adjust(left=0.015, right=0.995, bottom=0.18, top=0.985, wspace=0.015, hspace=0.06)
+fig.legend(handles=legend, loc="lower center", ncol=4, frameon=False, prop={"size": 15, "weight": "bold"}, bbox_to_anchor=(0.5, 0.055))
+bold_figure_text(fig)
+fig.subplots_adjust(left=0.015, right=0.995, bottom=0.20, top=0.985, wspace=0.015, hspace=0.06)
 fig.savefig(f"{base}.png", dpi=200, bbox_inches="tight", pad_inches=0.02)
 fig.savefig(f"{base}.pdf", bbox_inches="tight", pad_inches=0.02)
 print(f"{base}.png")

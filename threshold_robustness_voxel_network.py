@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,6 +14,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.colors import BoundaryNorm, ListedColormap
+from matplotlib.text import Text
 import nibabel as nib
 import numpy as np
 import pandas as pd
@@ -41,13 +41,49 @@ DEFAULT_ATLAS_NAME = "AAL3v2 (Automated Anatomical Labeling 3)"
 UNASSIGNED_ROI = "Unassigned Active Voxels"
 BILATERAL_HEMISPHERE_LABEL = "Bilateral"
 PAPER_FONT_FAMILY = "Liberation Sans"
-PAPER_TITLE_FONT_SIZE = 18
-PAPER_TAKEAWAY_FONT_SIZE = 13
-PAPER_AXIS_TICK_FONT_SIZE = 13
-PAPER_CELL_COLORBAR_FONT_SIZE = 12
-PAPER_FOOTER_FONT_SIZE = 11
+PAPER_TITLE_FONT_SIZE = 20
+PAPER_TAKEAWAY_FONT_SIZE = 15
+PAPER_AXIS_TICK_FONT_SIZE = 15
+PAPER_CELL_COLORBAR_FONT_SIZE = 14
+PAPER_FOOTER_FONT_SIZE = 13
 EXCLUDED_MAIN_PLOT_REGIONS = {"N_Acc"}
 EXCLUDED_ATLAS_LABEL_REGIONS = set()
+HIGH_CONTRAST_REGION_COLORS = {
+    "Temporal": "#332288",
+    "Parietal": "#117733",
+    "Frontal": "#1F78B4",
+    "Cerebellum": "#44AA99",
+    "Orbitofrontal": "#88CCEE",
+    "ParaHippocampal": "#DDCC77",
+    "Precentral": "#CC6677",
+    "Fusiform": "#AA4499",
+    "Supp_Motor_Area": "#999933",
+    "Occipital": "#882255",
+    "Postcentral": "#6699CC",
+    "Caudate": "#A6761D",
+    "Paracentral_Lobule": "#66A61E",
+    "Hippocampus": "#D95F02",
+    "Putamen": "#7570B3",
+    "Amygdala": "#E7298A",
+    "Olfactory": "#1B9E77",
+    "Thalamus": "#E6AB02",
+    "Cingulate": "#A50F15",
+}
+FALLBACK_REGION_COLORS = (
+    "#000000",
+    "#56B4E9",
+    "#009E73",
+    "#F0E442",
+    "#0072B2",
+    "#D55E00",
+    "#CC79A7",
+    "#999999",
+)
+FULL_REGION_LABELS = {
+    "Supp_Motor_Area": "Supplementary Motor Area",
+    "ParaHippocampal": "Parahippocampal",
+    "Paracentral_Lobule": "Paracentral Lobule",
+}
 COARSE_AAL_GROUPS = (
     ("Cerebellum", ("Cerebellum", "Vermis"), ()),
     ("Temporal", ("Temporal",), ("Heschl",)),
@@ -71,6 +107,11 @@ class ROIGroup:
 
 def _pct_label(percentile: float) -> str:
     return f"p{percentile:g}".replace(".", "p")
+
+
+def _bold_figure_text(fig: plt.Figure) -> None:
+    for text in fig.findobj(match=Text):
+        text.set_fontweight("bold")
 
 
 def _coarse_aal_group_name(label_name: str) -> str:
@@ -352,6 +393,7 @@ def _plot_projection(
     ax.set_title(title, fontsize=11, weight="bold")
     ax.set_aspect("equal", adjustable="box")
     ax.set_box_aspect(1.0)
+    ax.set_anchor("S")
     ax.set_facecolor("#f5f7fb")
     ax.tick_params(labelsize=8)
     ax.grid(color="white", linewidth=0.3, alpha=0.35)
@@ -361,19 +403,6 @@ def _display_region_name(name: str) -> str:
     return name.replace("_", " ")
 
 
-COMPACT_REGION_LABELS = {
-    "Supp_Motor_Area": "Supp. motor",
-    "ParaHippocampal": "Parahipp.",
-    "Paracentral_Lobule": "Paracentral",
-    "Rolandic_Oper": "Rolandic op.",
-    "Orbitofrontal": "OFC",
-}
-
-
-def _compact_region_label(name: str, _count: int) -> str:
-    return COMPACT_REGION_LABELS.get(name, _display_region_name(name))
-
-
 def _reference_region_counts(region_df: pd.DataFrame, min_report_voxels: int) -> dict[str, int]:
     rows = region_df[
         np.isclose(region_df["percentile"], REFERENCE_THRESHOLD)
@@ -381,6 +410,17 @@ def _reference_region_counts(region_df: pd.DataFrame, min_report_voxels: int) ->
         & ~region_df["roi_name"].eq(UNASSIGNED_ROI)
     ].sort_values("n_voxels", ascending=False)
     return {str(row.roi_name): int(row.n_voxels) for row in rows.itertuples(index=False)}
+
+
+def _atlas_region_label(name: str) -> str:
+    return FULL_REGION_LABELS.get(name, _display_region_name(name))
+
+
+def _atlas_region_colors(groups: list[ROIGroup]) -> list[str]:
+    colors: list[str] = []
+    for idx, group in enumerate(groups):
+        colors.append(HIGH_CONTRAST_REGION_COLORS.get(group.name, FALLBACK_REGION_COLORS[idx % len(FALLBACK_REGION_COLORS)]))
+    return colors
 
 
 def _plot_atlas_regions(
@@ -398,81 +438,52 @@ def _plot_atlas_regions(
         selected_groups = groups
     selected_groups = sorted(selected_groups, key=lambda group: reference_counts.get(group.name, 0), reverse=True)
     label_data = _make_group_label_data(selected_groups, shape)
-    colors = plt.get_cmap("turbo")(np.linspace(0.04, 0.96, max(1, len(selected_groups))))[:, :3]
+    colors = _atlas_region_colors(selected_groups)
     group_colors = {group.name: colors[idx] for idx, group in enumerate(selected_groups)}
     labeled_groups = [group for group in selected_groups if group.name not in EXCLUDED_ATLAS_LABEL_REGIONS]
-    cmap = ListedColormap(np.vstack([[0.96, 0.97, 0.99], colors]))
+    cmap = ListedColormap(["#f4f6fa"] + colors)
     norm = BoundaryNorm(np.arange(-0.5, len(selected_groups) + 1.5, 1), cmap.N)
 
     x_values = _axis_values_mm(reference_img.affine, shape, 0)
     y_values = _axis_values_mm(reference_img.affine, shape, 1)
     z_values = _axis_values_mm(reference_img.affine, shape, 2)
-    projections = {
-        "Axial projection": (_mode_projection(label_data, axis=2), x_values, y_values),
-        "Coronal projection": (_mode_projection(label_data, axis=1), x_values, z_values),
-        "Sagittal projection": (_mode_projection(label_data, axis=0), y_values, z_values),
-    }
+    projections = [
+        ("Axial projection", (_mode_projection(label_data, axis=2), x_values, y_values)),
+        ("Coronal projection", (_mode_projection(label_data, axis=1), x_values, z_values)),
+        ("Sagittal projection", (_mode_projection(label_data, axis=0), y_values, z_values)),
+    ]
 
     projection_spans = [
         max(abs(float(x_axis[-1] - x_axis[0])), abs(float(y_axis[-1] - y_axis[0])))
-        for _, x_axis, y_axis in projections.values()
+        for _, (_, x_axis, y_axis) in projections
     ]
     square_span_mm = max(projection_spans)
 
-    fig = plt.figure(figsize=(10.8, 5.05), facecolor="white")
-    gs = fig.add_gridspec(2, 3, height_ratios=[1.0, 0.18], hspace=0.08, wspace=0.20)
+    fig = plt.figure(figsize=(12.8, 5.55), facecolor="white")
+    gs = fig.add_gridspec(2, 3, height_ratios=[1.0, 0.24], hspace=0.12, wspace=0.20)
 
     axes = [fig.add_subplot(gs[0, idx]) for idx in range(3)]
-    for ax, (title, (projection, x_axis, y_axis)) in zip(axes, projections.items()):
+    for ax, (title, (projection, x_axis, y_axis)) in zip(axes, projections):
         _plot_projection(ax, projection, x_axis, y_axis, title, cmap, norm, square_span_mm)
-
-    centers: dict[str, np.ndarray] = {}
-    for group in selected_groups:
-        ijk = np.column_stack(np.nonzero(group.mask))
-        centers[group.name] = nib.affines.apply_affine(reference_img.affine, ijk).mean(axis=0)
-
-    offsets = [(-22.0, 16.0), (20.0, 14.0), (-18.0, -18.0), (20.0, -16.0), (0.0, 22.0), (0.0, -22.0)]
-    for rank, group in enumerate(labeled_groups[:28]):
-        center = centers[group.name]
-        name_lower = group.name.lower()
-        panel_idx = 2 if "cerebellum" in name_lower or "vermis" in name_lower else 1 if any(
-            key in name_lower for key in ("thal", "caudate", "putamen", "pallidum", "amygdala", "hippocampus")
-        ) else 0
-        if panel_idx == 0:
-            xy = (center[0], center[1])
-        elif panel_idx == 1:
-            xy = (center[0], center[2])
-        else:
-            xy = (center[1], center[2])
-        dx, dy = offsets[rank % len(offsets)]
-        axes[panel_idx].annotate(
-            "\n".join(textwrap.wrap(_display_region_name(group.name), width=18)),
-            xy=xy,
-            xytext=(xy[0] + dx, xy[1] + dy),
-            fontsize=5.5,
-            ha="center",
-            va="center",
-            bbox={"boxstyle": "round,pad=0.16", "facecolor": "white", "edgecolor": "#334155", "linewidth": 0.35, "alpha": 0.88},
-            arrowprops={"arrowstyle": "-", "color": "#334155", "linewidth": 0.45, "alpha": 0.70},
-        )
 
     legend_ax = fig.add_subplot(gs[1, :])
     legend_ax.axis("off")
-    n_cols = 6
+    n_cols = 5
     rows_per_col = max(1, int(np.ceil(len(labeled_groups) / n_cols)))
     top_y = 0.78
-    bottom_y = 0.16
+    bottom_y = 0.18
     row_step = (top_y - bottom_y) / max(1, rows_per_col - 1)
     for idx, group in enumerate(labeled_groups, start=1):
         col = (idx - 1) // rows_per_col
         row = (idx - 1) % rows_per_col
         x = (col + 0.02) / n_cols
         y = top_y - row * row_step
-        label = _compact_region_label(group.name, reference_counts.get(group.name, 0))
+        label = _atlas_region_label(group.name)
         legend_ax.add_patch(plt.Rectangle((x, y - 0.040), 0.010, 0.080, color=group_colors[group.name], transform=legend_ax.transAxes))
-        legend_ax.text(x + 0.014, y, label, fontsize=7.0, va="center")
+        legend_ax.text(x + 0.014, y, label, fontsize=7.2, fontweight="bold", va="center")
 
     out_base.parent.mkdir(parents=True, exist_ok=True)
+    _bold_figure_text(fig)
     fig.savefig(f"{out_base}_atlas_regions.png", dpi=220, bbox_inches="tight", pad_inches=0.01)
     fig.savefig(f"{out_base}_atlas_regions.pdf", bbox_inches="tight", pad_inches=0.01)
     plt.close(fig)
@@ -508,8 +519,11 @@ def _plot_robustness(summary_df: pd.DataFrame, region_df: pd.DataFrame, out_base
             "font.family": "sans-serif",
             "font.sans-serif": [PAPER_FONT_FAMILY, "Arial", "Helvetica", "DejaVu Sans"],
             "font.size": PAPER_AXIS_TICK_FONT_SIZE,
+            "font.weight": "bold",
             "axes.titlesize": PAPER_TITLE_FONT_SIZE,
+            "axes.titleweight": "bold",
             "axes.labelsize": PAPER_AXIS_TICK_FONT_SIZE,
+            "axes.labelweight": "bold",
             "xtick.labelsize": PAPER_AXIS_TICK_FONT_SIZE,
             "ytick.labelsize": PAPER_AXIS_TICK_FONT_SIZE,
             "legend.fontsize": PAPER_CELL_COLORBAR_FONT_SIZE,
@@ -517,12 +531,12 @@ def _plot_robustness(summary_df: pd.DataFrame, region_df: pd.DataFrame, out_base
             "ps.fonttype": 42,
         }
     ):
-        fig = plt.figure(figsize=(12.4, max(9.2, 0.34 * max(1, len(node_order)) + 3.0)), facecolor="white")
+        fig = plt.figure(figsize=(13.6, max(10.0, 0.42 * max(1, len(node_order)) + 3.2)), facecolor="white")
         gs = fig.add_gridspec(
             2,
             3,
             width_ratios=[1.0, 1.0, 0.030],
-            height_ratios=[1.25, max(3.0, 0.30 * max(1, len(node_order)))],
+            height_ratios=[1.25, max(3.0, 0.38 * max(1, len(node_order)))],
             hspace=0.20,
             wspace=0.018,
         )
@@ -555,7 +569,7 @@ def _plot_robustness(summary_df: pd.DataFrame, region_df: pd.DataFrame, out_base
         ax_stable.tick_params(axis="both", labelsize=PAPER_AXIS_TICK_FONT_SIZE)
         ax_stable.grid(alpha=0.25)
         ax_stable.axvline(REFERENCE_THRESHOLD, color="#dc2626", linestyle="--", linewidth=1.3)
-        ax_stable.legend(frameon=False, loc="lower left")
+        ax_stable.legend(frameon=False, loc="lower left", prop={"size": PAPER_CELL_COLORBAR_FONT_SIZE, "weight": "bold"})
 
         heat = np.log10(pivot.to_numpy(dtype=float) + 1.0)
         im = ax_heat.imshow(heat, aspect="auto", cmap="viridis", vmin=0)
@@ -575,12 +589,14 @@ def _plot_robustness(summary_df: pd.DataFrame, region_df: pd.DataFrame, out_base
                     ha="center",
                     va="center",
                     fontsize=PAPER_CELL_COLORBAR_FONT_SIZE,
+                    fontweight="bold",
                     color="black",
                 )
         cbar = fig.colorbar(im, cax=cax)
-        cbar.set_label("log10(voxels + 1)", fontsize=PAPER_CELL_COLORBAR_FONT_SIZE)
+        cbar.set_label("log10(voxels + 1)", fontsize=PAPER_CELL_COLORBAR_FONT_SIZE, fontweight="bold")
         cbar.ax.tick_params(labelsize=PAPER_CELL_COLORBAR_FONT_SIZE)
         out_base.parent.mkdir(parents=True, exist_ok=True)
+        _bold_figure_text(fig)
         fig.savefig(f"{out_base}.png", dpi=220, bbox_inches="tight", pad_inches=0.04)
         fig.savefig(f"{out_base}.pdf", bbox_inches="tight", pad_inches=0.04)
         plt.close(fig)
