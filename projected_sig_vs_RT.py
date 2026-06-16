@@ -30,6 +30,11 @@ DEFAULT_BEHAVIOUR_DIR = Path(
 )
 DEFAULT_WEIGHT_MAP = ROOT / "data" / "voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5.nii.gz"
 DEFAULT_OUT_DIR = ROOT / "figures" / "projected_RT"
+DEFAULT_FIGURE_STEM = "projection_behavior_subject_panel(main)"
+SESSION_FIGURE_SPECS = {
+    1: "medication_off",
+    2: "medication_on",
+}
 PROJECTION_TRIAL_CHUNK_SIZE = 8
 PROJECTION_VOXEL_CHUNK_SIZE = 4096
 VARIABILITY_AXIS_LABEL = "Consecutive-trial variability"
@@ -82,6 +87,11 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="Zero-based RT column for 2D behaviour arrays; default 1 uses the second column.",
+    )
+    parser.add_argument(
+        "--save-session-figures",
+        action="store_true",
+        help="Also save separate session 1 medication-off and session 2 medication-on figures.",
     )
     return parser.parse_args()
 
@@ -560,7 +570,7 @@ def _plot_paired_estimation(
     ax.set_ylim((y_low, y_high))
     ax.set_xticks([0.0, 1.0])
     ax.set_xticklabels(["Behaviour", "Projection"])
-    ax.tick_params(axis="y", labelleft=False)
+    ax.tick_params(axis="y", labelleft=True)
     ax.set_ylabel(VARIABILITY_AXIS_LABEL)
     ax.grid(axis="y", linestyle="-", linewidth=0.45, alpha=0.18)
     ax.spines["top"].set_visible(False)
@@ -592,7 +602,7 @@ def _plot_behaviour_minus_projection(ax: plt.Axes, subject_df: pd.DataFrame) -> 
     ax.set_ylim((y_low, y_high))
     ax.set_xticks([0.0])
     ax.set_xticklabels(["Difference"])
-    ax.tick_params(axis="y", labelleft=False)
+    ax.tick_params(axis="y", labelleft=True)
     ax.set_ylabel("Behaviour - Projection\nvariability")
     ax.grid(axis="y", linestyle="-", linewidth=0.45, alpha=0.18)
     ax.spines["top"].set_visible(False)
@@ -615,7 +625,7 @@ def _save_pdf_and_png(fig: plt.Figure, pdf_path: Path, dpi: int) -> tuple[Path, 
     return pdf_path, png_path
 
 
-def _save_behavior_projection_figure(metric_df: pd.DataFrame, out_dir: Path) -> tuple[Path, Path]:
+def _subject_pairs_and_y_limits(metric_df: pd.DataFrame) -> tuple[pd.DataFrame, tuple[float, float]]:
     projection_col = "adjacent_diff_ratio_sum_projection"
     behavior_col = "adjacent_diff_ratio_sum_behavior_col2"
     paired_df = metric_df.loc[np.isfinite(metric_df[projection_col]) & np.isfinite(metric_df[behavior_col])].copy()
@@ -629,7 +639,15 @@ def _save_behavior_projection_figure(metric_df: pd.DataFrame, out_dir: Path) -> 
         [subject_df["behavior_raw"].to_numpy(dtype=np.float64), subject_df["projection_raw"].to_numpy(dtype=np.float64)]
     )
     y_limits = _expanded_limits(finite_values)
+    return subject_df, y_limits
 
+
+def _save_behavior_projection_figure(
+    metric_df: pd.DataFrame,
+    out_dir: Path,
+    figure_stem: str = DEFAULT_FIGURE_STEM,
+) -> tuple[Path, Path]:
+    subject_df, y_limits = _subject_pairs_and_y_limits(metric_df)
     with plt.rc_context(
         {
             "font.family": "sans-serif",
@@ -656,7 +674,59 @@ def _save_behavior_projection_figure(metric_df: pd.DataFrame, out_dir: Path) -> 
         _plot_behaviour_minus_projection(axes[1], subject_df)
         _bold_figure_text(fig)
         fig.subplots_adjust(left=0.105, right=0.985, bottom=0.18, top=0.965, wspace=0.25)
-        paths = _save_pdf_and_png(fig, out_dir / "projection_behavior_subject_panel(main).pdf", dpi=300)
+        paths = _save_pdf_and_png(fig, out_dir / f"{figure_stem}.pdf", dpi=300)
+        plt.close(fig)
+        return paths
+
+
+def _save_session_first_subplot_comparison(metric_df: pd.DataFrame, out_dir: Path) -> tuple[Path, Path]:
+    session_specs = [
+        (2, "medication_on", "Medication on"),
+        (1, "medication_off", "Medication off"),
+    ]
+    figure_stem = "projection_behavior_subject_panel_first_subplots_session2_medication_on_session1_medication_off"
+
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": [PAPER_FONT_FAMILY, "Arial", "DejaVu Sans"],
+            "font.size": AXIS_TICK_FONT_SIZE,
+            "axes.titlesize": TITLE_FONT_SIZE,
+            "figure.titlesize": TITLE_FONT_SIZE,
+            "axes.labelsize": AXIS_TICK_FONT_SIZE,
+            "xtick.labelsize": AXIS_TICK_FONT_SIZE,
+            "ytick.labelsize": AXIS_TICK_FONT_SIZE,
+            "legend.fontsize": CELL_VALUE_FONT_SIZE,
+            "axes.linewidth": 0.8,
+            "pdf.fonttype": 42,
+            "ps.fonttype": 42,
+        }
+    ):
+        fig, axes = plt.subplots(1, 2, figsize=(8.2, 3.25))
+        session_panels: list[tuple[pd.DataFrame, str]] = []
+        shared_values = []
+        for session, _, title in session_specs:
+            session_df = metric_df.loc[metric_df["ses"] == session].copy()
+            if session_df.empty:
+                raise ValueError(f"No run metrics available for session {session}.")
+            subject_df, _ = _subject_pairs_and_y_limits(session_df)
+            session_panels.append((subject_df, title))
+            shared_values.extend(
+                [
+                    subject_df["behavior_raw"].to_numpy(dtype=np.float64),
+                    subject_df["projection_raw"].to_numpy(dtype=np.float64),
+                ]
+            )
+
+        shared_y_limits = _expanded_limits(np.concatenate(shared_values))
+        for ax, (subject_df, title) in zip(axes, session_panels):
+            _plot_paired_estimation(ax, subject_df, shared_y_limits)
+            ax.set_title(title, pad=7, fontsize=TITLE_FONT_SIZE - 2)
+
+        axes[1].set_ylabel("")
+        _bold_figure_text(fig)
+        fig.subplots_adjust(left=0.085, right=0.99, bottom=0.20, top=0.84, wspace=0.08)
+        paths = _save_pdf_and_png(fig, out_dir / f"{figure_stem}.pdf", dpi=300)
         plt.close(fig)
         return paths
 
@@ -681,6 +751,29 @@ def main() -> None:
     print(f"Saved run metrics to {metrics_path}")
     print(f"Saved paired variability figure to {png_path}")
     print(f"Saved paired variability PDF to {pdf_path}")
+
+    if args.save_session_figures:
+        for session, medication_slug in SESSION_FIGURE_SPECS.items():
+            session_df = metric_df.loc[metric_df["ses"] == session].copy()
+            if session_df.empty:
+                warnings.warn(f"No run metrics available for session {session}; skipping session figure.", stacklevel=2)
+                continue
+
+            session_metrics_path = args.out_dir / f"projection_behavior_run_metrics_session{session}_{medication_slug}.csv"
+            session_df.to_csv(session_metrics_path, index=False)
+            session_stem = f"projection_behavior_subject_panel_session{session}_{medication_slug}"
+            session_pdf_path, session_png_path = _save_behavior_projection_figure(
+                session_df,
+                args.out_dir,
+                figure_stem=session_stem,
+            )
+            print(f"Saved session {session} run metrics to {session_metrics_path}")
+            print(f"Saved session {session} paired variability figure to {session_png_path}")
+            print(f"Saved session {session} paired variability PDF to {session_pdf_path}")
+
+        comparison_pdf_path, comparison_png_path = _save_session_first_subplot_comparison(metric_df, args.out_dir)
+        print(f"Saved session first-subplot comparison figure to {comparison_png_path}")
+        print(f"Saved session first-subplot comparison PDF to {comparison_pdf_path}")
 
 
 if __name__ == "__main__":
