@@ -68,6 +68,31 @@ COMPARISON_COLORS = {
     "task_only": "#D55E00",
     "both": "#00A676",
 }
+ROI_FULL_NAMES = {
+    "Amygdala": "Amygdala",
+    "Caudate": "Caudate nucleus",
+    "Cerebellum": "Cerebellum",
+    "Cerebral_Cortex": "Cerebral cortex",
+    "Cingulate": "Cingulate cortex",
+    "Frontal": "Frontal cortex",
+    "Fusiform": "Fusiform gyrus",
+    "Hippocampus": "Hippocampus",
+    "Insula": "Insular cortex",
+    "Occipital": "Occipital cortex",
+    "Olfactory": "Olfactory cortex",
+    "Orbitofrontal": "Orbitofrontal cortex",
+    "Pallidum": "Pallidum",
+    "ParaHippocampal": "Parahippocampal gyrus",
+    "Paracentral_Lobule": "Paracentral lobule",
+    "Parietal": "Parietal cortex",
+    "Postcentral": "Postcentral gyrus",
+    "Precentral": "Precentral gyrus",
+    "Putamen": "Putamen",
+    "Rolandic_Oper": "Rolandic operculum",
+    "Supp_Motor_Area": "Supplementary motor area",
+    "Temporal": "Temporal cortex",
+    "Thalamus": "Thalamus",
+}
 
 
 @dataclass
@@ -734,6 +759,10 @@ def _format_count_pct(count: int | float, pct: int | float) -> str:
     return f"{_format_count(count)} ({_format_pct_roi(pct)})"
 
 
+def _roi_full_name(label: str) -> str:
+    return ROI_FULL_NAMES.get(str(label), str(label).replace("_", " "))
+
+
 def _plot_summary_image(out_path: Path, clean_df: pd.DataFrame, totals: dict[str, int], atlas_mode: str) -> None:
     plot_df = clean_df[clean_df["union_voxels"].gt(0)].sort_values(
         ["vigour_only_pct_of_roi", "roi_name"],
@@ -761,7 +790,7 @@ def _plot_summary_image(out_path: Path, clean_df: pd.DataFrame, totals: dict[str
     )
 
     ax.set_yticks(y)
-    ax.set_yticklabels(plot_df["roi_name"], fontsize=roi_label_fontsize, fontweight="bold")
+    ax.set_yticklabels(plot_df["roi_name"].map(_roi_full_name), fontsize=roi_label_fontsize, fontweight="bold")
     ax.set_xlabel("Percent of total voxels in ROI", fontsize=axis_label_fontsize)
     ax.grid(axis="x", color="#D0D0D0", linewidth=0.6, alpha=0.7)
     ax.set_axisbelow(True)
