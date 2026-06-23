@@ -4,13 +4,14 @@ GVS effect: vigour-projection network vs task-map network DIRECT dissociation.
 
 Two parts, both using the same 18 subjects so the contrast is within-subject:
 
-(A) Direct interaction (difference-of-differences) on the 9 block-shape features
+(A) Direct interaction (difference-of-differences) on the block-shape features
     that already exist in the *_subject_signal_feature_pairs.csv files. For every
-    (active GVS condition x feature) we standardise each network's per-subject
-    active-minus-sham delta by that network's across-subject SD (-> a dz-scale,
-    unit-free contrast) and test vigour_z - task_z against zero with an exact
-    paired sign-flip permutation test. FDR (BH) across all condition x feature
-    tests. Output: table CSV + dz-difference heatmap.
+    (active GVS condition x feature), test the within-subject contrast:
+
+        (active-sham vigour delta) - (active-sham task delta)
+
+    against zero with an exact paired sign-flip permutation test. FDR (BH) across
+    all condition x feature tests. Output: table CSV + direct-contrast heatmap.
 
 (B) Two extra trial-derived measures the existing pipeline does not compute,
     built from the per-trial feature CSVs with the same run-wise sham pairing:
@@ -49,6 +50,20 @@ FEAT_LABELS = {
     "slope": "Linear slope",
     "temporal_sd": "Temporal SD",
 }
+
+def gvs_display_label(gvs_code):
+    code = str(gvs_code).strip().lower().replace("_", "-").replace(" ", "-")
+    if code in {"gvs-01", "sham"}:
+        return "sham"
+    if code.startswith("gvs-"):
+        try:
+            gvs_index = int(code.split("-", 1)[1])
+        except ValueError:
+            return str(gvs_code)
+        if gvs_index == 1:
+            return "sham"
+        return f"gvs{gvs_index - 1}"
+    return str(gvs_code)
 
 # ----------------------------------------------------------------------------
 # exact paired sign-flip permutation test on a 1-D vector of subject values
@@ -93,12 +108,6 @@ def bh_fdr(p):
     q[idx] = out
     return q
 
-def standardize(v):
-    """Divide by across-subject SD -> dz-scale, unit free. Keeps sign/magnitude."""
-    v = np.asarray(v, float)
-    sd = np.nanstd(v, ddof=1)
-    return v / sd if sd > 0 else v * np.nan
-
 # ----------------------------------------------------------------------------
 # interaction test for one aligned pair of per-subject vectors
 # ----------------------------------------------------------------------------
@@ -108,15 +117,33 @@ def interaction(vig_by_sub, task_by_sub):
     t = np.array([task_by_sub[s] for s in subs], float)
     m = ~(np.isnan(v) | np.isnan(t))
     v, t = v[m], t[m]
-    vz, tz = standardize(v), standardize(t)
-    diff = vz - tz
+    diff = v - t
     p, n = signflip_p(diff)
+    diff_mean = float(np.mean(diff)) if n else np.nan
+    diff_sd = float(np.std(diff, ddof=1)) if n > 1 else np.nan
+    if n > 1 and np.isfinite(diff_sd):
+        sem = diff_sd / np.sqrt(n)
+        half_width = stats_t_critical(n - 1) * sem
+        diff_ci_low = diff_mean - half_width
+        diff_ci_high = diff_mean + half_width
+    else:
+        diff_ci_low = np.nan
+        diff_ci_high = np.nan
     return dict(
         n=n,
-        vig_dz=cohen_dz(v), task_dz=cohen_dz(t),
-        dz_diff=cohen_dz(v) - cohen_dz(t),
+        vigour_mean_delta=float(np.mean(v)) if n else np.nan,
+        task_mean_delta=float(np.mean(t)) if n else np.nan,
+        direct_contrast_mean=diff_mean,
+        direct_contrast_ci95_low=diff_ci_low,
+        direct_contrast_ci95_high=diff_ci_high,
+        direct_contrast_dz=cohen_dz(diff),
         p=p,
     )
+
+def stats_t_critical(df):
+    from scipy import stats
+
+    return float(stats.t.ppf(0.975, df))
 
 # ============================================================================
 # PART A
@@ -125,7 +152,7 @@ def part_a():
     vig = pd.read_csv(VIG_DIR / "gvs_vs_sham_subject_signal_feature_pairs.csv")
     task = pd.read_csv(TASK_DIR / "gvs_vs_sham_subject_signal_feature_pairs.csv")
     conds = sorted(vig["active_gvs"].unique())
-    feats = list(FEAT_LABELS)
+    feats = [feat for feat in FEAT_LABELS if feat in set(vig["feature"]) and feat in set(task["feature"])]
     recs = []
     for c in conds:
         for f in feats:
@@ -134,12 +161,14 @@ def part_a():
             vb = dict(zip(vd.subject, vd.delta_active_minus_sham))
             tb = dict(zip(td.subject, td.delta_active_minus_sham))
             r = interaction(vb, tb)
-            r.update(active_gvs=c, feature=f, label=FEAT_LABELS[f])
+            r.update(active_gvs=c, gvs_label=gvs_display_label(c), feature=f, label=FEAT_LABELS[f])
             recs.append(r)
     df = pd.DataFrame(recs)
     df["q"] = bh_fdr(df["p"].values)
-    df = df[["active_gvs", "feature", "label", "n",
-             "vig_dz", "task_dz", "dz_diff", "p", "q"]]
+    df = df[["active_gvs", "gvs_label", "feature", "label", "n",
+             "vigour_mean_delta", "task_mean_delta",
+             "direct_contrast_mean", "direct_contrast_ci95_low",
+             "direct_contrast_ci95_high", "direct_contrast_dz", "p", "q"]]
     df.to_csv(OUT / "partA_feature_interaction.csv", index=False)
     return df, conds, feats
 
@@ -207,12 +236,14 @@ def part_b():
                 if c not in tmap:
                     continue
                 r = interaction(vmap[c], tmap[c])
-                r.update(measure=measure, feature=f, label=FEAT_LABELS[f], active_gvs=c)
+                r.update(measure=measure, feature=f, label=FEAT_LABELS[f], active_gvs=c, gvs_label=gvs_display_label(c))
                 recs.append(r)
     df = pd.DataFrame(recs)
     df["q"] = bh_fdr(df["p"].values)
-    df = df[["measure", "active_gvs", "feature", "label", "n",
-             "vig_dz", "task_dz", "dz_diff", "p", "q"]]
+    df = df[["measure", "active_gvs", "gvs_label", "feature", "label", "n",
+             "vigour_mean_delta", "task_mean_delta",
+             "direct_contrast_mean", "direct_contrast_ci95_low",
+             "direct_contrast_ci95_high", "direct_contrast_dz", "p", "q"]]
     df.to_csv(OUT / "partB_derived_measures_interaction.csv", index=False)
     return df
 
@@ -224,12 +255,12 @@ def heatmap(df, conds, feats, fname, title):
     Q = np.full_like(M, np.nan)
     for _, r in df.iterrows():
         i = feats.index(r.feature); j = conds.index(r.active_gvs)
-        M[i, j] = r.dz_diff; Q[i, j] = r.q
+        M[i, j] = r.direct_contrast_mean; Q[i, j] = r.q
     vmax = np.nanmax(np.abs(M))
     fig, ax = plt.subplots(figsize=(8.5, 6))
     im = ax.imshow(M, cmap="RdBu_r", vmin=-vmax, vmax=vmax, aspect="auto")
     ax.set_xticks(range(len(conds)))
-    ax.set_xticklabels([c.replace("gvs-", "GVS-") for c in conds], fontsize=10)
+    ax.set_xticklabels([gvs_display_label(c) for c in conds], fontsize=10)
     ax.set_yticks(range(len(feats)))
     ax.set_yticklabels([FEAT_LABELS[f] for f in feats], fontsize=10)
     for i in range(len(feats)):
@@ -237,13 +268,13 @@ def heatmap(df, conds, feats, fname, title):
             if np.isnan(M[i, j]):
                 continue
             star = "*" if Q[i, j] < 0.05 else ""
-            ax.text(j, i, f"{M[i,j]:.2f}{star}", ha="center", va="center",
+            ax.text(j, i, f"{M[i,j]:.2g}{star}", ha="center", va="center",
                     fontsize=8, fontweight="bold" if star else "normal",
                     color="black")
     ax.set_xlabel("GVS condition", fontsize=11, fontweight="bold")
     ax.set_title(title, fontsize=12, fontweight="bold")
     cb = fig.colorbar(im, ax=ax, fraction=0.04, pad=0.02)
-    cb.set_label("Δdz  (vigour − task)", fontsize=10)
+    cb.set_label("(active-sham vigour) - (active-sham task)", fontsize=10)
     fig.tight_layout()
     fig.savefig(OUT / fname, dpi=200)
     plt.close(fig)
@@ -251,14 +282,14 @@ def heatmap(df, conds, feats, fname, title):
 def barfig_b(df, fname):
     df = df.copy()
     df["tag"] = df["measure"] + " · " + df["label"] + " · " + df["active_gvs"].str.replace("gvs-", "G")
-    df = df.sort_values("dz_diff")
+    df = df.sort_values("direct_contrast_mean")
     colors = ["#c0392b" if q < 0.05 else "#b8c4cf" for q in df["q"]]
     fig, ax = plt.subplots(figsize=(8.5, 0.32 * len(df) + 1))
-    ax.barh(range(len(df)), df["dz_diff"], color=colors)
+    ax.barh(range(len(df)), df["direct_contrast_mean"], color=colors)
     ax.set_yticks(range(len(df)))
     ax.set_yticklabels(df["tag"], fontsize=7)
     ax.axvline(0, color="k", lw=0.8)
-    ax.set_xlabel("Δdz  (vigour − task)", fontsize=11, fontweight="bold")
+    ax.set_xlabel("(active-sham vigour) - (active-sham task)", fontsize=11, fontweight="bold")
     ax.set_title("Part B: trial-derived measures — network dissociation\n"
                  "(red = FDR q<0.05)", fontsize=11, fontweight="bold")
     fig.tight_layout()
@@ -270,7 +301,7 @@ if __name__ == "__main__":
     a, conds, feats = part_a()
     heatmap(a, conds, feats, "partA_feature_interaction_heatmap.png",
             "Part A: GVS network dissociation (active−sham, vigour vs task)\n"
-            "Δdz of standardized deltas; * = FDR q<0.05")
+            "Direct paired contrast; * = FDR q<0.05")
     b = part_b()
     barfig_b(b, "partB_derived_measures_interaction.png")
 

@@ -15,6 +15,9 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+from gvs_behaviour_effects import _rt_seconds
+from projected_sig_vs_RT import _load_behaviour_rt
+
 
 DEFAULT_MED_OFF = Path("data/Projection_BOLD_trials_med_off.npy")
 DEFAULT_MED_ON = Path("data/Projection_BOLD_trials_med_on.npy")
@@ -24,6 +27,8 @@ DEFAULT_OUT_DIR = Path("figures/med_on_off_projection_features")
 DEFAULT_GVS_DIR = Path("data/GVS_projection_BOLD")
 DEFAULT_GVS_OUT_DIR = Path("figures/gvs_projection_features_vs_sham")
 DEFAULT_GVS_SHAM = "gvs-01"
+DEFAULT_GVS_RT_RUN_METRICS = Path("figures/projected_RT/revised_behaviour_from_mat/projection_behavior_run_metrics.csv")
+DEFAULT_GVS_RT_INVENTORY = Path("figures/GVS_effects/common/run_condition_inventory.csv")
 DEFAULT_ACTIVE_BOLD_GROUP = Path("data/active_bold_group.npy")
 DEFAULT_ACTIVE_FLAT_INDICES = Path("data/active_flat_indices__group.npy")
 DEFAULT_WEIGHT_MAP = Path("data/voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5.nii.gz")
@@ -42,6 +47,14 @@ FEATURE_NAMES = [
     "slope",
     "temporal_sd",
 ]
+
+MED_TEST_FEATURE_NAMES = [
+    "early_late_change",
+    "slope",
+    "abs_baseline_response",
+    "peak_to_peak",
+]
+GVS_TEST_FEATURE_NAMES = MED_TEST_FEATURE_NAMES
 
 FEATURE_LABELS = {
     "mean_level": "Mean level",
@@ -298,9 +311,13 @@ def _make_trial_frame(
     return pd.concat([off_features, on_features], ignore_index=True)
 
 
-def _paired_subject_features(trial_features: pd.DataFrame) -> pd.DataFrame:
+def _paired_subject_features(
+    trial_features: pd.DataFrame,
+    feature_names: list[str] | None = None,
+) -> pd.DataFrame:
+    feature_names = feature_names if feature_names is not None else FEATURE_NAMES
     subject_features = (
-        trial_features.groupby(["subject", "medication"], as_index=False)[FEATURE_NAMES]
+        trial_features.groupby(["subject", "medication"], as_index=False)[feature_names]
         .mean()
         .merge(
             trial_features.groupby(["subject", "medication"], as_index=False)
@@ -393,11 +410,13 @@ def _feature_stats(
     subject_features: pd.DataFrame,
     n_bootstrap: int,
     random_state: int,
+    feature_names: list[str] | None = None,
 ) -> pd.DataFrame:
+    feature_names = feature_names if feature_names is not None else FEATURE_NAMES
     rng = np.random.default_rng(random_state)
     rows = []
 
-    for feature in FEATURE_NAMES:
+    for feature in feature_names:
         wide = subject_features.pivot(index="subject", columns="medication", values=feature)
         if "OFF" not in wide.columns or "ON" not in wide.columns:
             continue
@@ -486,14 +505,21 @@ def _plot_feature_spaghetti(
     stats_df: pd.DataFrame,
     output_path: Path,
     signal_label: str = "projected BOLD",
+    features: list[str] | None = None,
 ) -> None:
-    n_cols = 3
-    n_rows = int(np.ceil(len(FEATURE_NAMES) / n_cols))
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(12, 10), constrained_layout=True)
+    plot_features = features if features is not None else FEATURE_NAMES
+    if len(plot_features) == 4:
+        n_cols = 2
+        figsize = (8.6, 8.4)
+    else:
+        n_cols = min(3, max(1, len(plot_features)))
+        figsize = (12, 10) if len(plot_features) == len(FEATURE_NAMES) else (4.3 * n_cols, 4.2 * int(np.ceil(len(plot_features) / n_cols)))
+    n_rows = int(np.ceil(len(plot_features) / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, constrained_layout=True)
     axes = np.asarray(axes).ravel()
     stats_lookup = stats_df.set_index("feature") if not stats_df.empty else pd.DataFrame()
 
-    for ax, feature in zip(axes, FEATURE_NAMES):
+    for ax, feature in zip(axes, plot_features):
         wide = subject_features.pivot(index="subject", columns="medication", values=feature)
         if "OFF" not in wide.columns or "ON" not in wide.columns:
             ax.set_axis_off()
@@ -518,7 +544,7 @@ def _plot_feature_spaghetti(
         ax.tick_params(axis="both", labelsize=9)
         ax.grid(axis="y", color="0.9", lw=0.8)
 
-    for ax in axes[len(FEATURE_NAMES) :]:
+    for ax in axes[len(plot_features) :]:
         ax.set_axis_off()
 
     fig.suptitle(f"Subject-level medication effect on {signal_label} signal features", fontsize=14)
@@ -621,6 +647,8 @@ def _write_report(
             "Each trial is summarized first, then features are averaged within subject and medication state.",
             "Primary p-values are paired ON-minus-OFF exact sign-flip permutation tests on subject means.",
             "q-values are Benjamini-Hochberg FDR corrections across the tested features.",
+            "Tested features: "
+            + ", ".join(FEATURE_LABELS[feature] for feature in feature_stats["feature"].astype(str).tolist()),
             "",
             "Feature results sorted by FDR q-value:",
         ]
@@ -753,7 +781,12 @@ def _gvs_run_feature_means(trial_features: pd.DataFrame) -> pd.DataFrame:
     return run_features.sort_values(group_cols).reset_index(drop=True)
 
 
-def _gvs_subject_feature_pairs(run_features: pd.DataFrame, sham_code: str) -> pd.DataFrame:
+def _gvs_subject_feature_pairs(
+    run_features: pd.DataFrame,
+    sham_code: str,
+    feature_names: list[str] | None = None,
+) -> pd.DataFrame:
+    feature_names = feature_names if feature_names is not None else FEATURE_NAMES
     index_cols = ["subject", "session", "medication", "run"]
     sham_runs = run_features.loc[run_features["gvs_code"].eq(sham_code)].set_index(index_cols)
     active_codes = sorted(code for code in run_features["gvs_code"].unique() if code != sham_code)
@@ -765,7 +798,7 @@ def _gvs_subject_feature_pairs(run_features: pd.DataFrame, sham_code: str) -> pd
         if paired_runs.empty:
             continue
 
-        for feature in FEATURE_NAMES:
+        for feature in feature_names:
             per_run = pd.DataFrame(
                 {
                     "subject": paired_runs.index.get_level_values("subject"),
@@ -844,7 +877,12 @@ def _gvs_feature_stats(
     return stats_df.sort_values(["active_gvs", "q_perm_fdr", "p_perm", "feature"]).reset_index(drop=True)
 
 
-def _gvs_subject_run_feature_stats(run_features: pd.DataFrame, sham_code: str) -> pd.DataFrame:
+def _gvs_subject_run_feature_stats(
+    run_features: pd.DataFrame,
+    sham_code: str,
+    feature_names: list[str] | None = None,
+) -> pd.DataFrame:
+    feature_names = feature_names if feature_names is not None else FEATURE_NAMES
     index_cols = ["subject", "session", "medication", "run"]
     sham_runs = run_features.loc[run_features["gvs_code"].eq(sham_code)].set_index(index_cols)
     active_codes = sorted(code for code in run_features["gvs_code"].unique() if code != sham_code)
@@ -857,7 +895,7 @@ def _gvs_subject_run_feature_stats(run_features: pd.DataFrame, sham_code: str) -
             continue
 
         for subject, group in paired_runs.groupby(level="subject", sort=True):
-            for feature in FEATURE_NAMES:
+            for feature in feature_names:
                 sham = group[f"{feature}_sham"].to_numpy(dtype=np.float64)
                 active = group[f"{feature}_active"].to_numpy(dtype=np.float64)
                 diff = active - sham
@@ -1029,6 +1067,116 @@ def _safe_name(value: str) -> str:
     return value.replace("-", "_")
 
 
+def _gvs_display_label(gvs_code: str) -> str:
+    raw_code = str(gvs_code).strip().lower()
+    code = raw_code.replace("_", "-").replace(" ", "-")
+    if code in {"gvs-01", "gvs-01-sham", "gvs1-sham", "sham"}:
+        return "sham"
+    if code.startswith("gvs-"):
+        try:
+            gvs_index = int(code.split("-", 1)[1])
+        except ValueError:
+            return str(gvs_code)
+        if gvs_index == 1:
+            return "sham"
+        return f"gvs{gvs_index - 1}"
+    return str(gvs_code)
+
+
+def _resolve_existing_path(path: Path) -> Path:
+    path = Path(path)
+    if path.is_absolute() or path.exists():
+        return path
+    return Path(__file__).resolve().parent / path
+
+
+def _gvs_condition_order_by_subject_from_rt(
+    run_metrics_path: Path,
+    inventory_path: Path,
+    behaviour_column: int,
+) -> dict[str, list[str]]:
+    run_metrics_path = _resolve_existing_path(run_metrics_path)
+    inventory_path = _resolve_existing_path(inventory_path)
+    if not run_metrics_path.exists() or not inventory_path.exists():
+        warnings.warn(
+            f"Could not find RT ordering inputs: {run_metrics_path} and/or {inventory_path}; "
+            "using default GVS panel order.",
+            stacklevel=2,
+        )
+        return {}
+
+    run_metrics = pd.read_csv(run_metrics_path)
+    inventory = pd.read_csv(inventory_path)
+    required_metrics = {"sub_tag", "ses", "run", "behaviour_path"}
+    required_inventory = {"subject", "session", "run", "condition_code", "trial_start", "trial_stop"}
+    missing_metrics = sorted(required_metrics - set(run_metrics.columns))
+    missing_inventory = sorted(required_inventory - set(inventory.columns))
+    if missing_metrics or missing_inventory:
+        raise RuntimeError(
+            f"RT order inputs are missing columns: "
+            f"{run_metrics_path}: {', '.join(missing_metrics) or 'ok'}; "
+            f"{inventory_path}: {', '.join(missing_inventory) or 'ok'}"
+        )
+
+    run_metrics = run_metrics.rename(columns={"sub_tag": "subject", "ses": "session"})
+    metric_lookup = {
+        (str(row.subject), int(row.session), int(row.run)): row
+        for row in run_metrics.itertuples(index=False)
+    }
+    behaviour_cache: dict[tuple[str, int, int], np.ndarray] = {}
+    rows: list[dict[str, object]] = []
+
+    for row in inventory.itertuples(index=False):
+        subject = str(row.subject)
+        session = int(row.session)
+        run = int(row.run)
+        key = (subject, session, run)
+        metric_row = metric_lookup.get(key)
+        if metric_row is None:
+            continue
+
+        if key not in behaviour_cache:
+            behaviour_path = _resolve_existing_path(Path(getattr(metric_row, "behaviour_path")))
+            behaviour_metric = _load_behaviour_rt(behaviour_path, behaviour_column)
+            behaviour_cache[key] = _rt_seconds(behaviour_metric, input_is_inverse_rt=True) * 1000.0
+
+        rt_ms = behaviour_cache[key]
+        start = int(row.trial_start)
+        stop = min(int(row.trial_stop), rt_ms.shape[0])
+        if start >= stop:
+            continue
+
+        values = rt_ms[start:stop]
+        finite = values[np.isfinite(values)]
+        if finite.size == 0:
+            continue
+        rows.append(
+            {
+                "subject": subject,
+                "condition_code": str(row.condition_code),
+                "rt_sum": float(np.sum(finite)),
+                "n_rt": int(finite.size),
+            }
+        )
+
+    if not rows:
+        warnings.warn("No finite RT values were available for GVS panel ordering; using default order.", stacklevel=2)
+        return {}
+
+    order_df = pd.DataFrame(rows)
+    subject_condition = (
+        order_df.groupby(["subject", "condition_code"], as_index=False)
+        .agg(rt_sum=("rt_sum", "sum"), n_rt=("n_rt", "sum"))
+        .query("n_rt > 0")
+    )
+    subject_condition["mean_rt_ms"] = subject_condition["rt_sum"] / subject_condition["n_rt"]
+
+    return {
+        subject: group.sort_values(["mean_rt_ms", "condition_code"])["condition_code"].astype(str).tolist()
+        for subject, group in subject_condition.groupby("subject", sort=True)
+    }
+
+
 def _plot_gvs_feature_spaghetti(
     subject_pairs: pd.DataFrame,
     stats_df: pd.DataFrame,
@@ -1036,15 +1184,22 @@ def _plot_gvs_feature_spaghetti(
     sham_code: str,
     output_path: Path,
     signal_label: str = "projected BOLD",
+    features: list[str] | None = None,
 ) -> None:
+    plot_features = features if features is not None else FEATURE_NAMES
     data = subject_pairs.loc[subject_pairs["active_gvs"].eq(active_gvs)].copy()
     stats_lookup = stats_df.loc[stats_df["active_gvs"].eq(active_gvs)].set_index("feature")
-    n_cols = 3
-    n_rows = int(np.ceil(len(FEATURE_NAMES) / n_cols))
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(12, 10), constrained_layout=True)
+    if len(plot_features) == 4:
+        n_cols = 2
+        figsize = (8.6, 8.4)
+    else:
+        n_cols = min(3, max(1, len(plot_features)))
+        figsize = (12, 10) if len(plot_features) == len(FEATURE_NAMES) else (4.3 * n_cols, 4.2 * int(np.ceil(len(plot_features) / n_cols)))
+    n_rows = int(np.ceil(len(plot_features) / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, constrained_layout=True)
     axes = np.asarray(axes).ravel()
 
-    for ax, feature in zip(axes, FEATURE_NAMES):
+    for ax, feature in zip(axes, plot_features):
         feature_data = data.loc[data["feature"].eq(feature)].sort_values("delta_active_minus_sham")
         sham = feature_data["sham_value"].to_numpy(dtype=np.float64)
         active = feature_data["active_value"].to_numpy(dtype=np.float64)
@@ -1065,7 +1220,7 @@ def _plot_gvs_feature_spaghetti(
         ax.tick_params(axis="both", labelsize=9)
         ax.grid(axis="y", color="0.9", lw=0.8)
 
-    for ax in axes[len(FEATURE_NAMES) :]:
+    for ax in axes[len(plot_features) :]:
         ax.set_axis_off()
 
     fig.suptitle(f"{active_gvs} vs {sham_code} {signal_label} signal features", fontsize=14)
@@ -1145,12 +1300,13 @@ def _plot_gvs_timecourse_delta_grid(
     random_state: int,
     n_bootstrap: int,
 ) -> None:
-    n_cols = 2
+    n_cols = 4
     n_rows = int(np.ceil(len(active_codes) / n_cols))
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(11.4, 4.7 * n_rows), constrained_layout=True)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5.7 * n_cols, 4.7 * n_rows), constrained_layout=True)
     axes = np.asarray(axes).ravel()
 
     for ax, active_gvs in zip(axes, active_codes):
+        active_label = _gvs_display_label(active_gvs)
         data = timecourse_pairs.loc[timecourse_pairs["active_gvs"].eq(active_gvs)].copy()
         if data.empty:
             ax.set_axis_off()
@@ -1176,10 +1332,10 @@ def _plot_gvs_timecourse_delta_grid(
         mean_diff = np.nanmean(diff, axis=0)
         ax.axhline(0.0, color="0.35", lw=1)
         ax.fill_between(time, diff_low, diff_high, color="#7a7a7a", alpha=0.22, label="95% bootstrap CI")
-        ax.plot(time, mean_diff, color="black", lw=2.5, label=f"{active_gvs} minus sham")
-        ax.set_title("Paired difference by time point", fontsize=11)
+        ax.plot(time, mean_diff, color="black", lw=2.5, label=f"{active_label} minus sham")
+        ax.set_title(active_label, fontsize=11)
         ax.set_xlabel("Time index")
-        ax.set_ylabel(f"{active_gvs} minus sham")
+        ax.set_ylabel(f"{active_label} minus sham")
         ax.grid(color="0.9", lw=0.8)
         ax.legend(frameon=False, fontsize=9)
 
@@ -1191,29 +1347,126 @@ def _plot_gvs_timecourse_delta_grid(
     plt.close(fig)
 
 
+def _plot_gvs_timecourse_original_grid(
+    timecourse_pairs: pd.DataFrame,
+    active_codes: list[str],
+    sham_code: str,
+    output_path: Path,
+    random_state: int,
+    n_bootstrap: int,
+    show_ci: bool = True,
+    change_from_t0: bool = False,
+    condition_order: list[str] | None = None,
+) -> None:
+    time_indices = sorted(
+        int(col[1:].split("_", 1)[0]) for col in timecourse_pairs.columns if col.startswith("t") and col.endswith("_active")
+    )
+    if not time_indices:
+        raise ValueError("No active timecourse columns were found")
+
+    time = np.asarray(time_indices, dtype=int)
+    n_cols = 3
+    n_rows = 3
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5.7 * n_cols, 4.7 * n_rows), constrained_layout=True)
+    axes = np.asarray(axes).ravel()
+
+    panels_by_code: dict[str, tuple[str, np.ndarray]] = {}
+    dedupe_cols = [col for col in ["subject", "session", "medication", "run"] if col in timecourse_pairs.columns]
+    sham_cols = [f"t{idx}_sham" for idx in time_indices]
+    if dedupe_cols:
+        sham_data = timecourse_pairs.drop_duplicates(dedupe_cols)
+    else:
+        sham_data = timecourse_pairs
+    panels_by_code[str(sham_code)] = (_gvs_display_label(sham_code), sham_data[sham_cols].to_numpy(dtype=np.float64))
+
+    for active_gvs in active_codes:
+        active_label = _gvs_display_label(active_gvs)
+        data = timecourse_pairs.loc[timecourse_pairs["active_gvs"].eq(active_gvs)].copy()
+        active_cols = [f"t{idx}_active" for idx in time_indices]
+        panels_by_code[str(active_gvs)] = (active_label, data[active_cols].to_numpy(dtype=np.float64))
+
+    default_order = [str(sham_code), *[str(code) for code in active_codes]]
+    if condition_order is None:
+        panel_order = default_order
+    else:
+        seen: set[str] = set()
+        panel_order = []
+        for code in [*condition_order, *default_order]:
+            code = str(code)
+            if code in panels_by_code and code not in seen:
+                panel_order.append(code)
+                seen.add(code)
+    panels = [panels_by_code[code] for code in panel_order]
+
+    y_label = "Change from t0" if change_from_t0 else "Original projection signal"
+    line_prefix = f"{'change from t0' if change_from_t0 else 'mean'}"
+
+    for panel_index, (ax, (label, values)) in enumerate(zip(axes, panels)):
+        if values.size == 0:
+            ax.set_axis_off()
+            continue
+
+        plot_values = values - values[:, [0]] if change_from_t0 else values
+
+        if show_ci:
+            rng = np.random.default_rng(random_state + panel_index)
+            if plot_values.shape[0] > 1 and n_bootstrap > 0:
+                sample_indices = rng.integers(0, plot_values.shape[0], size=(int(n_bootstrap), plot_values.shape[0]))
+                bootstrap_mean = np.nanmean(plot_values[sample_indices], axis=1)
+                low, high = np.nanpercentile(bootstrap_mean, [2.5, 97.5], axis=0)
+            else:
+                low = np.nanmean(plot_values, axis=0)
+                high = np.nanmean(plot_values, axis=0)
+            ax.fill_between(time, low, high, color="#7a7a7a", alpha=0.22, label="95% bootstrap CI")
+
+        mean_signal = np.nanmean(plot_values, axis=0)
+        if change_from_t0:
+            ax.axhline(0.0, color="0.55", lw=0.9)
+        ax.plot(time, mean_signal, color="black", lw=2.5, label=f"{label} {line_prefix}")
+        ax.set_title(label, fontsize=11)
+        ax.set_xlabel("Time index")
+        ax.set_ylabel(y_label)
+        ax.grid(color="0.9", lw=0.8)
+        ax.legend(frameon=False, fontsize=8)
+
+    for ax in axes[len(panels) :]:
+        ax.set_axis_off()
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=300)
+    plt.close(fig)
+
+
 def _plot_gvs_feature_q_heatmap(
     stats_df: pd.DataFrame,
     output_path: Path,
-    title: str = "GVS vs sham feature evidence (-log10 FDR q)",
+    title: str | None = "GVS vs sham feature evidence (-log10 FDR q)",
+    y_tick_labels: list[str] | None = None,
+    features: list[str] | None = None,
 ) -> None:
+    plot_features = features if features is not None else FEATURE_NAMES
     active_codes = sorted(stats_df["active_gvs"].unique())
+    if y_tick_labels is not None and len(y_tick_labels) != len(active_codes):
+        raise ValueError("y_tick_labels must match the number of active GVS conditions")
     q_matrix = (
         stats_df.pivot(index="active_gvs", columns="feature", values="q_perm_fdr")
-        .reindex(index=active_codes, columns=FEATURE_NAMES)
+        .reindex(index=active_codes, columns=plot_features)
         .to_numpy(dtype=np.float64)
     )
     p_matrix = (
         stats_df.pivot(index="active_gvs", columns="feature", values="p_perm")
-        .reindex(index=active_codes, columns=FEATURE_NAMES)
+        .reindex(index=active_codes, columns=plot_features)
         .to_numpy(dtype=np.float64)
     )
     score = -np.log10(np.clip(q_matrix, 1e-6, 1.0))
 
-    fig, ax = plt.subplots(figsize=(12, 5.2), constrained_layout=True)
+    fig_width = 12 if len(plot_features) == len(FEATURE_NAMES) else max(8.2, 1.6 * len(plot_features) + 2.4)
+    fig, ax = plt.subplots(figsize=(fig_width, 5.2), constrained_layout=True)
     image = ax.imshow(score, aspect="auto", cmap="viridis", vmin=0.0, vmax=max(2.0, float(np.nanmax(score))))
-    ax.set_xticks(np.arange(len(FEATURE_NAMES)), [FEATURE_LABELS[name] for name in FEATURE_NAMES], rotation=35, ha="right")
-    ax.set_yticks(np.arange(len(active_codes)), active_codes)
-    ax.set_title(title, fontsize=13)
+    ax.set_xticks(np.arange(len(plot_features)), [FEATURE_LABELS[name] for name in plot_features], rotation=35, ha="right")
+    ax.set_yticks(np.arange(len(active_codes)), y_tick_labels if y_tick_labels is not None else active_codes)
+    if title:
+        ax.set_title(title, fontsize=13)
     cbar = fig.colorbar(image, ax=ax)
     cbar.set_label("-log10(q)")
 
@@ -1251,7 +1504,9 @@ def _write_gvs_report(
         "Within each subject/session/run, each active GVS block is paired with that run's sham block.",
         "Run-level active-minus-sham deltas are averaged within subject before inference.",
         "Primary p-values are paired exact sign-flip permutation tests on subject mean deltas.",
-        "Feature q-values are Benjamini-Hochberg FDR corrections across all GVS-by-feature tests.",
+        "Feature q-values are Benjamini-Hochberg FDR corrections across all GVS-by-tested-feature tests.",
+        "Tested features: "
+        + ", ".join(FEATURE_LABELS[feature] for feature in feature_stats["feature"].drop_duplicates().astype(str).tolist()),
         "Time-point q-values are FDR corrections across all GVS-by-time-point tests.",
         "",
         "Input arrays:",
@@ -1299,7 +1554,27 @@ def _write_gvs_report(
 
 
 def _run_med_analysis(args: argparse.Namespace) -> None:
-    if args.task_map_bold_trials is None:
+    if args.active_bold_group is not None and args.task_map_bold_trials is not None:
+        raise ValueError("--active-bold-group and --task-map-bold-trials are mutually exclusive medication input sources")
+
+    if args.active_bold_group is not None:
+        full_trials, projection_metadata = _weighted_html_projection_from_active_bold(
+            args.active_bold_group,
+            args.active_flat_indices,
+            args.projection_weight_map,
+            args.projection_html_mask,
+            args.projection_voxel_chunk_size,
+        )
+        med_off = _session_trials_from_full_trials(full_trials, args.manifest, session=1)
+        med_on = _session_trials_from_full_trials(full_trials, args.manifest, session=2)
+        signal_label = "HTML-mask weighted BOLD"
+        input_note = (
+            f"{projection_metadata['active_bold']}; weights={projection_metadata['weight_map']}; "
+            f"html_mask={projection_metadata['html_mask']}; "
+            f"selected_active_voxels={projection_metadata['selected_active_voxels']}/"
+            f"{projection_metadata['html_selected_voxels']}"
+        )
+    elif args.task_map_bold_trials is None:
         med_off = _load_trials(args.med_off)
         med_on = _load_trials(args.med_on)
         signal_label = "projected BOLD"
@@ -1325,8 +1600,10 @@ def _run_med_analysis(args: argparse.Namespace) -> None:
     on_labels = _trial_labels_from_manifest(args.manifest, session=2, expected_rows=med_on.shape[0])
 
     trial_features = _make_trial_frame(med_off, med_on, off_labels, on_labels)
-    subject_features = _paired_subject_features(trial_features)
-    feature_stats = _feature_stats(subject_features, args.n_bootstrap, args.random_state)
+    all_subject_features = _paired_subject_features(trial_features)
+    all_feature_stats = _feature_stats(all_subject_features, args.n_bootstrap, args.random_state)
+    subject_features = _paired_subject_features(trial_features, MED_TEST_FEATURE_NAMES)
+    feature_stats = _feature_stats(subject_features, args.n_bootstrap, args.random_state, MED_TEST_FEATURE_NAMES)
     off_subject, on_subject = _subject_timecourses(med_off, med_on, off_labels, on_labels)
     timepoint_stats = _timepoint_stats(off_subject, on_subject)
 
@@ -1339,7 +1616,40 @@ def _run_med_analysis(args: argparse.Namespace) -> None:
         feature_stats,
         args.out_dir / "signal_feature_spaghetti.png",
         signal_label=signal_label,
+        features=MED_TEST_FEATURE_NAMES,
     )
+    _plot_feature_spaghetti(
+        all_subject_features,
+        all_feature_stats,
+        args.out_dir / "signal_feature_spaghetti_all_features.png",
+        signal_label=signal_label,
+    )
+    all_significant_feature_names = [
+        feature
+        for feature in FEATURE_NAMES
+        if feature in set(all_feature_stats.loc[all_feature_stats["q_perm_fdr"].lt(0.05), "feature"])
+    ]
+    if all_significant_feature_names:
+        _plot_feature_spaghetti(
+            all_subject_features,
+            all_feature_stats,
+            args.out_dir / "signal_feature_spaghetti_all_features_significant.png",
+            signal_label=signal_label,
+            features=all_significant_feature_names,
+        )
+    significant_feature_names = [
+        feature
+        for feature in MED_TEST_FEATURE_NAMES
+        if feature in set(feature_stats.loc[feature_stats["q_perm_fdr"].lt(0.05), "feature"])
+    ]
+    if significant_feature_names:
+        _plot_feature_spaghetti(
+            subject_features,
+            feature_stats,
+            args.out_dir / "signal_feature_spaghetti_significant.png",
+            signal_label=signal_label,
+            features=significant_feature_names,
+        )
     _plot_timecourses(
         off_subject,
         on_subject,
@@ -1365,7 +1675,12 @@ def _run_med_analysis(args: argparse.Namespace) -> None:
         .dropna()
         .shape[0]
     )
-    if args.task_map_bold_trials is None:
+    if args.active_bold_group is not None:
+        print(
+            f"Loaded {args.active_bold_group}, applied HTML-mask weighted projection, "
+            f"and split it into OFF {med_off.shape} and ON {med_on.shape} trial-by-time arrays using {args.manifest}."
+        )
+    elif args.task_map_bold_trials is None:
         print(f"Loaded OFF {med_off.shape} and ON {med_on.shape} trial-by-time arrays.")
     else:
         print(
@@ -1424,19 +1739,33 @@ def _run_gvs_analysis(args: argparse.Namespace) -> None:
         raise ValueError(f"Sham GVS code {args.gvs_sham} was not found in {args.gvs_dir}")
 
     run_features = _gvs_run_feature_means(feature_frame)
-    subject_pairs = _gvs_subject_feature_pairs(run_features, args.gvs_sham)
+    all_subject_pairs = _gvs_subject_feature_pairs(run_features, args.gvs_sham)
+    subject_pairs = _gvs_subject_feature_pairs(run_features, args.gvs_sham, GVS_TEST_FEATURE_NAMES)
+    all_feature_stats = _gvs_feature_stats(all_subject_pairs, args.n_bootstrap, args.random_state)
     feature_stats = _gvs_feature_stats(subject_pairs, args.n_bootstrap, args.random_state)
-    subject_run_feature_stats = _gvs_subject_run_feature_stats(run_features, args.gvs_sham)
+    all_subject_run_feature_stats = _gvs_subject_run_feature_stats(run_features, args.gvs_sham)
+    subject_run_feature_stats = _gvs_subject_run_feature_stats(run_features, args.gvs_sham, GVS_TEST_FEATURE_NAMES)
     timecourse_pairs = _gvs_subject_timecourse_pairs(signal_frame, args.gvs_sham)
     run_timecourse_pairs = _gvs_run_timecourse_pairs(signal_frame, args.gvs_sham)
     timepoint_stats = _gvs_timepoint_stats(timecourse_pairs)
+    rt_condition_orders = _gvs_condition_order_by_subject_from_rt(
+        args.gvs_rt_run_metrics,
+        args.gvs_rt_inventory,
+        args.gvs_rt_behaviour_column,
+    )
 
     args.gvs_out_dir.mkdir(parents=True, exist_ok=True)
     feature_frame.to_csv(args.gvs_out_dir / "gvs_trial_signal_features.csv", index=False)
     run_features.to_csv(args.gvs_out_dir / "gvs_run_signal_features.csv", index=False)
     subject_pairs.to_csv(args.gvs_out_dir / "gvs_vs_sham_subject_signal_feature_pairs.csv", index=False)
+    all_subject_pairs.to_csv(args.gvs_out_dir / "gvs_vs_sham_subject_signal_feature_pairs_all_features.csv", index=False)
     feature_stats.to_csv(args.gvs_out_dir / "gvs_vs_sham_signal_feature_stats.csv", index=False)
+    all_feature_stats.to_csv(args.gvs_out_dir / "gvs_vs_sham_signal_feature_stats_all_features.csv", index=False)
     subject_run_feature_stats.to_csv(args.gvs_out_dir / "gvs_vs_sham_subject_runlevel_feature_stats.csv", index=False)
+    all_subject_run_feature_stats.to_csv(
+        args.gvs_out_dir / "gvs_vs_sham_subject_runlevel_feature_stats_all_features.csv",
+        index=False,
+    )
     timecourse_pairs.to_csv(args.gvs_out_dir / "gvs_vs_sham_subject_timecourse_pairs.csv", index=False)
     timepoint_stats.to_csv(args.gvs_out_dir / "gvs_vs_sham_timepoint_stats.csv", index=False)
 
@@ -1449,6 +1778,15 @@ def _run_gvs_analysis(args: argparse.Namespace) -> None:
             active_code,
             args.gvs_sham,
             args.gvs_out_dir / f"signal_feature_spaghetti_{safe_code}_vs_sham.png",
+            signal_label=signal_label,
+            features=GVS_TEST_FEATURE_NAMES,
+        )
+        _plot_gvs_feature_spaghetti(
+            all_subject_pairs,
+            all_feature_stats,
+            active_code,
+            args.gvs_sham,
+            args.gvs_out_dir / f"signal_feature_spaghetti_{safe_code}_vs_sham_all_features.png",
             signal_label=signal_label,
         )
         _plot_gvs_timecourse_spaghetti(
@@ -1472,7 +1810,15 @@ def _run_gvs_analysis(args: argparse.Namespace) -> None:
     _plot_gvs_feature_q_heatmap(
         feature_stats,
         args.gvs_out_dir / "gvs_vs_sham_feature_q_heatmap.png",
-        title=f"GVS vs sham {signal_label} feature evidence (-log10 FDR q)",
+        title=None,
+        y_tick_labels=[f"gvs{idx + 1}" for idx in range(len(active_codes))],
+        features=GVS_TEST_FEATURE_NAMES,
+    )
+    _plot_gvs_feature_q_heatmap(
+        all_feature_stats,
+        args.gvs_out_dir / "gvs_vs_sham_feature_q_heatmap_all_features.png",
+        title=None,
+        y_tick_labels=[f"gvs{idx + 1}" for idx in range(len(active_codes))],
     )
     subject_heatmap_dir = args.gvs_out_dir / "subject_feature_q_heatmaps"
     for subject, subject_stats in subject_run_feature_stats.groupby("subject", sort=True):
@@ -1481,15 +1827,37 @@ def _run_gvs_analysis(args: argparse.Namespace) -> None:
             subject_stats,
             subject_heatmap_dir / f"gvs_vs_sham_feature_q_heatmap_{safe_subject}.png",
             title=f"{subject} run-paired GVS vs sham feature evidence (-log10 FDR q)",
+            features=GVS_TEST_FEATURE_NAMES,
+        )
+    for subject, subject_stats in all_subject_run_feature_stats.groupby("subject", sort=True):
+        safe_subject = _safe_name(str(subject))
+        _plot_gvs_feature_q_heatmap(
+            subject_stats,
+            subject_heatmap_dir / f"gvs_vs_sham_feature_q_heatmap_{safe_subject}_all_features.png",
+            title=f"{subject} run-paired GVS vs sham feature evidence (-log10 FDR q)",
         )
     for subject, subject_timecourse_pairs in run_timecourse_pairs.groupby("subject", sort=True):
         safe_subject = _safe_name(str(subject))
-        _plot_gvs_timecourse_delta_grid(
+        _plot_gvs_timecourse_original_grid(
             subject_timecourse_pairs,
             active_codes,
+            args.gvs_sham,
             subject_heatmap_dir / f"second_subplots_gvs_02_to_09_vs_sham_{safe_subject}.png",
             random_state=args.random_state,
             n_bootstrap=args.n_bootstrap,
+            show_ci=True,
+            change_from_t0=False,
+        )
+        _plot_gvs_timecourse_original_grid(
+            subject_timecourse_pairs,
+            active_codes,
+            args.gvs_sham,
+            subject_heatmap_dir / f"second_subplots_gvs_01_to_09_original_signal_no_ci_{safe_subject}.png",
+            random_state=args.random_state,
+            n_bootstrap=args.n_bootstrap,
+            show_ci=False,
+            change_from_t0=False,
+            condition_order=rt_condition_orders.get(str(subject)),
         )
     _write_gvs_report(
         args.gvs_out_dir / "gvs_vs_sham_signal_feature_report.txt",
@@ -1525,7 +1893,7 @@ def _run_gvs_analysis(args: argparse.Namespace) -> None:
     significant = feature_stats[feature_stats["q_perm_fdr"] < 0.05]
     print(f"Feature tests passing global FDR q < 0.05: {significant.shape[0]}")
     print(f"Wrote {subject_run_feature_stats['subject'].nunique()} per-subject feature q heatmaps to {subject_heatmap_dir}")
-    print(f"Wrote {run_timecourse_pairs['subject'].nunique()} per-subject timecourse delta grids to {subject_heatmap_dir}")
+    print(f"Wrote {run_timecourse_pairs['subject'].nunique()} per-subject raw CI and raw no-CI grids to {subject_heatmap_dir}")
     print(f"Wrote GVS outputs to {args.gvs_out_dir}")
 
 
@@ -1556,7 +1924,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Optional 3D voxel-by-trial-by-time active BOLD group array. "
-            "For GVS analysis this recomputes weighted projections using --projection-html-mask."
+            "For medication and GVS analyses this recomputes weighted projections using --projection-html-mask."
         ),
     )
     parser.add_argument("--active-flat-indices", type=Path, default=DEFAULT_ACTIVE_FLAT_INDICES)
@@ -1568,6 +1936,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gvs-dir", type=Path, default=DEFAULT_GVS_DIR)
     parser.add_argument("--gvs-sham", default=DEFAULT_GVS_SHAM)
     parser.add_argument("--gvs-out-dir", type=Path, default=DEFAULT_GVS_OUT_DIR)
+    parser.add_argument("--gvs-rt-run-metrics", type=Path, default=DEFAULT_GVS_RT_RUN_METRICS)
+    parser.add_argument("--gvs-rt-inventory", type=Path, default=DEFAULT_GVS_RT_INVENTORY)
+    parser.add_argument(
+        "--gvs-rt-behaviour-column",
+        type=int,
+        default=1,
+        help="Zero-based RT column for sorting GVS/sham panels in subject original-signal grids.",
+    )
     parser.add_argument("--n-bootstrap", type=int, default=10000)
     parser.add_argument("--random-state", type=int, default=0)
     return parser.parse_args()

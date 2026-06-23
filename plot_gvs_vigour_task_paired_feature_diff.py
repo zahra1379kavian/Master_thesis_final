@@ -67,6 +67,21 @@ FEATURE_LABELS = {
 }
 
 
+def heatmap_gvs_label(gvs_code: str) -> str:
+    code = str(gvs_code).strip().lower().replace("_", "-").replace(" ", "-")
+    if code in {"gvs-01", "sham"}:
+        return "sham"
+    if code.startswith("gvs-"):
+        try:
+            gvs_index = int(code.split("-", 1)[1])
+        except ValueError:
+            return str(gvs_code)
+        if gvs_index == 1:
+            return "sham"
+        return f"gvs{gvs_index - 1}"
+    return str(gvs_code)
+
+
 def fdr_bh(p_values: np.ndarray) -> np.ndarray:
     p = np.asarray(p_values, dtype=float)
     q = np.full(p.shape, np.nan, dtype=float)
@@ -147,6 +162,7 @@ def format_feature_hits(hits: pd.DataFrame, vigour_q_col: str) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "gvs": hits["active_gvs"],
+            "gvs_label": hits["active_gvs"].map(heatmap_gvs_label),
             "feature": hits["label_vigour"],
             "feature_id": hits["feature"],
             "vigour_mean_active_minus_sham": hits["mean_active_minus_sham_vigour"],
@@ -181,13 +197,13 @@ def rebuild_vigour_only_features() -> pd.DataFrame:
     )
 
     fdr_hits = merged.loc[
-        merged["q_within_gvs_fdr_vigour"].lt(0.05) & merged["q_perm_fdr_task"].ge(0.05)
+        merged["q_perm_fdr_vigour"].lt(0.05) & merged["q_perm_fdr_task"].ge(0.05)
     ].copy()
     fdr_hits = fdr_hits.sort_values(
-        ["q_within_gvs_fdr_vigour", "p_perm_vigour", "active_gvs", "feature"],
+        ["q_perm_fdr_vigour", "p_perm_vigour", "active_gvs", "feature"],
         kind="mergesort",
     )
-    fdr_out = format_feature_hits(fdr_hits, "q_within_gvs_fdr_vigour")
+    fdr_out = format_feature_hits(fdr_hits, "q_perm_fdr_vigour")
 
     nominal_hits = merged.loc[
         merged["p_perm_vigour"].lt(0.05) & merged["q_perm_fdr_task"].ge(0.05)
@@ -201,8 +217,8 @@ def rebuild_vigour_only_features() -> pd.DataFrame:
     outputs = {
         "vigour_only_fdr_significant_gvs_features": (
             fdr_out,
-            "Vigour-only within-GVS FDR-significant GVS-feature pairs",
-            "blue = vigour within-GVS q < 0.05 and task global q >= 0.05",
+            "Vigour-only heatmap FDR-significant GVS-feature pairs",
+            "blue = vigour heatmap q < 0.05 and task heatmap q >= 0.05",
         ),
         "vigour_only_significant_gvs_features": (
             nominal_out,
@@ -241,7 +257,7 @@ def plot_feature_matrix(features: pd.DataFrame, out_png: Path, title: str, crite
     ax.set_xticks(np.arange(len(FEATURE_ORDER)))
     ax.set_xticklabels([FEATURE_LABELS[name] for name in FEATURE_ORDER], rotation=35, ha="right")
     ax.set_yticks(np.arange(len(active_codes)))
-    ax.set_yticklabels(active_codes)
+    ax.set_yticklabels([heatmap_gvs_label(code) for code in active_codes])
     ax.set_xlabel("Feature", fontweight="bold")
     ax.set_ylabel("Active GVS condition", fontweight="bold")
     ax.set_title(
@@ -292,7 +308,8 @@ def plot_feature_table(features: pd.DataFrame, out_png: Path, title: str) -> Non
         task_delta=lambda df: df["task_mean_active_minus_sham"].map(lambda x: f"{x:.4g}" if np.isfinite(x) else ""),
         task_q=lambda df: df["task_q_perm_fdr"].map(lambda x: f"{x:.3g}" if np.isfinite(x) else ""),
     )
-    table_data = display[["gvs", "feature", "vigour_delta", "vigour_q", "task_delta", "task_q"]]
+    gvs_column = "gvs_label" if "gvs_label" in display.columns else "gvs"
+    table_data = display[[gvs_column, "feature", "vigour_delta", "vigour_q", "task_delta", "task_q"]]
     table_data.columns = ["GVS", "Feature", "Vigour delta", "Vigour q", "Task delta", "Task q"]
 
     fig, ax = plt.subplots(figsize=(10.2, max(1.8, 0.58 * len(table_data) + 1.1)))
@@ -368,6 +385,7 @@ def paired_stats(top: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         rows.append(
             {
                 "gvs": feature_row["gvs"],
+                "gvs_label": feature_row.get("gvs_label", heatmap_gvs_label(feature_row["gvs"])),
                 "feature": feature_row["feature_id"],
                 "label": feature_row["feature"],
                 "n_subjects": n,
@@ -447,7 +465,8 @@ def plot_bars(stats_df: pd.DataFrame, subjects: pd.DataFrame, out_png: Path) -> 
         sub = subjects.loc[
             (subjects["gvs"] == row.gvs) & (subjects["feature"] == row.feature)
         ].sort_values("subject")
-        title = f"{row.gvs.upper()}\n{row.label}"
+        gvs_label = getattr(row, "gvs_label", heatmap_gvs_label(row.gvs))
+        title = f"{gvs_label.upper()}\n{row.label}"
 
         ax = axes[0, col]
         means = np.array(
