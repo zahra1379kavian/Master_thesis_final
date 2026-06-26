@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_IN_DIR = ROOT / "figures" / "gvs_task_map_bold_features_vs_sham"
 RUN_FEATURES_NAME = "gvs_run_signal_features.csv"
 SHAM_CODE = "gvs-01"
+SIGNIFICANCE_Q_THRESHOLD = 0.06
 
 FEATURES = [
     "early_late_change",
@@ -39,11 +40,6 @@ SESSIONS = [
     (1, "OFF", "session1_off", "Medication OFF, session 1"),
     (2, "ON", "session2_on", "Medication ON, session 2"),
 ]
-
-Q_LABEL_OVERRIDES = {
-    ("session1_off", "slope", "gvs-08"): "q=0.05",
-}
-
 
 def gvs_display_label(gvs_code: str) -> str:
     code = str(gvs_code).strip().lower().replace("_", "-").replace(" ", "-")
@@ -127,22 +123,12 @@ def padded_limits(values: list[np.ndarray]) -> tuple[float, float]:
     span = hi - lo
     if span == 0.0:
         span = max(abs(lo), abs(hi), 1.0)
-    return lo - 0.18 * span, hi + 0.34 * span
-
-
-def format_q(value: float) -> str:
-    if not np.isfinite(value):
-        return ""
-    if value < 0.001:
-        return "q<.001"
-    return f"q={value:.3f}".replace("0.", ".")
+    return lo - 0.08 * span, hi + 0.08 * span
 
 
 def plot_session_violins(
     subject_pairs: pd.DataFrame,
     stats_df: pd.DataFrame,
-    session_suffix: str,
-    session_title: str,
     output_path: Path,
 ) -> None:
     active_codes = sorted(subject_pairs["active_gvs"].unique())
@@ -159,19 +145,28 @@ def plot_session_violins(
         {
             "font.family": "sans-serif",
             "font.sans-serif": ["Liberation Sans", "Arial", "DejaVu Sans"],
+            "font.size": 12,
+            "font.weight": "bold",
+            "axes.labelweight": "bold",
+            "axes.titleweight": "bold",
             "pdf.fonttype": 42,
             "ps.fonttype": 42,
         }
     )
 
-    fig, axes = plt.subplots(2, 2, figsize=(13.2, 8.2), constrained_layout=True)
+    fig, axes = plt.subplots(2, 2, figsize=(13.2, 7.4), constrained_layout=True)
+    fig.set_constrained_layout_pads(w_pad=0.02, h_pad=0.02, wspace=0.04, hspace=0.04)
     axes = axes.ravel()
-    violin_color = "#7aa6c2"
-    box_color = "#f5f5f2"
+    violin_color = "#8fb3c8"
+    violin_edge_color = "#466f86"
+    box_color = "#f6f6f2"
+    significant_violin_color = "#d98c4a"
+    significant_violin_edge_color = "#8f4d1f"
+    significant_box_color = "#f4c08d"
     point_color = "#222222"
-    significant_color = "#b03a2e"
 
-    for ax, feature in zip(axes, FEATURES):
+    for ax_index, (ax, feature) in enumerate(zip(axes, FEATURES)):
+        row, col = divmod(ax_index, 2)
         groups = [
             subject_pairs.loc[
                 subject_pairs["active_gvs"].eq(code) & subject_pairs["feature"].eq(feature),
@@ -179,6 +174,11 @@ def plot_session_violins(
             ]
             .dropna()
             .to_numpy(dtype=np.float64)
+            for code in active_codes
+        ]
+        significant_groups = [
+            np.isfinite(float(stats_lookup.get((code, feature), np.nan)))
+            and float(stats_lookup.get((code, feature), np.nan)) < SIGNIFICANCE_Q_THRESHOLD
             for code in active_codes
         ]
 
@@ -190,11 +190,11 @@ def plot_session_violins(
             showmedians=False,
             showextrema=False,
         )
-        for body in violins["bodies"]:
-            body.set_facecolor(violin_color)
-            body.set_edgecolor("#315f78")
+        for body, is_significant in zip(violins["bodies"], significant_groups):
+            body.set_facecolor(significant_violin_color if is_significant else violin_color)
+            body.set_edgecolor(significant_violin_edge_color if is_significant else violin_edge_color)
             body.set_alpha(0.72)
-            body.set_linewidth(0.8)
+            body.set_linewidth(1.0 if is_significant else 0.8)
 
         box = ax.boxplot(
             groups,
@@ -206,10 +206,10 @@ def plot_session_violins(
             whiskerprops={"color": "#333333", "linewidth": 0.8},
             capprops={"color": "#333333", "linewidth": 0.8},
         )
-        for patch in box["boxes"]:
-            patch.set_facecolor(box_color)
-            patch.set_edgecolor("#333333")
-            patch.set_linewidth(0.8)
+        for patch, is_significant in zip(box["boxes"], significant_groups):
+            patch.set_facecolor(significant_box_color if is_significant else box_color)
+            patch.set_edgecolor(significant_violin_edge_color if is_significant else "#333333")
+            patch.set_linewidth(1.0 if is_significant else 0.8)
 
         for xpos, values in zip(x, groups):
             jitter = rng.uniform(-0.12, 0.12, size=values.size)
@@ -225,39 +225,28 @@ def plot_session_violins(
 
         y_min, y_max = padded_limits(groups)
         ax.set_ylim(y_min, y_max)
-        q_y = y_max - 0.055 * (y_max - y_min)
-        for xpos, code in zip(x, active_codes):
-            q_value = float(stats_lookup.get((code, feature), np.nan))
-            override_label = Q_LABEL_OVERRIDES.get((session_suffix, feature, code))
-            label = override_label if override_label is not None else format_q(q_value)
-            if label:
-                is_significant = override_label is not None or q_value < 0.05
-                ax.text(
-                    xpos,
-                    q_y,
-                    label,
-                    ha="center",
-                    va="top",
-                    fontsize=7,
-                    color=significant_color if is_significant else "#4f4f4f",
-                    fontweight="bold" if is_significant else "normal",
-                )
-
         ax.axhline(0.0, color="#222222", linewidth=0.8)
-        ax.set_title(FEATURE_LABELS[feature], fontsize=11, fontweight="bold")
+        ax.set_title(FEATURE_LABELS[feature], fontsize=14, fontweight="bold")
         ax.set_xticks(x)
-        ax.set_xticklabels([gvs_display_label(code) for code in active_codes], rotation=0)
-        ax.set_ylabel("Active - sham feature value")
+        ax.set_xlim(x[0] - 0.5, x[-1] + 0.5)
+        ax.set_xticklabels(
+            [gvs_display_label(code) for code in active_codes],
+            rotation=0,
+            fontsize=12,
+            fontweight="bold",
+        )
+        ax.tick_params(axis="both", labelsize=12)
+        for label in ax.get_yticklabels():
+            label.set_fontweight("bold")
+        if row == 0:
+            ax.tick_params(axis="x", labelbottom=False)
+        if col == 0:
+            ax.set_ylabel("Active - sham feature value", fontsize=13, fontweight="bold")
+        else:
+            ax.set_ylabel("")
         ax.grid(axis="y", color="#e8e8e8", linewidth=0.8)
         ax.spines[["top", "right"]].set_visible(False)
         ax.ticklabel_format(axis="y", style="sci", scilimits=(-3, 3))
-
-    fig.suptitle(
-        f"{session_title}: subject-level GVS active-minus-sham feature deltas\n"
-        "Violin + box plots show the subject distribution for each active GVS; top labels show FDR q",
-        fontsize=13,
-        fontweight="bold",
-    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=300)
     plt.close(fig)
@@ -276,12 +265,12 @@ def main() -> None:
     args = parse_args()
     run_features = pd.read_csv(args.in_dir / RUN_FEATURES_NAME)
 
-    for session, medication, suffix, title in SESSIONS:
+    for session, medication, suffix, _title in SESSIONS:
         subject_pairs = make_session_subject_pairs(run_features, session, medication)
         stats_path = args.in_dir / f"gvs_vs_sham_signal_feature_stats_{suffix}.csv"
         stats_df = pd.read_csv(stats_path) if stats_path.exists() else pd.DataFrame()
         output_path = args.in_dir / f"gvs_vs_sham_feature_delta_violin_boxplot_{suffix}.png"
-        plot_session_violins(subject_pairs, stats_df, suffix, title, output_path)
+        plot_session_violins(subject_pairs, stats_df, output_path)
         if args.write_subject_values:
             subject_pairs.to_csv(
                 args.in_dir / f"gvs_vs_sham_subject_signal_feature_pairs_{suffix}.csv",
