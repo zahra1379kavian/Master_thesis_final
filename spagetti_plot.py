@@ -1356,6 +1356,7 @@ def _plot_gvs_timecourse_original_grid(
     n_bootstrap: int,
     show_ci: bool = True,
     change_from_t0: bool = False,
+    center_ci_by_subject: bool = False,
     condition_order: list[str] | None = None,
 ) -> None:
     time_indices = sorted(
@@ -1409,15 +1410,22 @@ def _plot_gvs_timecourse_original_grid(
         plot_values = values - values[:, [0]] if change_from_t0 else values
 
         if show_ci:
+            ci_values = plot_values
+            ci_label = "95% bootstrap CI"
+            if center_ci_by_subject and not change_from_t0:
+                row_means = np.nanmean(plot_values, axis=1, keepdims=True)
+                grand_mean = float(np.nanmean(plot_values))
+                ci_values = plot_values - row_means + grand_mean
+                ci_label = "95% bootstrap CI (centered)"
             rng = np.random.default_rng(random_state + panel_index)
-            if plot_values.shape[0] > 1 and n_bootstrap > 0:
-                sample_indices = rng.integers(0, plot_values.shape[0], size=(int(n_bootstrap), plot_values.shape[0]))
-                bootstrap_mean = np.nanmean(plot_values[sample_indices], axis=1)
+            if ci_values.shape[0] > 1 and n_bootstrap > 0:
+                sample_indices = rng.integers(0, ci_values.shape[0], size=(int(n_bootstrap), ci_values.shape[0]))
+                bootstrap_mean = np.nanmean(ci_values[sample_indices], axis=1)
                 low, high = np.nanpercentile(bootstrap_mean, [2.5, 97.5], axis=0)
             else:
-                low = np.nanmean(plot_values, axis=0)
-                high = np.nanmean(plot_values, axis=0)
-            ax.fill_between(time, low, high, color="#7a7a7a", alpha=0.22, label="95% bootstrap CI")
+                low = np.nanmean(ci_values, axis=0)
+                high = np.nanmean(ci_values, axis=0)
+            ax.fill_between(time, low, high, color="#7a7a7a", alpha=0.18, label=ci_label)
 
         mean_signal = np.nanmean(plot_values, axis=0)
         if change_from_t0:
@@ -1443,6 +1451,9 @@ def _plot_gvs_feature_q_heatmap(
     title: str | None = "GVS vs sham feature evidence (-log10 FDR q)",
     y_tick_labels: list[str] | None = None,
     features: list[str] | None = None,
+    q_label_overrides: dict[tuple[str, str], str] | None = None,
+    q_label_color_overrides: dict[tuple[str, str], str] | None = None,
+    show_p_values: bool = True,
 ) -> None:
     plot_features = features if features is not None else FEATURE_NAMES
     active_codes = sorted(stats_df["active_gvs"].unique())
@@ -1475,10 +1486,25 @@ def _plot_gvs_feature_q_heatmap(
             q_value = q_matrix[row, col]
             p_value = p_matrix[row, col]
             if np.isfinite(q_value):
-                text = f"q={q_value:.2g}\np={p_value:.2g}"
+                active_code = active_codes[row]
+                feature = plot_features[col]
+                q_text = (
+                    q_label_overrides.get((active_code, feature))
+                    if q_label_overrides is not None
+                    else None
+                )
+                if q_text is None:
+                    q_text = f"q={q_value:.2g}"
+                text = q_text if not show_p_values else f"{q_text}\np={p_value:.2g}"
                 red, green, blue, _ = image.cmap(image.norm(score[row, col]))
                 luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
-                text_color = "black" if luminance > 0.55 else "white"
+                text_color = (
+                    q_label_color_overrides.get((active_code, feature))
+                    if q_label_color_overrides is not None
+                    else None
+                )
+                if text_color is None:
+                    text_color = "black" if luminance > 0.55 else "white"
                 ax.text(col, row, text, ha="center", va="center", fontsize=7, color=text_color)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1820,6 +1846,25 @@ def _run_gvs_analysis(args: argparse.Namespace) -> None:
         title=None,
         y_tick_labels=[f"gvs{idx + 1}" for idx in range(len(active_codes))],
     )
+    for session, medication, suffix in ((1, "OFF", "session1_off"), (2, "ON", "session2_on")):
+        session_signal = signal_frame.loc[
+            signal_frame["session"].astype(int).eq(session)
+            & signal_frame["medication"].astype(str).str.upper().eq(medication)
+        ].copy()
+        if session_signal.empty:
+            continue
+        session_timecourse_pairs = _gvs_subject_timecourse_pairs(session_signal, args.gvs_sham)
+        _plot_gvs_timecourse_original_grid(
+            session_timecourse_pairs,
+            active_codes,
+            args.gvs_sham,
+            args.gvs_out_dir / f"original_signal_gvs_01_to_09_3x3_{suffix}.png",
+            random_state=args.random_state,
+            n_bootstrap=args.n_bootstrap,
+            show_ci=True,
+            change_from_t0=False,
+            center_ci_by_subject=True,
+        )
     subject_heatmap_dir = args.gvs_out_dir / "subject_feature_q_heatmaps"
     for subject, subject_stats in subject_run_feature_stats.groupby("subject", sort=True):
         safe_subject = _safe_name(str(subject))
