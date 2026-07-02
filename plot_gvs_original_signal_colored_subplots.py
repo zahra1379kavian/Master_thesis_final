@@ -242,7 +242,7 @@ def main() -> None:
         )
         trials_by_code = _gvs_trials_from_full_trials(full_trials, args.gvs_dir)
         _feature_frame, signal_frame, trials_by_code = _make_gvs_frames(args.gvs_dir, trials_by_code=trials_by_code)
-    y_label = "Projected signal (+offest)" if args.line_offset_step else "Projected signal"
+    y_label = "Projected signal (+offset)" if args.line_offset_step else "Projected signal"
     active_codes = sorted(code for code in trials_by_code if code != args.gvs_sham)
     panels = _session_lines(signal_frame, active_codes, args.gvs_sham)
     _plot_colored_session_subplots(
