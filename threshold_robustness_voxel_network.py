@@ -109,6 +109,10 @@ def _pct_label(percentile: float) -> str:
     return f"p{percentile:g}".replace(".", "p")
 
 
+def _pct_display_label(percentile: float) -> str:
+    return f"p{percentile:g}"
+
+
 def _bold_figure_text(fig: plt.Figure) -> None:
     for text in fig.findobj(match=Text):
         text.set_fontweight("bold")
@@ -574,7 +578,7 @@ def _plot_robustness(summary_df: pd.DataFrame, region_df: pd.DataFrame, out_base
         heat = np.log10(pivot.to_numpy(dtype=float) + 1.0)
         im = ax_heat.imshow(heat, aspect="auto", cmap="viridis", vmin=0)
         ax_heat.set_xticks(np.arange(pivot.shape[1]))
-        ax_heat.set_xticklabels(pivot.columns.tolist())
+        ax_heat.set_xticklabels([_pct_display_label(p) for p in summary_df["percentile"]])
         ax_heat.set_yticks(np.arange(pivot.shape[0]))
         ax_heat.set_yticklabels([_display_region_name(name) for name in pivot.index.tolist()])
         ax_heat.set_xlabel("Threshold")
