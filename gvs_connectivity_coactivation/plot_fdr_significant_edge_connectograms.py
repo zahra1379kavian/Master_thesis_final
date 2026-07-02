@@ -349,7 +349,7 @@ def plot_connectogram(df: pd.DataFrame, roi_order: list[str], path_base: Path, s
     sparse_edges = len(df) <= 30
 
     panels = [
-        (df.loc[df["mean"] > 0].copy(), plt.get_cmap("Oranges"), "Improved connectivity"),
+        (df.loc[df["mean"] > 0].copy(), plt.get_cmap("Oranges"), "Increased connectivity"),
         (df.loc[df["mean"] < 0].copy(), plt.get_cmap("Blues"), "Decreased connectivity"),
     ]
     fig = plt.figure(figsize=CONNECTOGRAM_FIGSIZE, facecolor="white")
