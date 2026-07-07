@@ -476,6 +476,22 @@ def _bold_figure_text(fig: plt.Figure) -> None:
         text.set_fontweight("bold")
 
 
+def _add_panel_labels(axes: np.ndarray | list[plt.Axes], labels: tuple[str, ...]) -> None:
+    for ax, label in zip(np.ravel(axes), labels):
+        ax.text(
+            -0.08,
+            1.04,
+            label,
+            transform=ax.transAxes,
+            ha="left",
+            va="bottom",
+            fontsize=24,
+            fontweight="bold",
+            color="black",
+            clip_on=False,
+        )
+
+
 def _plot_norm_diff_figure(
     output_png: Path,
     percentiles: np.ndarray,
@@ -523,7 +539,7 @@ def _plot_norm_diff_figure(
         axes[0].set_xticks(percentiles)
         axes[0].set_xticklabels([f"{int(p)}%" for p in percentiles])
         axes[0].set_xlabel("Variability percentile threshold")
-        axes[0].set_ylabel("Vigour/control fraction ratio")
+        axes[0].set_ylabel("Low-variability voxel fraction\n(vigour / control)")
         finite_ratios = ratios[np.isfinite(ratios)]
         if finite_ratios.size:
             ratio_min = min(1.0, float(np.min(finite_ratios)))
@@ -543,7 +559,7 @@ def _plot_norm_diff_figure(
             color=ci_color,
             alpha=0.24,
             linewidth=0,
-            label="Control mean interval",
+            label="95% Interval",
         )
         axes[1].hist(
             resampled_means,
@@ -568,7 +584,7 @@ def _plot_norm_diff_figure(
             linewidth=1.5,
             label="Control network mean",
         )
-        axes[1].set_xlabel("Consecutive trial variability")
+        axes[1].set_xlabel("Mean normalized consecutive-trial variability")
         axes[1].set_ylabel("Density")
         axes[1].set_xlim(
             min(selected_mean, float(np.min(resampled_means))) - 0.07,
@@ -581,12 +597,13 @@ def _plot_norm_diff_figure(
             facecolor="white",
             edgecolor="none",
             framealpha=0.78,
-            fontsize=12,
+            fontsize=11,
             loc="upper right",
             borderaxespad=0.35,
             handlelength=2.4,
         )
 
+        _add_panel_labels(axes, ("C", "D"))
         _bold_figure_text(fig)
         fig.tight_layout(w_pad=2.0)
         output_png.parent.mkdir(parents=True, exist_ok=True)

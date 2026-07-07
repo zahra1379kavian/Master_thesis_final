@@ -625,6 +625,22 @@ def _save_pdf_and_png(fig: plt.Figure, pdf_path: Path, dpi: int) -> tuple[Path, 
     return pdf_path, png_path
 
 
+def _add_panel_labels(axes: np.ndarray | list[plt.Axes], labels: tuple[str, ...] = ("A", "B")) -> None:
+    for ax, label in zip(np.ravel(axes), labels):
+        ax.text(
+            -0.08,
+            1.04,
+            label,
+            transform=ax.transAxes,
+            ha="left",
+            va="bottom",
+            fontsize=24,
+            fontweight="bold",
+            color="black",
+            clip_on=False,
+        )
+
+
 def _subject_pairs_and_y_limits(metric_df: pd.DataFrame) -> tuple[pd.DataFrame, tuple[float, float]]:
     projection_col = "adjacent_diff_ratio_sum_projection"
     behavior_col = "adjacent_diff_ratio_sum_behavior_col2"
@@ -672,6 +688,7 @@ def _save_behavior_projection_figure(
         )
         _plot_paired_estimation(axes[0], subject_df, y_limits)
         _plot_behaviour_minus_projection(axes[1], subject_df)
+        _add_panel_labels(axes)
         _bold_figure_text(fig)
         fig.subplots_adjust(left=0.105, right=0.985, bottom=0.18, top=0.965, wspace=0.25)
         paths = _save_pdf_and_png(fig, out_dir / f"{figure_stem}.pdf", dpi=300)

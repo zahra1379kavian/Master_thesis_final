@@ -1972,12 +1972,11 @@ def _plot_intra_between_fc(subject_deltas, results, out_dir):
             zorder=4,
         )
 
-    for (label, ax) in zip(('A', 'B'), axes):
+    for ax in axes:
         ax.set_axisbelow(True)
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.tick_params(labelsize=AXIS_TICK_FONT_SIZE)
-        ax.text(-0.12, 1.04, label, transform=ax.transAxes, fontsize=TITLE_FONT_SIZE, fontweight='bold', ha='left', va='bottom')
     _apply_paper_typography(fig, axes)
     for text in fig.findobj(match=Text):
         text.set_fontweight('bold')

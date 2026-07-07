@@ -555,6 +555,16 @@ def _plot_robustness(summary_df: pd.DataFrame, region_df: pd.DataFrame, out_base
         top_width = (top_right - top_left - top_gap) / 2.0
         ax_vox.set_position([top_left, top_pos.y0, top_width, top_pos.height])
         ax_stable.set_position([top_left + top_width + top_gap, top_pos.y0, top_width, top_pos.height])
+        panel_label_kwargs = {
+            "fontsize": PAPER_TITLE_FONT_SIZE + 2,
+            "fontweight": "bold",
+            "ha": "left",
+            "va": "top",
+            "zorder": 10,
+        }
+        for label, ax in (("A", ax_vox), ("B", ax_stable), ("C", ax_heat)):
+            pos = ax.get_position()
+            fig.text(pos.x0 - 0.040, pos.y1 + 0.022, label, **panel_label_kwargs)
 
         ax_vox.plot(summary_df["percentile"], summary_df["n_voxels"], marker="o", color="#2563eb", linewidth=2.0)
         ax_vox.set_xticks(summary_df["percentile"].to_numpy())

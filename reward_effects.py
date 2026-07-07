@@ -530,7 +530,7 @@ def _save_subject_rt_bar_range_figure(subject_rt_stats: pd.DataFrame, out_dir: P
     subjects = subject_rt_stats["subject"].tolist()
     n_cols = 3
     n_rows = int(np.ceil(len(subjects) / n_cols))
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(10.4, 2.12 * n_rows), squeeze=False)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(10.4, 1.62 * n_rows), squeeze=False)
     low_color = "#9CA3AF"
     high_color = SUBJECT_FIGURE_COLOR
     x = np.array([0.0, 1.0])
@@ -553,9 +553,22 @@ def _save_subject_rt_bar_range_figure(subject_rt_stats: pd.DataFrame, out_dir: P
             zorder=2,
         )
         stars = "" if pd.isna(row["significance"]) else str(row["significance"])
+        lower = means - yerr
+        finite_y = np.concatenate([lower[np.isfinite(lower)], upper[np.isfinite(upper)]])
+        if finite_y.size:
+            y_min = float(np.min(finite_y))
+            y_max = float(np.max(finite_y))
+            y_span = y_max - y_min
+        else:
+            y_min, y_max, y_span = 0.0, 1.0, 1.0
+        if y_span <= 0:
+            y_span = max(abs(y_max) * 0.04, 0.01)
+        bottom_pad = max(y_span * 0.16, 0.003)
+        top_pad = max(y_span * 0.20, 0.003)
+        ylim_top = y_max + top_pad
         if stars:
-            bracket_y = float(np.nanmax(upper)) * 1.08
-            tick = max(float(np.nanmax(upper)) * 0.02, 0.04)
+            bracket_y = y_max + max(y_span * 0.14, 0.003)
+            tick = max(y_span * 0.06, 0.0015)
             ax.plot(
                 [x[0], x[0], x[1], x[1]],
                 [bracket_y, bracket_y + tick, bracket_y + tick, bracket_y],
@@ -565,9 +578,8 @@ def _save_subject_rt_bar_range_figure(subject_rt_stats: pd.DataFrame, out_dir: P
             )
             star_y = bracket_y + tick * (0.55 if panel_index == 1 else 1.0)
             ax.text(np.mean(x), star_y, stars, ha="center", va="bottom", fontsize=15, fontweight="bold")
-        y_max = float(np.nanmax(upper))
-        top_scale = 1.32 if stars else 1.18
-        ax.set_ylim(0, y_max * top_scale if y_max > 0 else 1)
+            ylim_top = star_y + max(y_span * 0.35, 0.006)
+        ax.set_ylim(max(0.0, y_min - bottom_pad), ylim_top)
         ax.set_title(f"sub{panel_index:02d}", fontsize=14, fontweight="bold", pad=2)
         ax.set_xticks(x)
         ax.set_xticklabels(["Low", "High"], fontsize=13, fontweight="bold")
@@ -581,7 +593,7 @@ def _save_subject_rt_bar_range_figure(subject_rt_stats: pd.DataFrame, out_dir: P
     for ax in axes[:, 0]:
         ax.set_ylabel("RT (s)", fontsize=14, fontweight="bold")
     _bold_figure_text(fig)
-    fig.tight_layout(pad=0.4, h_pad=0.7, w_pad=1.0)
+    fig.tight_layout(pad=0.3, h_pad=0.32, w_pad=0.85)
     return _save_figure(fig, out_dir / "reward_rt_subject_bar_range", pad_inches=0.05)
 
 
