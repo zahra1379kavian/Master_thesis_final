@@ -31,6 +31,7 @@ DEFAULT_BEHAVIOUR_DIR = Path(
 DEFAULT_WEIGHT_MAP = ROOT / "data" / "voxel_weights_task1_bold0.6_beta0.6_smooth1.25_gamma1.5.nii.gz"
 DEFAULT_OUT_DIR = ROOT / "figures" / "projected_RT"
 DEFAULT_FIGURE_STEM = "projection_behavior_subject_panel(main)"
+DEFAULT_CORRELATION_FIGURE_STEM = "projection_behavior_subject_correlation_histogram"
 SESSION_FIGURE_SPECS = {
     1: "medication_off",
     2: "medication_on",
@@ -294,6 +295,23 @@ def _warn_unmatched_behaviour_runs(behaviour_dir: Path, projection_runs: list[di
             print(f"- {name}")
 
 
+def _pearsonr(x_values: np.ndarray, y_values: np.ndarray) -> tuple[float, int]:
+    x_values = np.asarray(x_values, dtype=np.float64)
+    y_values = np.asarray(y_values, dtype=np.float64)
+    keep = np.isfinite(x_values) & np.isfinite(y_values)
+    n_values = int(np.count_nonzero(keep))
+    if n_values < 3:
+        return np.nan, n_values
+
+    x_keep = x_values[keep]
+    y_keep = y_values[keep]
+    if np.ptp(x_keep) == 0 or np.ptp(y_keep) == 0:
+        return np.nan, n_values
+
+    result = stats.pearsonr(x_keep, y_keep)
+    return float(result.statistic), n_values
+
+
 def _build_run_metric_table(
     data_dir: Path,
     behaviour_dir: Path,
@@ -301,7 +319,7 @@ def _build_run_metric_table(
     projection_source: str,
     behaviour_column: int,
     bold_trial_reducer: str,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     runs = _discover_runs(data_dir, projection_source)
     _warn_unmatched_behaviour_runs(behaviour_dir, runs)
 
@@ -322,6 +340,9 @@ def _build_run_metric_table(
         raise FileNotFoundError(f"Missing datasets:\n{missing_lines}")
 
     rows = []
+    subject_projection_values: dict[str, list[np.ndarray]] = {}
+    subject_behaviour_values: dict[str, list[np.ndarray]] = {}
+    subject_run_keys: dict[str, set[tuple[int, int]]] = {}
     for item in runs:
         sub = str(item["sub"])
         ses = int(item["ses"])
@@ -340,6 +361,10 @@ def _build_run_metric_table(
         paired_finite = np.isfinite(projected_signal) & np.isfinite(behaviour_rt)
         projection_values = projected_signal[paired_finite]
         behaviour_values = behaviour_rt[paired_finite]
+        subject_projection_values.setdefault(sub, []).append(projection_values)
+        subject_behaviour_values.setdefault(sub, []).append(behaviour_values)
+        if projection_values.size:
+            subject_run_keys.setdefault(sub, set()).add((ses, run))
         projection_score, projection_pair_count = _adjacent_diff_ratio_sum(projection_values)
         behaviour_score, behaviour_pair_count = _adjacent_diff_ratio_sum(behaviour_values)
 
@@ -362,7 +387,29 @@ def _build_run_metric_table(
 
     if not rows:
         raise ValueError("No projection/behaviour metric rows were created.")
-    return pd.DataFrame(rows).sort_values(["sub_tag", "ses", "run"]).reset_index(drop=True)
+
+    subject_rows = []
+    for sub in sorted(subject_projection_values, key=_category_sort_key):
+        projection_values = np.concatenate(subject_projection_values[sub])
+        behaviour_values = np.concatenate(subject_behaviour_values[sub])
+        correlation, n_values = _pearsonr(projection_values, behaviour_values)
+        run_keys = subject_run_keys.get(sub, set())
+        subject_rows.append(
+            {
+                "sub_tag": sub,
+                "pearson_r_projection_behaviour": correlation,
+                "n_trials_paired_finite": n_values,
+                "n_sessions": len({ses for ses, _ in run_keys}),
+                "n_runs": len(run_keys),
+                "projection_source": projection_source,
+                "correlation_input": "paired_finite_undifferenced_trial_values",
+                "consecutive_trial_differencing": False,
+            }
+        )
+
+    run_metric_df = pd.DataFrame(rows).sort_values(["sub_tag", "ses", "run"]).reset_index(drop=True)
+    subject_correlation_df = pd.DataFrame(subject_rows)
+    return run_metric_df, subject_correlation_df
 
 
 def _mixedlm_projection_effect(paired_df: pd.DataFrame) -> dict[str, float]:
@@ -437,6 +484,129 @@ def _mean_ci(values: np.ndarray, confidence: float = 0.95) -> tuple[float, float
         return mean, mean, mean
     half_width = float(stats.t.ppf(0.5 + confidence / 2.0, finite_values.size - 1) * sem)
     return mean, mean - half_width, mean + half_width
+
+
+def _summarize_subject_correlations(subject_df: pd.DataFrame) -> pd.DataFrame:
+    correlations = subject_df["pearson_r_projection_behaviour"].to_numpy(dtype=np.float64)
+    correlations = correlations[np.isfinite(correlations)]
+    if correlations.size == 0:
+        raise ValueError("No finite subject-level projection/behaviour correlations were available.")
+
+    arithmetic_mean, arithmetic_ci_low, arithmetic_ci_high = _mean_ci(correlations)
+    clipped_correlations = np.clip(
+        correlations,
+        np.nextafter(-1.0, 0.0),
+        np.nextafter(1.0, 0.0),
+    )
+    fisher_z = np.arctanh(clipped_correlations)
+    fisher_mean_z, fisher_ci_low_z, fisher_ci_high_z = _mean_ci(fisher_z)
+    fisher_mean_r = float(np.tanh(fisher_mean_z))
+    fisher_ci_low_r = float(np.tanh(fisher_ci_low_z))
+    fisher_ci_high_r = float(np.tanh(fisher_ci_high_z))
+
+    t_statistic = np.nan
+    p_value = np.nan
+    if fisher_z.size > 1:
+        test = stats.ttest_1samp(fisher_z, popmean=0.0)
+        t_statistic = float(test.statistic)
+        p_value = float(test.pvalue)
+
+    return pd.DataFrame(
+        [
+            {
+                "n_subjects_total": int(subject_df.shape[0]),
+                "n_subjects_finite": int(correlations.size),
+                "arithmetic_mean_pearson_r": arithmetic_mean,
+                "arithmetic_mean_ci95_low": arithmetic_ci_low,
+                "arithmetic_mean_ci95_high": arithmetic_ci_high,
+                "median_pearson_r": float(np.median(correlations)),
+                "sd_pearson_r": float(np.std(correlations, ddof=1)) if correlations.size > 1 else np.nan,
+                "fisher_z_mean_backtransformed_r": fisher_mean_r,
+                "fisher_z_ci95_low_r": fisher_ci_low_r,
+                "fisher_z_ci95_high_r": fisher_ci_high_r,
+                "fisher_z_one_sample_t": t_statistic,
+                "fisher_z_one_sample_p_two_sided": p_value,
+                "arithmetic_ci_method": "two-sided t interval across subject Pearson r values",
+                "fisher_z_ci_method": "two-sided t interval across Fisher-z subject correlations",
+                "pooling_scope": "all paired trials pooled across available runs and sessions within subject",
+                "correlation_input": "paired_finite_undifferenced_trial_values",
+                "consecutive_trial_differencing": False,
+            }
+        ]
+    )
+
+
+def _save_subject_correlation_histogram(
+    subject_df: pd.DataFrame,
+    summary_df: pd.DataFrame,
+    out_dir: Path,
+    figure_stem: str = DEFAULT_CORRELATION_FIGURE_STEM,
+) -> tuple[Path, Path]:
+    correlations = subject_df["pearson_r_projection_behaviour"].to_numpy(dtype=np.float64)
+    correlations = correlations[np.isfinite(correlations)]
+    if correlations.size == 0:
+        raise ValueError("No finite subject-level correlations were available for the histogram.")
+
+    summary = summary_df.iloc[0]
+    arithmetic_mean = float(summary["arithmetic_mean_pearson_r"])
+    ci_low = float(summary["arithmetic_mean_ci95_low"])
+    ci_high = float(summary["arithmetic_mean_ci95_high"])
+    n_bins = max(5, min(10, int(np.ceil(np.sqrt(correlations.size)))))
+
+    limit_values = np.concatenate([correlations, [0.0, ci_low, ci_high]])
+    x_low, x_high = _expanded_limits(limit_values, pad_fraction=0.14)
+    x_low = max(-1.0, x_low)
+    x_high = min(1.0, x_high)
+
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": [PAPER_FONT_FAMILY, "Arial", "DejaVu Sans"],
+            "font.size": AXIS_TICK_FONT_SIZE,
+            "axes.labelsize": AXIS_TICK_FONT_SIZE,
+            "axes.titlesize": TITLE_FONT_SIZE,
+            "xtick.labelsize": AXIS_TICK_FONT_SIZE,
+            "ytick.labelsize": AXIS_TICK_FONT_SIZE,
+            "pdf.fonttype": 42,
+            "ps.fonttype": 42,
+        }
+    ):
+        fig, ax = plt.subplots(figsize=(7.2, 4.8))
+        ax.hist(
+            correlations,
+            bins=n_bins,
+            color="#4C78A8",
+            edgecolor="white",
+            linewidth=1.0,
+            alpha=0.88,
+        )
+        ax.axvspan(ci_low, ci_high, color="#D55E00", alpha=0.16, label="95% CI of arithmetic mean")
+        ax.axvline(arithmetic_mean, color="#D55E00", linewidth=2.0, label=f"Arithmetic mean r = {arithmetic_mean:.3f}")
+        ax.axvline(0.0, color="0.25", linestyle=(0, (4, 3)), linewidth=1.2, label="r = 0")
+        ax.set_xlim(x_low, x_high)
+        ax.set_xlabel("Pearson r (projected signal, behaviour)")
+        ax.set_ylabel("Number of subjects")
+        ax.set_title("Subject-wise projection–behaviour correlations\nUndifferenced paired trial-level values")
+        ax.grid(axis="y", linewidth=0.5, alpha=0.20)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.legend(frameon=False, fontsize=10, loc="upper left")
+        ax.text(
+            0.98,
+            0.96,
+            (
+                f"n = {correlations.size}\n"
+                f"Mean 95% CI [{ci_low:.3f}, {ci_high:.3f}]"
+            ),
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize=10.5,
+        )
+        fig.tight_layout()
+        paths = _save_pdf_and_png(fig, out_dir / f"{figure_stem}.pdf", dpi=300)
+        plt.close(fig)
+        return paths
 
 
 def _format_p_value(p_value: float) -> str:
@@ -751,7 +921,7 @@ def _save_session_first_subplot_comparison(metric_df: pd.DataFrame, out_dir: Pat
 def main() -> None:
     args = _parse_args()
     weights = _load_weights(args.weight_map)
-    metric_df = _build_run_metric_table(
+    metric_df, subject_correlation_df = _build_run_metric_table(
         data_dir=args.data_dir,
         behaviour_dir=args.behaviour_dir,
         weights=weights,
@@ -763,9 +933,27 @@ def main() -> None:
     args.out_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = args.out_dir / "projection_behavior_run_metrics.csv"
     metric_df.to_csv(metrics_path, index=False)
+    subject_correlations_path = args.out_dir / "projection_behavior_subject_correlations.csv"
+    subject_correlation_df.to_csv(subject_correlations_path, index=False)
+    correlation_summary_df = _summarize_subject_correlations(subject_correlation_df)
+    correlation_summary_df["projection_source"] = args.projection_source
+    correlation_summary_df["bold_trial_reducer"] = args.bold_trial_reducer
+    correlation_summary_df["behaviour_column_zero_based"] = args.behaviour_column
+    correlation_summary_df["behaviour_dir"] = str(args.behaviour_dir)
+    correlation_summary_path = args.out_dir / "projection_behavior_subject_correlation_summary.csv"
+    correlation_summary_df.to_csv(correlation_summary_path, index=False)
+    correlation_pdf_path, correlation_png_path = _save_subject_correlation_histogram(
+        subject_correlation_df,
+        correlation_summary_df,
+        args.out_dir,
+    )
     pdf_path, png_path = _save_behavior_projection_figure(metric_df, args.out_dir)
 
     print(f"Saved run metrics to {metrics_path}")
+    print(f"Saved subject correlations to {subject_correlations_path}")
+    print(f"Saved subject correlation summary to {correlation_summary_path}")
+    print(f"Saved subject correlation histogram to {correlation_png_path}")
+    print(f"Saved subject correlation histogram PDF to {correlation_pdf_path}")
     print(f"Saved paired variability figure to {png_path}")
     print(f"Saved paired variability PDF to {pdf_path}")
 
