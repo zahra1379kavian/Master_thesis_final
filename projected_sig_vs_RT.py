@@ -319,8 +319,17 @@ def _build_run_metric_table(
     projection_source: str,
     behaviour_column: int,
     bold_trial_reducer: str,
+    include_subjects: set[str] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     runs = _discover_runs(data_dir, projection_source)
+    if include_subjects is not None:
+        runs = [item for item in runs if str(item["sub"]) in include_subjects]
+        found_subjects = {str(item["sub"]) for item in runs}
+        missing_subjects = sorted(include_subjects - found_subjects, key=_category_sort_key)
+        if missing_subjects:
+            raise FileNotFoundError(
+                "No projection runs found for requested subjects: " + ", ".join(missing_subjects)
+            )
     _warn_unmatched_behaviour_runs(behaviour_dir, runs)
 
     missing = []
