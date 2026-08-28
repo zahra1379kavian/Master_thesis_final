@@ -152,7 +152,7 @@ def _plot_colored_session_subplots(
             )
             legend_handles.setdefault(label, handle)
 
-        ax.set_xlabel("Time index", fontsize=axis_label_fontsize, fontweight="bold")
+        ax.set_xlabel("Time (TR)", fontsize=axis_label_fontsize, fontweight="bold")
         ax.set_ylabel(
             y_label if panel_index == 0 else "",
             fontsize=axis_label_fontsize,
